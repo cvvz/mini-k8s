@@ -208,7 +208,10 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 - 单元测试：类型/校验/选择器/数量解析、调度插件、控制器纯函数、Docker 运行时（假 Docker HTTP）。
 - 组件集成测试：测试辅助程序启动真实 `bin/etcd`（不存在则跳过），在进程内运行 API Server，
   对存储、Watch、删除语义、控制器做黑盒验证。
-- 端到端测试：`MINI_E2E=1`，只在可重建的本项目集群上运行，按场景覆盖每个里程碑的能力。
+- 端到端测试：仿照 Kubernetes `test/e2e` 的 Ginkgo v2 + Gomega 套件（`test/e2e`），
+  `framework` 包提供 TestContext、按 spec 清理的 Framework、等待与诊断工具；用例按
+  `[sig-*]` 分包，破坏性用例带 `Disruptive` 标签并串行执行。**每个功能必须附带 e2e 用例**，
+  合入前在 WSL 中 `make e2e` 全绿。
 - 所有测试在 Linux（WSL2）执行：`go vet ./...`、`go test -race ./...`、`make e2e`。
 
 ## 12. 里程碑
@@ -217,7 +220,8 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 
 | # | 内容 |
 | --- | --- |
-| M0 | 工程基线：LF 换行、etcd 压缩、kubelet 仅在变化时写状态、修正 v1 缺陷、Linux 文档 |
+| M0 ✅ | 工程基线：LF 换行、etcd 压缩、kubelet 仅在变化时写状态、修正 v1 缺陷、Linux 文档 |
+| E2E ✅ | Ginkgo v2 e2e 框架，迁移全部 live 用例（22 个 spec） |
 | M1 | API 机制重构 + 所有组件迁移到 informer/workqueue；Namespace、Event、GC、优雅删除 |
 | M2 | Pod 与 kubelet：沙箱、多容器、init、重启策略、探针、资源、logs/exec |
 | M3 | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout` |

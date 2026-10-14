@@ -1,7 +1,7 @@
 GO ?= go
 GOARCH ?= $(shell $(GO) env GOHOSTARCH)
 
-.PHONY: build prepare-etcd test vet e2e
+.PHONY: build prepare-etcd test vet e2e e2e-quick
 build:
 	mkdir -p bin
 	$(GO) build -o bin/kk ./cmd/kk
@@ -32,6 +32,19 @@ test:
 vet:
 	$(GO) vet ./...
 
-# Mutates the running project cluster (scale, kill, restart, down/up); see README.
+# Ginkgo e2e suite against the running project cluster; see test/e2e/README.md.
+# E2E_LABELS is a Ginkgo label filter (e.g. '!Disruptive'), E2E_FOCUS a spec regex.
+E2E_ARGS := -ginkgo.v
+ifneq ($(E2E_LABELS),)
+E2E_ARGS += -ginkgo.label-filter='$(E2E_LABELS)'
+endif
+ifneq ($(E2E_FOCUS),)
+E2E_ARGS += -ginkgo.focus='$(E2E_FOCUS)'
+endif
+
 e2e:
-	MINI_E2E=1 $(GO) test ./internal/mini -run '^TestLiveCluster$$' -count=1 -v -timeout 5m
+	MINI_E2E=1 $(GO) test ./test/e2e -count=1 -timeout 30m -v -args $(E2E_ARGS)
+
+# Non-disruptive specs only: never restarts or stops cluster components.
+e2e-quick:
+	$(MAKE) e2e E2E_LABELS='!Disruptive'
