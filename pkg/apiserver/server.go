@@ -193,7 +193,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, info requestIn
 	q := r.URL.Query()
 	dryRun := q.Get("dryRun") == "All"
 	sub := info.subresource
-	if sub != "" && sub != "status" && !(info.res.Resource == scheme.Pods.Resource && (sub == "binding" || sub == "log")) {
+	if sub != "" && sub != "status" && !(info.res.Resource == scheme.Pods.Resource && (sub == "binding" || sub == "log" || sub == "exec")) {
 		writeError(w, newStatus(http.StatusNotFound, metav1.ReasonNotFound, "%s has no subresource %q", info.res.Resource, sub))
 		return
 	}
@@ -218,9 +218,11 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, info requestIn
 		s.handleCreate(w, r, info, dryRun)
 	case r.Method == http.MethodPost && sub == "binding":
 		s.handleBinding(w, r, info)
-	case r.Method == http.MethodPut && info.name != "" && sub != "binding" && sub != "log":
+	case r.Method == http.MethodPost && sub == "exec":
+		s.handleExec(w, r, info)
+	case r.Method == http.MethodPut && info.name != "" && sub != "binding" && sub != "log" && sub != "exec":
 		s.handleUpdate(w, r, info, dryRun)
-	case r.Method == http.MethodPatch && info.name != "" && sub != "binding" && sub != "log":
+	case r.Method == http.MethodPatch && info.name != "" && sub != "binding" && sub != "log" && sub != "exec":
 		s.handlePatch(w, r, info, dryRun)
 	case r.Method == http.MethodDelete && info.name != "" && sub == "":
 		s.handleDelete(w, r, info, dryRun)

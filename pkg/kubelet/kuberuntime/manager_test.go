@@ -33,6 +33,9 @@ type fakeCRI struct {
 	pulls      int
 	sandboxErr error
 	runs       int
+	stopDelay  time.Duration
+	execs      [][]string
+	execExit   int32
 	conditions []*runtimeapi.RuntimeCondition
 	stops      []string
 }
@@ -151,6 +154,7 @@ func (f *fakeCRI) StartContainer(_ context.Context, r *runtimeapi.StartContainer
 }
 
 func (f *fakeCRI) StopContainer(_ context.Context, r *runtimeapi.StopContainerRequest, _ ...grpc.CallOption) (*runtimeapi.StopContainerResponse, error) {
+	time.Sleep(f.stopDelay)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stops = append(f.stops, fmt.Sprintf("%s/%d", r.ContainerId, r.Timeout))
@@ -207,6 +211,24 @@ func (f *fakeCRI) PullImage(_ context.Context, r *runtimeapi.PullImageRequest, _
 	}
 	f.images[r.Image.Image] = true
 	return &runtimeapi.PullImageResponse{ImageRef: "sha256:" + r.Image.Image}, nil
+}
+
+func (f *fakeCRI) ExecSync(_ context.Context, r *runtimeapi.ExecSyncRequest, _ ...grpc.CallOption) (*runtimeapi.ExecSyncResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execs = append(f.execs, append([]string{r.ContainerId}, r.Cmd...))
+	return &runtimeapi.ExecSyncResponse{Stdout: []byte("out"), Stderr: []byte("err"), ExitCode: f.execExit}, nil
+}
+
+// exitContainer marks the running instance of the named container as exited.
+func (f *fakeCRI) exitContainer(name string, code int32) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.containers {
+		if c.state == runtimeapi.ContainerState_CONTAINER_RUNNING && c.cfg.Metadata.Name == name {
+			c.state, c.exit, c.finished = runtimeapi.ContainerState_CONTAINER_EXITED, code, time.Now().UnixNano()
+		}
+	}
 }
 
 // exit marks the running instance of the Pod's container as exited.

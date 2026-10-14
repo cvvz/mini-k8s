@@ -7,10 +7,12 @@ package kubelet
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -40,6 +42,7 @@ type Runtime interface {
 	KillPod(ctx context.Context, pod *corev1.Pod, grace int64) error
 	Cleanup(ctx context.Context, keep map[string]bool) error
 	Logs(ctx context.Context, pod *corev1.Pod, container string, o kuberuntime.LogOptions, w io.Writer) error
+	Exec(ctx context.Context, pod *corev1.Pod, container string, cmd []string, timeout time.Duration) (*corev1.PodExecResult, error)
 	Version(ctx context.Context) (string, error)
 	Status(ctx context.Context, sandboxImage string) kuberuntime.Readiness
 }
@@ -247,8 +250,13 @@ func equalStatus(a, b corev1.PodStatus) bool {
 
 // recordTransitions emits Events for container state changes.
 func (k *Kubelet) recordTransitions(pod *corev1.Pod, status *corev1.PodStatus) {
-	for _, cs := range status.ContainerStatuses {
-		prev := containerStatus(pod.Status.ContainerStatuses, cs.Name)
+	k.recordContainerTransitions(pod, pod.Status.InitContainerStatuses, status.InitContainerStatuses)
+	k.recordContainerTransitions(pod, pod.Status.ContainerStatuses, status.ContainerStatuses)
+}
+
+func (k *Kubelet) recordContainerTransitions(pod *corev1.Pod, before, after []corev1.ContainerStatus) {
+	for _, cs := range after {
+		prev := containerStatus(before, cs.Name)
 		switch {
 		case cs.State.Running != nil && (prev == nil || prev.State.Running == nil || prev.RestartCount != cs.RestartCount):
 			k.recorder.Eventf(pod, corev1.EventTypeNormal, "Started", "Started container %s", cs.Name)
@@ -276,8 +284,10 @@ func (k *Kubelet) terminate(ctx context.Context, pod *corev1.Pod) {
 	k.killing[pod.UID] = true
 	k.mu.Unlock()
 	if first {
-		for _, c := range pod.Spec.Containers {
-			k.recorder.Eventf(pod, corev1.EventTypeNormal, "Killing", "Stopping container %s (grace period %ds)", c.Name, grace)
+		for _, cs := range append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...) {
+			if cs.State.Running != nil {
+				k.recorder.Eventf(pod, corev1.EventTypeNormal, "Killing", "Stopping container %s (grace period %ds)", cs.Name, grace)
+			}
 		}
 	}
 	if err := k.runtime.KillPod(ctx, pod, grace); err != nil {
@@ -349,20 +359,31 @@ func (k *Kubelet) heartbeat(ctx context.Context) error {
 	return err
 }
 
-// Handler serves the kubelet API: /healthz and
-// /containerLogs/{namespace}/{pod}/{container}?follow=&tailLines=&previous=.
+// Exec timeouts: the default, and the most a request may ask for.
+const (
+	DefaultExecTimeout = time.Minute
+	MaxExecTimeout     = time.Hour
+)
+
+// Handler serves the kubelet API:
+//
+//	GET  /healthz
+//	GET  /containerLogs/{namespace}/{pod}/{container}?follow=&tailLines=&previous=
+//	POST /exec/{namespace}/{pod}/{container}?command=...&timeout=SECONDS
 func (k *Kubelet) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
 			_, _ = w.Write([]byte("ok"))
 			return
 		}
-		if r.Header.Get("Authorization") != "Bearer "+k.cfg.Token {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+k.cfg.Token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/containerLogs/"), "/")
-		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/containerLogs/") || len(parts) != 3 {
+		route, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		parts := strings.Split(rest, "/")
+		method := map[string]string{"containerLogs": http.MethodGet, "exec": http.MethodPost}[route]
+		if method == "" || r.Method != method || len(parts) != 3 {
 			http.NotFound(w, r)
 			return
 		}
@@ -372,6 +393,10 @@ func (k *Kubelet) Handler() http.Handler {
 			return
 		}
 		q := r.URL.Query()
+		if route == "exec" {
+			k.serveExec(w, r, pod, parts[2], q)
+			return
+		}
 		tail, _ := strconv.Atoi(q.Get("tailLines"))
 		opts := kuberuntime.LogOptions{Follow: q.Get("follow") == "true", TailLines: tail, Previous: q.Get("previous") == "true"}
 		w.Header().Set("Content-Type", "text/plain")
@@ -380,6 +405,22 @@ func (k *Kubelet) Handler() http.Handler {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		}
 	})
+}
+
+func (k *Kubelet) serveExec(w http.ResponseWriter, r *http.Request, pod *corev1.Pod, container string, q url.Values) {
+	timeout := DefaultExecTimeout
+	if s, err := strconv.Atoi(q.Get("timeout")); err == nil && s > 0 && s <= int(MaxExecTimeout/time.Second) {
+		timeout = time.Duration(s) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout+10*time.Second)
+	defer cancel()
+	res, err := k.runtime.Exec(ctx, pod, container, q["command"], timeout)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(res)
 }
 
 // containerStatus returns the status of the named container, if reported.

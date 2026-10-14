@@ -36,6 +36,38 @@ func CrashingContainer() Container {
 	return Container{Name: "crash", Image: DemoImage, Command: []string{"/mini"}, Args: []string{"e2e-crash-on-purpose"}}
 }
 
+// MiniContainer runs `/mini ARGS...` from the demo image, e.g.
+// MiniContainer("init", "sleep", "2s") or MiniContainer("idle", "pause").
+func MiniContainer(name string, args ...string) Container {
+	return Container{Name: name, Image: DemoImage, Command: []string{"/mini"}, Args: args}
+}
+
+// WithContainers replaces the containers of a Pod or Deployment template.
+func (o Object) WithContainers(cs ...Container) Object {
+	o.PodSpec()["containers"] = containerObjects(cs)
+	return o
+}
+
+// WithInitContainers sets the init containers of a Pod or Deployment template.
+func (o Object) WithInitContainers(cs ...Container) Object {
+	o.PodSpec()["initContainers"] = containerObjects(cs)
+	return o
+}
+
+// WithRestartPolicy sets the restart policy of a Pod or Deployment template.
+func (o Object) WithRestartPolicy(policy string) Object {
+	o.PodSpec()["restartPolicy"] = policy
+	return o
+}
+
+func containerObjects(cs []Container) []any {
+	out := make([]any, len(cs))
+	for i, c := range cs {
+		out[i] = c.object()
+	}
+	return out
+}
+
 func (c Container) object() map[string]any {
 	o := map[string]any{"name": c.Name, "image": c.Image}
 	if len(c.Command) > 0 {

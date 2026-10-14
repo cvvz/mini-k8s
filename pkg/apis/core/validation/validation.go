@@ -13,14 +13,38 @@ import (
 // ValidatePodSpec validates a Pod spec found at path.
 func ValidatePodSpec(path string, spec *corev1.PodSpec) []string {
 	var errs []string
-	if len(spec.Containers) != 1 {
-		errs = append(errs, path+".containers: Invalid value: exactly one container is supported")
+	if len(spec.Containers) == 0 {
+		errs = append(errs, path+".containers: Required value")
 	}
-	for i, c := range spec.Containers {
-		p := fmt.Sprintf("%s.containers[%d]", path, i)
+	switch spec.RestartPolicy {
+	case corev1.RestartPolicyAlways, corev1.RestartPolicyOnFailure, corev1.RestartPolicyNever:
+	default:
+		errs = append(errs, fmt.Sprintf(`%s.restartPolicy: Unsupported value: %q: supported values: "Always", "OnFailure", "Never"`, path, spec.RestartPolicy))
+	}
+	names := map[string]bool{}
+	errs = append(errs, validateContainers(path+".initContainers", spec.InitContainers, names)...)
+	errs = append(errs, validateContainers(path+".containers", spec.Containers, names)...)
+	if g := spec.TerminationGracePeriodSeconds; g != nil && *g < 0 {
+		errs = append(errs, path+".terminationGracePeriodSeconds: Invalid value: must be >= 0")
+	}
+	if spec.NodeName != "" && !validation.IsDNS1123Subdomain(spec.NodeName) {
+		errs = append(errs, path+".nodeName: Invalid value: must be a DNS subdomain")
+	}
+	return errs
+}
+
+// validateContainers validates a container list; names must be unique
+// across init and regular containers, so seen is shared between the calls.
+func validateContainers(path string, containers []corev1.Container, seen map[string]bool) []string {
+	var errs []string
+	for i, c := range containers {
+		p := fmt.Sprintf("%s[%d]", path, i)
 		if !validation.IsDNS1123Label(c.Name) {
 			errs = append(errs, p+".name: Invalid value: must be a DNS label")
+		} else if seen[c.Name] {
+			errs = append(errs, fmt.Sprintf("%s.name: Duplicate value: %q", p, c.Name))
 		}
+		seen[c.Name] = true
 		if c.Image == "" {
 			errs = append(errs, p+".image: Required value")
 		}
@@ -37,12 +61,6 @@ func ValidatePodSpec(path string, spec *corev1.PodSpec) []string {
 				errs = append(errs, p+".ports: Unsupported value: only TCP is supported")
 			}
 		}
-	}
-	if g := spec.TerminationGracePeriodSeconds; g != nil && *g < 0 {
-		errs = append(errs, path+".terminationGracePeriodSeconds: Invalid value: must be >= 0")
-	}
-	if spec.NodeName != "" && !validation.IsDNS1123Subdomain(spec.NodeName) {
-		errs = append(errs, path+".nodeName: Invalid value: must be a DNS subdomain")
 	}
 	return errs
 }

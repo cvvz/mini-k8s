@@ -2,6 +2,7 @@
 package validation
 
 import (
+	"fmt"
 	"reflect"
 
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
@@ -18,7 +19,11 @@ func ValidateDeployment(d *appsv1.Deployment) []string {
 		errs = append(errs, "spec.replicas: Invalid value: must be greater than or equal to 0")
 	}
 	errs = append(errs, ValidateSelectorMatchesTemplate("spec", d.Spec.Selector, &d.Spec.Template)...)
-	return append(errs, corevalidation.ValidatePodSpec("spec.template.spec", &d.Spec.Template.Spec)...)
+	errs = append(errs, corevalidation.ValidatePodSpec("spec.template.spec", &d.Spec.Template.Spec)...)
+	if p := d.Spec.Template.Spec.RestartPolicy; p != corev1.RestartPolicyAlways {
+		errs = append(errs, fmt.Sprintf(`spec.template.spec.restartPolicy: Unsupported value: %q: supported values: "Always"`, p))
+	}
+	return errs
 }
 
 // ValidateDeploymentUpdate rejects changes to immutable fields.

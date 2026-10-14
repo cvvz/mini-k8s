@@ -13,54 +13,160 @@ import (
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 )
 
-// SyncPod drives the Pod towards running and returns the observed status.
-// Runtime failures are reported in the status, never hidden. An exited
-// container is replaced by a new instance (attempt+1) after an exponential
-// backoff of 1s doubling to 30s; the previous instance is kept for logs.
+// SyncPod drives the Pod towards its desired state and returns the observed
+// status. Like the Kubernetes kubelet, it runs the init containers one after
+// another, each to successful completion, and then keeps the containers
+// running according to the restart policy. An exited container is replaced
+// by a new instance (attempt+1) after an exponential backoff of 1s doubling
+// to 30s; the previous instance is kept for logs. Runtime failures are
+// reported in the status, never hidden. A Pod that reached Succeeded or
+// Failed is not touched again except to stop its sandbox.
 func (m *Manager) SyncPod(ctx context.Context, pod *corev1.Pod) corev1.PodStatus {
-	c := pod.Spec.Containers[0]
-	cs := corev1.ContainerStatus{Name: c.Name, Image: c.Image}
-	prev := findStatus(pod.Status.ContainerStatuses, c.Name)
-	if prev != nil {
-		cs.RestartCount, cs.LastTerminationState = prev.RestartCount, prev.LastTerminationState
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		m.stopSandboxes(ctx, pod.UID)
+		return pod.Status
 	}
-	ip := ""
-	finish := func() corev1.PodStatus { return buildPodStatus(pod, cs, ip) }
-	waiting := func(reason string, err error) corev1.PodStatus {
-		cs.State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: err.Error()}}
-		return finish()
+	s := newPodState(pod)
+	if restartPolicy(pod) == corev1.RestartPolicyNever && s.ranBefore() && !m.hasReadySandbox(ctx, pod.UID) {
+		// The sandbox was lost (the node restarted) after containers ran. Like
+		// the kubelet, never start them again: the Pod fails.
+		s.loseUnfinished()
+		return s.status()
 	}
-
-	sandboxID, sandbox, podIP, err := m.ensureSandbox(ctx, pod)
+	sandboxID, sandbox, ip, err := m.ensureSandbox(ctx, pod)
 	if err != nil {
-		return waiting(ReasonCreatePodSandboxError, err)
+		s.waitAll(ReasonCreatePodSandboxError, err.Error())
+		return s.status()
 	}
-	ip = podIP
+	s.ip = ip
+	r := &podRun{m: m, ctx: ctx, pod: pod, sandboxID: sandboxID, sandbox: sandbox}
+	if r.containersStarted() {
+		// Init containers finished before any container was created in this
+		// sandbox; never re-run them (a transient runtime error must not send
+		// a running Pod back to initializing).
+		r.keepInitStatuses(s)
+	}
+	if s.initialized || r.runInitContainers(s) {
+		s.initialized = true
+		for i, c := range pod.Spec.Containers {
+			if r.step(c, &s.containers[i], restartContainer(restartPolicy(pod))) == outcomeRunning {
+				s.containers[i].Ready = true
+			}
+		}
+	}
+	return s.status()
+}
+
+// podRun carries what one sync of a Pod needs to act on its containers.
+type podRun struct {
+	m         *Manager
+	ctx       context.Context
+	pod       *corev1.Pod
+	sandboxID string
+	sandbox   *runtimeapi.PodSandboxConfig
+}
+
+// outcome is a container's situation after one sync step.
+type outcome int
+
+const (
+	outcomeWaiting   outcome = iota // being created, pulled, backed off or failing to start
+	outcomeRunning                  // running
+	outcomeSucceeded                // exited 0 and will not be restarted
+	outcomeFailed                   // exited non-zero and will not be restarted
+)
+
+// restartPolicy returns the Pod's restart policy (Always when unset, for
+// Pods stored before the field existed).
+func restartPolicy(pod *corev1.Pod) string {
+	if pod.Spec.RestartPolicy == "" {
+		return corev1.RestartPolicyAlways
+	}
+	return pod.Spec.RestartPolicy
+}
+
+// restartContainer decides whether a container that exited with a code is
+// started again under policy.
+func restartContainer(policy string) func(int32) bool {
+	return func(code int32) bool {
+		switch policy {
+		case corev1.RestartPolicyNever:
+			return false
+		case corev1.RestartPolicyOnFailure:
+			return code != 0
+		}
+		return true
+	}
+}
+
+// runInitContainers advances the init containers and reports whether all of
+// them have completed. Init containers that failed are retried unless the
+// policy is Never, which fails the Pod.
+func (r *podRun) runInitContainers(s *podState) bool {
+	policy := restartPolicy(r.pod)
+	retry := func(code int32) bool { return code != 0 && policy != corev1.RestartPolicyNever }
+	for i, c := range r.pod.Spec.InitContainers {
+		switch r.step(c, &s.initContainers[i], retry) {
+		case outcomeSucceeded:
+			s.initContainers[i].Ready = true
+			continue
+		case outcomeFailed:
+			s.initFailed = true
+		}
+		for j := i + 1; j < len(s.initContainers); j++ {
+			s.initContainers[j].State = waitingState(ReasonPodInitializing, "")
+		}
+		for j := range s.containers {
+			if !s.finished(j) {
+				s.containers[j].State = waitingState(ReasonPodInitializing, "")
+			}
+			s.containers[j].Ready = false
+		}
+		return false
+	}
+	return true
+}
+
+// step observes one container in the current sandbox and acts on it: starts
+// it if it has no instance yet, and restarts it after an exit when restart
+// says so. It fills cs and returns the container's outcome.
+func (r *podRun) step(c corev1.Container, cs *corev1.ContainerStatus, restart func(int32) bool) outcome {
+	m, ctx, pod := r.m, r.ctx, r.pod
 	instances, err := m.containers(ctx, pod.UID, c.Name)
 	if err != nil {
-		return waiting(ReasonRunContainerError, err)
+		cs.State = waitingState(ReasonRunContainerError, err.Error())
+		return outcomeWaiting
 	}
 	next := uint32(0)
 	switch {
 	case len(instances) > 0:
 		next = instances[0].Metadata.GetAttempt() + 1
-	case prev != nil && prev.ContainerID != "":
-		next = uint32(prev.RestartCount) + 1 // the earlier sandbox and its containers are gone
+	case cs.ContainerID != "":
+		next = uint32(cs.RestartCount) + 1 // the earlier sandbox and its containers are gone
 	}
 	var current *runtimeapi.Container
 	for _, inst := range instances {
-		if inst.PodSandboxId == sandboxID {
+		if inst.PodSandboxId == r.sandboxID {
 			current = inst
 			break
 		}
 	}
 	key := pod.UID + "/" + c.Name
 	if current == nil {
-		return m.startNew(ctx, pod, c, sandboxID, sandbox, next, key, &cs, finish, waiting)
+		// A container that finished for good in an earlier sandbox (lost with
+		// the node) is not run again.
+		if t := cs.State.Terminated; t != nil && !restart(t.ExitCode) {
+			if t.ExitCode == 0 {
+				return outcomeSucceeded
+			}
+			return outcomeFailed
+		}
+		return r.start(c, cs, next, key)
 	}
 	st, err := m.runtime.ContainerStatus(ctx, &runtimeapi.ContainerStatusRequest{ContainerId: current.Id})
 	if err != nil {
-		return waiting(ReasonRunContainerError, err)
+		cs.State = waitingState(ReasonRunContainerError, err.Error())
+		return outcomeWaiting
 	}
 	status := st.GetStatus()
 	cs.ContainerID, cs.ImageID = "containerd://"+status.Id, status.ImageRef
@@ -68,53 +174,122 @@ func (m *Manager) SyncPod(ctx context.Context, pod *corev1.Pod) corev1.PodStatus
 	switch status.State {
 	case runtimeapi.ContainerState_CONTAINER_RUNNING:
 		cs.State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: nanoTime(status.StartedAt)}}
-		cs.Ready = true
 		// A container that stays up for a minute has recovered; forget its backoff.
 		if m.now().Sub(time.Unix(0, status.StartedAt)) >= time.Minute {
 			m.mu.Lock()
 			delete(m.restarts, key)
 			m.mu.Unlock()
 		}
-		return finish()
+		return outcomeRunning
 	case runtimeapi.ContainerState_CONTAINER_CREATED:
 		if _, err := m.runtime.StartContainer(ctx, &runtimeapi.StartContainerRequest{ContainerId: current.Id}); err != nil {
-			return waiting(ReasonRunContainerError, err)
+			cs.State = waitingState(ReasonRunContainerError, err.Error())
+		} else {
+			cs.State = waitingState(ReasonContainerCreating, "")
 		}
-		cs.State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: ReasonContainerCreating}}
-		return finish()
+		return outcomeWaiting
 	case runtimeapi.ContainerState_CONTAINER_EXITED:
-		cs.LastTerminationState = corev1.ContainerState{Terminated: terminated(status)}
+		term := terminated(status)
+		if !restart(status.ExitCode) {
+			cs.State = corev1.ContainerState{Terminated: term}
+			if status.ExitCode == 0 {
+				return outcomeSucceeded
+			}
+			return outcomeFailed
+		}
+		cs.LastTerminationState = corev1.ContainerState{Terminated: term}
 		m.mu.Lock()
 		b := m.restarts[key]
 		m.mu.Unlock()
 		if m.now().Before(b.next) {
-			delay := b.next.Sub(m.now()).Round(time.Second)
-			cs.State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: ReasonCrashLoopBackOff,
-				Message: fmt.Sprintf("back-off %s restarting failed container=%s pod=%s", delay, c.Name, pod.Name)}}
-			return finish()
+			// The message names the whole backoff period, as in Kubernetes, so
+			// it stays the same (and the status is not rewritten) while waiting.
+			cs.State = waitingState(ReasonCrashLoopBackOff,
+				fmt.Sprintf("back-off %s restarting failed container=%s pod=%s", b.delay, c.Name, pod.Name))
+			return outcomeWaiting
 		}
-		result := m.startNew(ctx, pod, c, sandboxID, sandbox, next, key, &cs, finish, waiting)
+		result := r.start(c, cs, next, key)
 		m.removeOlderThan(ctx, pod, c.Name, instances, next-1)
 		return result
-	default:
-		return waiting(ReasonRunContainerError, fmt.Errorf("container %s is in state %s", current.Id, status.State))
+	}
+	cs.State = waitingState(ReasonRunContainerError, fmt.Sprintf("container %s is in state %s", current.Id, status.State))
+	return outcomeWaiting
+}
+
+// containersStarted reports whether any regular container has an instance in
+// the current sandbox.
+func (r *podRun) containersStarted() bool {
+	resp, err := r.m.runtime.ListContainers(r.ctx, &runtimeapi.ListContainersRequest{
+		Filter: &runtimeapi.ContainerFilter{PodSandboxId: r.sandboxID}})
+	if err != nil {
+		return false
+	}
+	for _, inst := range resp.Containers {
+		for _, c := range r.pod.Spec.Containers {
+			if inst.Labels[LabelContainerName] == c.Name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// keepInitStatuses marks the Pod initialized and reports its init
+// containers as completed: from the runtime when their instances can be
+// read, else from the last reported status, else as plain completions.
+func (r *podRun) keepInitStatuses(s *podState) {
+	s.initialized = true
+	for i, c := range r.pod.Spec.InitContainers {
+		cs := &s.initContainers[i]
+		if st := r.currentStatus(c.Name); st != nil && st.State == runtimeapi.ContainerState_CONTAINER_EXITED {
+			cs.ContainerID, cs.ImageID = "containerd://"+st.Id, st.ImageRef
+			cs.RestartCount = int32(st.Metadata.GetAttempt())
+			cs.State, cs.Ready = corev1.ContainerState{Terminated: terminated(st)}, st.ExitCode == 0
+			continue
+		}
+		if p := findStatus(r.pod.Status.InitContainerStatuses, c.Name); p != nil && p.State.Terminated != nil && p.State.Terminated.ExitCode == 0 {
+			*cs = *p
+			continue
+		}
+		cs.State, cs.Ready = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Completed"}}, true
 	}
 }
 
-// startNew pulls the image if needed and starts instance `attempt` of c.
-func (m *Manager) startNew(ctx context.Context, pod *corev1.Pod, c corev1.Container, sandboxID string,
-	sandbox *runtimeapi.PodSandboxConfig, attempt uint32, key string, cs *corev1.ContainerStatus,
-	finish func() corev1.PodStatus, waiting func(string, error) corev1.PodStatus) corev1.PodStatus {
-	if inBackoff, err := m.ensureImage(ctx, c.Image, sandbox); err != nil {
-		if inBackoff {
-			return waiting(ReasonImagePullBackOff, err)
+// currentStatus returns the runtime status of the named container's instance
+// in the current sandbox, or nil.
+func (r *podRun) currentStatus(name string) *runtimeapi.ContainerStatus {
+	instances, err := r.m.containers(r.ctx, r.pod.UID, name)
+	if err != nil {
+		return nil
+	}
+	for _, inst := range instances {
+		if inst.PodSandboxId == r.sandboxID {
+			st, err := r.m.runtime.ContainerStatus(r.ctx, &runtimeapi.ContainerStatusRequest{ContainerId: inst.Id})
+			if err != nil {
+				return nil
+			}
+			return st.GetStatus()
 		}
-		return waiting(ReasonErrImagePull, err)
+	}
+	return nil
+}
+
+// start pulls the image if needed and starts instance `attempt` of c.
+func (r *podRun) start(c corev1.Container, cs *corev1.ContainerStatus, attempt uint32, key string) outcome {
+	m, ctx := r.m, r.ctx
+	if inBackoff, err := m.ensureImage(ctx, c.Image, r.sandbox); err != nil {
+		reason := ReasonErrImagePull
+		if inBackoff {
+			reason = ReasonImagePullBackOff
+		}
+		cs.State = waitingState(reason, err.Error())
+		return outcomeWaiting
 	}
 	created, err := m.runtime.CreateContainer(ctx, &runtimeapi.CreateContainerRequest{
-		PodSandboxId: sandboxID, Config: containerConfig(pod, c, attempt), SandboxConfig: sandbox})
+		PodSandboxId: r.sandboxID, Config: containerConfig(r.pod, c, attempt), SandboxConfig: r.sandbox})
 	if err != nil {
-		return waiting(ReasonCreateContainerError, err)
+		cs.State = waitingState(ReasonCreateContainerError, err.Error())
+		return outcomeWaiting
 	}
 	_, err = m.runtime.StartContainer(ctx, &runtimeapi.StartContainerRequest{ContainerId: created.ContainerId})
 	m.mu.Lock()
@@ -122,20 +297,26 @@ func (m *Manager) startNew(ctx context.Context, pod *corev1.Pod, c corev1.Contai
 	m.mu.Unlock()
 	cs.ContainerID, cs.RestartCount = "containerd://"+created.ContainerId, int32(attempt)
 	if err != nil {
-		return waiting(ReasonRunContainerError, err)
+		cs.State = waitingState(ReasonRunContainerError, err.Error())
+		return outcomeWaiting
 	}
 	st, err := m.runtime.ContainerStatus(ctx, &runtimeapi.ContainerStatusRequest{ContainerId: created.ContainerId})
 	if err != nil {
-		return waiting(ReasonRunContainerError, err)
+		cs.State = waitingState(ReasonRunContainerError, err.Error())
+		return outcomeWaiting
 	}
 	cs.ImageID = st.GetStatus().ImageRef
 	if st.GetStatus().State != runtimeapi.ContainerState_CONTAINER_RUNNING {
-		cs.State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: ReasonContainerCreating}}
-		return finish()
+		// Exited already or still starting: the next sync observes it.
+		cs.State = waitingState(ReasonContainerCreating, "")
+		return outcomeWaiting
 	}
 	cs.State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: nanoTime(st.GetStatus().StartedAt)}}
-	cs.Ready = true
-	return finish()
+	return outcomeRunning
+}
+
+func waitingState(reason, message string) corev1.ContainerState {
+	return corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: message}}
 }
 
 // removeOlderThan deletes instances before attempt keep and their log files;
@@ -214,6 +395,26 @@ func (m *Manager) removeSandbox(ctx context.Context, id string) error {
 	return err
 }
 
+// hasReadySandbox reports whether the Pod has a ready sandbox.
+func (m *Manager) hasReadySandbox(ctx context.Context, uid string) bool {
+	sandboxes, err := m.sandboxes(ctx, uid)
+	return err != nil || (len(sandboxes) > 0 && sandboxes[0].State == runtimeapi.PodSandboxState_SANDBOX_READY)
+}
+
+// stopSandboxes stops the ready sandboxes of a finished Pod, releasing its
+// network; its containers and logs stay until the Pod is deleted.
+func (m *Manager) stopSandboxes(ctx context.Context, uid string) {
+	sandboxes, err := m.sandboxes(ctx, uid)
+	if err != nil {
+		return
+	}
+	for _, sb := range sandboxes {
+		if sb.State == runtimeapi.PodSandboxState_SANDBOX_READY {
+			_, _ = m.runtime.StopPodSandbox(ctx, &runtimeapi.StopPodSandboxRequest{PodSandboxId: sb.Id})
+		}
+	}
+}
+
 // ensureImage pulls a missing image with per-image backoff. The bool reports
 // whether a backoff is in effect.
 func (m *Manager) ensureImage(ctx context.Context, image string, sandbox *runtimeapi.PodSandboxConfig) (bool, error) {
@@ -266,36 +467,4 @@ func terminated(st *runtimeapi.ContainerStatus) *corev1.ContainerStateTerminated
 		StartedAt: nanoTime(st.StartedAt), FinishedAt: nanoTime(st.FinishedAt),
 		ContainerID: "containerd://" + st.Id,
 	}
-}
-
-func findStatus(list []corev1.ContainerStatus, name string) *corev1.ContainerStatus {
-	for i := range list {
-		if list[i].Name == name {
-			return &list[i]
-		}
-	}
-	return nil
-}
-
-// buildPodStatus derives phase and conditions from the container status,
-// keeping condition transition times when nothing changed.
-func buildPodStatus(pod *corev1.Pod, cs corev1.ContainerStatus, ip string) corev1.PodStatus {
-	st := corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{cs}, StartTime: pod.Status.StartTime, PodIP: ip}
-	st.Conditions = append(st.Conditions, pod.Status.Conditions...)
-	if st.PodIP == "" {
-		st.PodIP = pod.Status.PodIP
-	}
-	st.Phase = corev1.PodPending
-	if cs.State.Running != nil || cs.LastTerminationState.Terminated != nil {
-		st.Phase = corev1.PodRunning
-	}
-	ready := corev1.ConditionFalse
-	if cs.Ready {
-		ready = corev1.ConditionTrue
-	}
-	now := metav1.Now()
-	st.SetCondition(corev1.PodCondition{Type: corev1.PodInitialized, Status: corev1.ConditionTrue, LastTransitionTime: now})
-	st.SetCondition(corev1.PodCondition{Type: corev1.ContainersReady, Status: ready, LastTransitionTime: now})
-	st.SetCondition(corev1.PodCondition{Type: corev1.PodReady, Status: ready, LastTransitionTime: now})
-	return st
 }

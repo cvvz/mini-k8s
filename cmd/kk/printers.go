@@ -73,45 +73,93 @@ func ageColumn() column {
 	return column{header: "AGE", value: func(o metav1.Object, now time.Time) string { return age(o.GetObjectMeta().CreationTimestamp, now) }}
 }
 
-// PodStatusReason summarises a Pod the way kubectl's STATUS column does.
-func PodStatusReason(p *corev1.Pod) string {
-	if p.DeletionTimestamp != nil {
-		return "Terminating"
-	}
+// podSummary computes kubectl's READY, STATUS and RESTARTS columns for a Pod
+// (printPod in Kubernetes): the first unfinished init container decides the
+// status while the Pod initializes; afterwards the containers do, and a
+// "Completed" container next to running or failed ones reads Running,
+// NotReady or the failure.
+func podSummary(p *corev1.Pod) (ready, status string, restarts int32) {
 	reason := p.Status.Phase
 	if p.Status.Reason != "" {
 		reason = p.Status.Reason
 	}
-	for _, cs := range p.Status.ContainerStatuses {
+	initializing := false
+	for i, cs := range p.Status.InitContainerStatuses {
+		restarts += cs.RestartCount
 		switch {
-		case cs.State.Waiting != nil && cs.State.Waiting.Reason != "":
-			reason = cs.State.Waiting.Reason
-		case cs.State.Terminated != nil && cs.State.Terminated.Reason != "":
-			reason = cs.State.Terminated.Reason
+		case cs.State.Terminated != nil && cs.State.Terminated.ExitCode == 0:
+			continue
+		case cs.State.Terminated != nil && cs.State.Terminated.Reason == "":
+			reason = fmt.Sprintf("Init:ExitCode:%d", cs.State.Terminated.ExitCode)
+		case cs.State.Terminated != nil:
+			reason = "Init:" + cs.State.Terminated.Reason
+		case cs.State.Waiting != nil && cs.State.Waiting.Reason != "" && cs.State.Waiting.Reason != "PodInitializing":
+			reason = "Init:" + cs.State.Waiting.Reason
+		default:
+			reason = fmt.Sprintf("Init:%d/%d", i, len(p.Spec.InitContainers))
+		}
+		initializing = true
+		break
+	}
+	readyCount := 0
+	if c := p.Status.Condition(corev1.PodInitialized); !initializing || (c != nil && c.Status == corev1.ConditionTrue) {
+		restarts = 0
+		running := false
+		errorReason := ""
+		for i := len(p.Status.ContainerStatuses) - 1; i >= 0; i-- {
+			cs := p.Status.ContainerStatuses[i]
+			restarts += cs.RestartCount
+			switch {
+			case cs.State.Waiting != nil && cs.State.Waiting.Reason != "":
+				reason = cs.State.Waiting.Reason
+			case cs.State.Terminated != nil:
+				reason = cs.State.Terminated.Reason
+				if reason == "" {
+					reason = fmt.Sprintf("ExitCode:%d", cs.State.Terminated.ExitCode)
+				}
+				if cs.State.Terminated.ExitCode != 0 {
+					errorReason = reason
+				}
+			case cs.Ready && cs.State.Running != nil:
+				running = true
+				readyCount++
+			}
+		}
+		if reason == "Completed" {
+			readyCond := p.Status.Condition(corev1.PodReady)
+			switch {
+			case running && readyCond != nil && readyCond.Status == corev1.ConditionTrue:
+				reason = corev1.PodRunning
+			case errorReason != "":
+				reason = errorReason
+			case running:
+				reason = "NotReady"
+			}
 		}
 	}
 	if reason == "" {
 		reason = corev1.PodPending
 	}
-	return reason
+	if p.DeletionTimestamp != nil && p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
+		reason = "Terminating"
+	}
+	return fmt.Sprintf("%d/%d", readyCount, len(p.Spec.Containers)), reason, restarts
+}
+
+// PodStatusReason summarises a Pod the way kubectl's STATUS column does.
+func PodStatusReason(p *corev1.Pod) string {
+	_, status, _ := podSummary(p)
+	return status
 }
 
 func podReadyCount(p *corev1.Pod) string {
-	ready := 0
-	for _, cs := range p.Status.ContainerStatuses {
-		if cs.Ready {
-			ready++
-		}
-	}
-	return fmt.Sprintf("%d/%d", ready, len(p.Spec.Containers))
+	ready, _, _ := podSummary(p)
+	return ready
 }
 
 func podRestarts(p *corev1.Pod) string {
-	n := int32(0)
-	for _, cs := range p.Status.ContainerStatuses {
-		n += cs.RestartCount
-	}
-	return fmt.Sprint(n)
+	_, _, restarts := podSummary(p)
+	return fmt.Sprint(restarts)
 }
 
 func orNone(s string) string {

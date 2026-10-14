@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ const Version = "v2.0.0-mini"
 type app struct {
 	client        *client.Client
 	out           io.Writer
+	errOut        io.Writer
 	in            io.Reader
 	namespace     string
 	explicitNS    bool
@@ -35,7 +37,7 @@ type app struct {
 
 func newApp(c *client.Client, out io.Writer, in io.Reader, a args) *app {
 	return &app{
-		client: c, out: out, in: in,
+		client: c, out: out, errOut: os.Stderr, in: in,
 		namespace: a.value("namespace", corev1.NamespaceDefault), explicitNS: len(a.values["namespace"]) > 0,
 		allNamespaces: a.boolean("all-namespaces", false), now: time.Now,
 	}
@@ -58,6 +60,8 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 		return a.delete(ctx, p)
 	case "logs":
 		return a.logs(ctx, p)
+	case "exec":
+		return a.exec(ctx, p)
 	case "scale":
 		return a.scale(ctx, p)
 	case "api-resources":
@@ -488,8 +492,12 @@ func (a *app) logs(ctx context.Context, p args) error {
 		}
 		tail = n
 	}
+	container, err := a.defaultContainer(ctx, name, p.value("container", ""))
+	if err != nil {
+		return err
+	}
 	stream, err := a.client.PodLogs(ctx, a.namespace, name, client.LogOptions{
-		Container: p.value("container", ""), Follow: p.boolean("follow", false), TailLines: tail,
+		Container: container, Follow: p.boolean("follow", false), TailLines: tail,
 		Previous: p.boolean("previous", false)})
 	if err != nil {
 		return err
@@ -580,4 +588,56 @@ func (a *app) version(ctx context.Context) error {
 	}
 	_, err := fmt.Fprintf(a.out, "Server Version: %s\n", v.GitVersion)
 	return err
+}
+
+// exitCodeError carries the exit code of a command run with kk exec.
+type exitCodeError struct{ code int }
+
+func (e exitCodeError) Error() string {
+	return fmt.Sprintf("command terminated with exit code %d", e.code)
+}
+
+func (a *app) exec(ctx context.Context, p args) error {
+	if len(p.positional) != 1 || len(p.rest) == 0 {
+		return errors.New("usage: kk exec POD [-c CONTAINER] -- COMMAND [ARG...]")
+	}
+	name := strings.TrimPrefix(strings.TrimPrefix(p.positional[0], "pod/"), "pods/")
+	container, err := a.defaultContainer(ctx, name, p.value("container", ""))
+	if err != nil {
+		return err
+	}
+	res, err := a.client.PodExec(ctx, a.namespace, name, client.ExecOptions{Container: container, Command: p.rest})
+	if err != nil {
+		return err
+	}
+	if _, err := a.out.Write(res.Stdout); err != nil {
+		return err
+	}
+	if _, err := a.errOut.Write(res.Stderr); err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return exitCodeError{int(res.ExitCode)}
+	}
+	return nil
+}
+
+// defaultContainer returns the requested container or, like kubectl, the
+// first container of the Pod, announcing the choice when there are several.
+func (a *app) defaultContainer(ctx context.Context, pod, container string) (string, error) {
+	if container != "" {
+		return container, nil
+	}
+	p, err := client.Pods(a.client, a.namespace).Get(ctx, pod)
+	if err != nil {
+		return "", err
+	}
+	if len(p.Spec.Containers) > 1 {
+		names := make([]string, len(p.Spec.Containers))
+		for i, c := range p.Spec.Containers {
+			names[i] = c.Name
+		}
+		fmt.Fprintf(a.errOut, "Defaulted container %q out of: %s\n", names[0], strings.Join(names, ", "))
+	}
+	return p.Spec.Containers[0].Name, nil
 }
