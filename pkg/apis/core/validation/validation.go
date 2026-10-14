@@ -4,6 +4,7 @@ package validation
 
 import (
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 
@@ -113,9 +114,7 @@ func validateContainers(path string, containers []corev1.Container, seen map[str
 			if port.ContainerPort < 1 || port.ContainerPort > 65535 {
 				errs = append(errs, p+".ports: Invalid value: containerPort must be 1-65535")
 			}
-			if port.Protocol != "TCP" {
-				errs = append(errs, p+".ports: Unsupported value: only TCP is supported")
-			}
+			errs = append(errs, validateProtocol(p+".ports.protocol", port.Protocol)...)
 		}
 		errs = append(errs, validateResources(p+".resources", c.Resources)...)
 		mountPaths := map[string]bool{}
@@ -269,23 +268,117 @@ func validatePort(path string, named bool, number int32, name string) []string {
 // ValidateServiceSpec validates a Service spec.
 func ValidateServiceSpec(spec *corev1.ServiceSpec) []string {
 	var errs []string
-	if len(spec.Selector) == 0 {
-		errs = append(errs, "spec.selector: Required value")
-	}
 	if err := labels.ValidateLabels(spec.Selector); err != nil {
 		errs = append(errs, "spec.selector: Invalid value: "+err.Error())
 	}
-	// Until ClusterIP networking lands, a Service is the single HTTP gateway
-	// published on 127.0.0.1:18080.
-	if len(spec.Ports) != 1 || spec.Ports[0].Port != 80 {
-		errs = append(errs, "spec.ports: Invalid value: exactly one port 80 is supported (the gateway is 127.0.0.1:18080)")
+	switch spec.Type {
+	case corev1.ServiceTypeClusterIP, corev1.ServiceTypeNodePort:
+	default:
+		errs = append(errs, fmt.Sprintf(`spec.type: Unsupported value: %q: supported values: "ClusterIP", "NodePort"`, spec.Type))
 	}
-	for _, p := range spec.Ports {
-		if p.TargetPort < 1 || p.TargetPort > 65535 {
-			errs = append(errs, "spec.ports.targetPort: Invalid value: must be 1-65535")
+	if spec.ClusterIP != "" && net.ParseIP(spec.ClusterIP).To4() == nil {
+		errs = append(errs, fmt.Sprintf("spec.clusterIP: Invalid value: %q: must be a valid IPv4 address", spec.ClusterIP))
+	}
+	switch spec.SessionAffinity {
+	case corev1.ServiceAffinityNone:
+		if spec.SessionAffinityConfig != nil {
+			errs = append(errs, "spec.sessionAffinityConfig: Invalid value: must not be set when sessionAffinity is None")
 		}
-		if p.Protocol != "TCP" {
-			errs = append(errs, "spec.ports.protocol: Unsupported value: only TCP is supported")
+	case corev1.ServiceAffinityClientIP:
+		if t := spec.SessionAffinityConfig.ClientIP.TimeoutSeconds; *t < 1 || *t > 86400 {
+			errs = append(errs, fmt.Sprintf("spec.sessionAffinityConfig.clientIP.timeoutSeconds: Invalid value: %d: must be greater than 0 and less than 86400", *t))
+		}
+	default:
+		errs = append(errs, fmt.Sprintf(`spec.sessionAffinity: Unsupported value: %q: supported values: "ClientIP", "None"`, spec.SessionAffinity))
+	}
+	if len(spec.Ports) == 0 {
+		errs = append(errs, "spec.ports: Required value")
+	}
+	names, ports, nodePorts := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for i, p := range spec.Ports {
+		path := fmt.Sprintf("spec.ports[%d]", i)
+		switch {
+		case p.Name == "" && len(spec.Ports) > 1:
+			errs = append(errs, path+".name: Required value")
+		case p.Name != "" && !validation.IsDNS1123Label(p.Name):
+			errs = append(errs, fmt.Sprintf("%s.name: Invalid value: %q: must be a DNS label", path, p.Name))
+		case names[p.Name]:
+			errs = append(errs, fmt.Sprintf("%s.name: Duplicate value: %q", path, p.Name))
+		}
+		names[p.Name] = true
+		errs = append(errs, validatePort(path+".port", false, p.Port, "")...)
+		errs = append(errs, validateProtocol(path+".protocol", p.Protocol)...)
+		errs = append(errs, validatePort(path+".targetPort", p.TargetPort.IsString, p.TargetPort.IntVal, p.TargetPort.StrVal)...)
+		if key := fmt.Sprintf("%d/%s", p.Port, p.Protocol); ports[key] {
+			errs = append(errs, fmt.Sprintf("%s: Duplicate value: %q", path, key))
+		} else {
+			ports[key] = true
+		}
+		if p.NodePort == 0 {
+			continue
+		}
+		if spec.Type != corev1.ServiceTypeNodePort {
+			errs = append(errs, fmt.Sprintf("%s.nodePort: Forbidden: may not be used when `type` is '%s'", path, spec.Type))
+		}
+		if key := fmt.Sprintf("%d/%s", p.NodePort, p.Protocol); nodePorts[key] {
+			errs = append(errs, fmt.Sprintf("%s.nodePort: Duplicate value: %q", path, key))
+		} else {
+			nodePorts[key] = true
+		}
+	}
+	return errs
+}
+
+// ValidateServiceUpdate rejects changes to the cluster IP.
+func ValidateServiceUpdate(spec, old *corev1.ServiceSpec) []string {
+	if old.ClusterIP != "" && spec.ClusterIP != old.ClusterIP {
+		return []string{fmt.Sprintf("spec.clusterIP: Invalid value: %q: may not change once set", spec.ClusterIP)}
+	}
+	return nil
+}
+
+func validateProtocol(path, protocol string) []string {
+	if protocol != corev1.ProtocolTCP && protocol != corev1.ProtocolUDP {
+		return []string{fmt.Sprintf(`%s: Unsupported value: %q: supported values: "TCP", "UDP"`, path, protocol)}
+	}
+	return nil
+}
+
+// ValidateEndpoints validates Endpoints, which users may write for
+// Services without a selector.
+func ValidateEndpoints(e *corev1.Endpoints) []string {
+	var errs []string
+	for i, ss := range e.Subsets {
+		path := fmt.Sprintf("subsets[%d]", i)
+		if len(ss.Addresses) == 0 && len(ss.NotReadyAddresses) == 0 {
+			errs = append(errs, path+": Required value: must specify `addresses` or `notReadyAddresses`")
+		}
+		for _, group := range []struct {
+			field string
+			list  []corev1.EndpointAddress
+		}{{"addresses", ss.Addresses}, {"notReadyAddresses", ss.NotReadyAddresses}} {
+			for j, a := range group.list {
+				ap := fmt.Sprintf("%s.%s[%d]", path, group.field, j)
+				if net.ParseIP(a.IP).To4() == nil {
+					errs = append(errs, fmt.Sprintf("%s.ip: Invalid value: %q: must be a valid IPv4 address", ap, a.IP))
+				}
+				if a.Hostname != "" && !validation.IsDNS1123Label(a.Hostname) {
+					errs = append(errs, fmt.Sprintf("%s.hostname: Invalid value: %q: must be a DNS label", ap, a.Hostname))
+				}
+			}
+		}
+		if len(ss.Ports) == 0 {
+			errs = append(errs, path+".ports: Required value")
+		}
+		for j, p := range ss.Ports {
+			pp := fmt.Sprintf("%s.ports[%d]", path, j)
+			if p.Name == "" && len(ss.Ports) > 1 {
+				errs = append(errs, pp+".name: Required value")
+			} else if p.Name != "" && !validation.IsDNS1123Label(p.Name) {
+				errs = append(errs, fmt.Sprintf("%s.name: Invalid value: %q: must be a DNS label", pp, p.Name))
+			}
+			errs = append(errs, validatePort(pp+".port", false, p.Port, "")...)
+			errs = append(errs, validateProtocol(pp+".protocol", p.Protocol)...)
 		}
 	}
 	return errs

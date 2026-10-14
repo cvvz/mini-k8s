@@ -60,8 +60,9 @@ func newServerWithKubelet(t *testing.T) (*client.Client, *fakeKubelet) {
 	t.Cleanup(ks.Close)
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(ks.URL, "http://"))
 	kp, _ := strconv.Atoi(port)
-	s := apiserver.New(apiserver.Config{Strategies: registry.Strategies(), Store: etcd3.New(etcdtesting.URL(t)),
-		Token: "secret", Prefix: etcdtesting.Prefix(t), KubeletPort: kp})
+	store, prefix := etcd3.New(etcdtesting.URL(t)), etcdtesting.Prefix(t)
+	s := apiserver.New(apiserver.Config{Strategies: registry.New(store, prefix).Strategies, Store: store,
+		Token: "secret", Prefix: prefix, KubeletPort: kp})
 	if err := s.Bootstrap(context.Background()); err != nil {
 		t.Fatal(err)
 	}

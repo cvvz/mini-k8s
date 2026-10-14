@@ -288,7 +288,8 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M3c ✅ | Pod 与 kubelet：hostNetwork、emptyDir（磁盘与内存）/hostPath（[计划](../plans/2026-10-15-m3c-volumes-hostnetwork.md)） |
 | M4 ✅ | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system（落地记录见 §12.3） |
 | M5 ✅ | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout`（[计划](../plans/2026-10-15-m5-replicaset-rollout.md)） |
-| M6 | 网络：ClusterIP、Endpoints、iptables kube-proxy、DNS、NodePort、Headless、Ingress |
+| M6a ✅ | 网络：ClusterIP 与 NodePort（apiserver 分配）、Endpoints、iptables kube-proxy、Ingress 取代网关（落地记录见 §12.4） |
+| M6b | 集群 DNS、Headless、ExternalName、`kubernetes` Service |
 | M7 | 调度框架、节点租约与生命周期、污点驱逐、cordon/drain、worker 扩展 |
 | M8 | ConfigMap、Secret、卷、PVC/PV |
 | M9 | DaemonSet、Job、CronJob、StatefulSet |
@@ -305,7 +306,7 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
 | Deployment 直接拥有 Pod（`pod-template-hash` 标签），模板变化按 Recreate 替换 | M5 ReplicaSet + RollingUpdate（已替换） |
 | Pod 只允许单容器，kubelet 重启同一个容器 | M3 多容器与重启语义（M2/M3a 已替换） |
 | 控制面组件与网关由 Compose 直接启动，不在 API 中可见 | M4 控制面自托管 |
-| Service 仍是全局唯一的 HTTP 网关（准入保证），无 ClusterIP | M6 |
+| Service 仍是全局唯一的 HTTP 网关（准入保证），无 ClusterIP | M6a（已替换） |
 | 节点通过 Node status 的 Ready 条件每 5 秒心跳，消费者按 20 秒新鲜度判断就绪；无 Lease、无驱逐 | M7 |
 | 调度器只按 Pod 数选最少者，遵守 `spec.unschedulable` | M4 加入污点过滤，M7 调度框架 |
 
@@ -365,6 +366,29 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
   本身是 static Pod”形成死锁）。
 - **kk**：`kk delete` 按 UID 判断对象已删除（mirror Pod 会立即以同名重建）。
 
+### 12.4 M6a 落地记录
+
+按[实施计划](../plans/2026-10-15-m6a-services-kube-proxy-ingress.md)落地，相关 e2e（network、控制面、
+apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差异：
+
+- **分配**：与 kube-apiserver 相同，ClusterIP 与 NodePort 在写入 Service 时分配（Strategy 新增
+  `PrepareForUpdate`、`BeginCreate`/`BeginUpdate`、`AfterDelete` 钩子，写失败时回滚）；分配表是 etcd 中
+  CAS 更新的单个键（RangeAllocation 思路），动态分配避开“静态段”。repair 循环每分钟对账：补登在用值、
+  连续 3 轮未用的值才释放（不误伤进行中的创建），并为 M6 之前存储的 Service 补分配 ClusterIP。
+- **kube-proxy**：每个节点一个 static Pod（DaemonSet 在 M9），镜像 `mini-k8s-kube-proxy:local` 自带
+  iptables；容器新增 `securityContext.privileged/capabilities`。链名哈希、注释、概率均与 kube-proxy 相同
+  （单元测试用 kube-proxy 测试中的已知链名校验）。`iptables-restore --noflush` 整体重写自有链，30 秒全量
+  同步修复被外部删除的规则。无端点的 Service 在 filter 表 REJECT，连接立即被拒绝。
+- **hairpin**：Pod 经自己的 Service 访问自己时，br_netfilter 把 DNAT 后的帧从入端口发回，需要网桥端口开启
+  hairpin（mini-cni 已开启），并由 `KUBE-SEP-*` 的 `-s 自己` 规则做 SNAT。
+- **Ingress**：没有实现 IngressClass；控制器处理 `ingressClassName` 为空或 `mini` 的 Ingress。直接转发到
+  Endpoints（与 ingress-nginx 相同，不经 ClusterIP），状态写 `hostname: localhost`（与 kind 中的
+  ingress-nginx 相同）。网关与“单 Service”准入一并删除。
+- **NodePort**：与 kind 在 Linux 上相同，从宿主机经节点容器地址访问，不额外发布端口。
+- **节点故障**：Endpoints 控制器与 Kubernetes 一样不看节点状态；节点失联时 Pod 仍在 Endpoints 中，
+  直到 M7 的节点生命周期控制器把它们标为未就绪。
+- **Endpoints 而非 EndpointSlice**：kube-proxy 与 Ingress 控制器都消费 core/v1 Endpoints。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -381,7 +405,7 @@ kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
 | kubelet ↔ 运行时 | Docker Engine API（类 dockershim） | CRI gRPC → 节点内 containerd |
 | Pod 所在位置 | 宿主 Docker 上的平级容器 | 嵌套在节点容器内 |
 | Pod 网络 | 同一 Docker 网桥，Docker IPAM 分配 IP | `mini-cni`：每节点一个 Pod 网段，节点内网桥，跨节点 host-gw 路由，出网 MASQUERADE |
-| Service | 单一 HTTP 网关 | 每节点 kube-proxy（iptables，M6） |
+| Service | 单一 HTTP 网关 | 每节点 kube-proxy（iptables，M6a 已实现） |
 | 节点故障 | 停 kubelet 不影响 Pod | 停掉节点容器即真实宕机 |
 | 镜像 | 共享宿主镜像缓存 | `cluster up` 导入本地镜像；`kk image load` 导入用户镜像 |
 
@@ -457,14 +481,14 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 
 | 路径 | 内容 | 对应的 Kubernetes 位置 |
 | --- | --- | --- |
-| `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`kubelet`、`gateway`、`demo` | `cmd/kube-*`（及早期的 `hyperkube`） |
+| `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`node-init`（含 kubelet）、`kube-proxy`、`ingress-controller`、`demo` | `cmd/kube-*`（及早期的 `hyperkube`） |
 | `cmd/kk` | 命令行客户端与集群生命周期 | `kubectl`、`kind` |
-| `pkg/apis/{meta,core,apps}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
-| `pkg/apis/{core,apps}/validation` | 资源校验 | `pkg/apis/*/validation` |
+| `pkg/apis/{meta,core,apps,networking}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`networkingv1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
+| `pkg/apis/{core,apps,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
 | `pkg/labels`、`pkg/fields`、`pkg/watch` | 选择器与 watch 事件类型 | `apimachinery/pkg/{labels,fields,watch}` |
 | `pkg/scheme` | 资源注册表（REST 坐标、Kind、构造函数） | `runtime.Scheme`、`RESTMapper` |
 | `pkg/apiserver` | 通用 API 服务：路由、存储读写、删除语义、watch、子资源 | `k8s.io/apiserver` |
-| `pkg/registry/{core,apps}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器） | `pkg/registry/<group>/<resource>` |
+| `pkg/registry/{core,apps,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
 | `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
 | `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器 | `pkg/controller` |
@@ -472,7 +496,8 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns}` | 节点代理；CRI 客户端（沙箱、容器、日志）；节点本地 DNS 转发 | `pkg/kubelet`、`pkg/kubelet/kuberuntime`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |
 | `pkg/nodeinit` | 节点容器入口：cgroup 委派、containerd 配置与启动 | kind 的节点入口脚本 |
-| `pkg/gateway` | 单 Service 的 HTTP 网关（M6 由 kube-proxy 与 Ingress 取代） | 无直接对应 |
+| `pkg/proxy/iptables` | kube-proxy 的 iptables 模式 | `pkg/proxy/iptables` |
+| `pkg/ingress` | Ingress 控制器（取代 M6 之前的单 Service 网关） | 无直接对应（ingress-nginx 等外部项目） |
 | `pkg/util/{ptr,deepcopy,validation}` | 通用小工具 | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation` |
 | `test/e2e` | Ginkgo 端到端测试 | `test/e2e` |
 | `test/integration` | 真实 etcd + 进程内 API Server 的集成测试与框架 | `test/integration` |

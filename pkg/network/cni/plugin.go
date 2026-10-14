@@ -192,6 +192,9 @@ func (p Plugin) add(conf NetConf, a Args) (*Result, error) {
 	steps := [][]string{
 		{"link", "add", host, "type", "veth", "peer", "name", a.IfName, "netns", ns},
 		{"link", "set", host, "master", conf.Bridge, "up"},
+		// Hairpin lets a Pod reach itself through its Service's cluster IP:
+		// the DNATed packet leaves through the port it arrived on.
+		{"link", "set", host, "type", "bridge_slave", "hairpin", "on"},
 		{"-n", ns, "addr", "add", addr, "dev", a.IfName},
 		{"-n", ns, "link", "set", a.IfName, "up"},
 		{"-n", ns, "link", "set", "lo", "up"},

@@ -9,6 +9,7 @@ import (
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
+	networkingv1 "mini-k8s/pkg/apis/networking/v1"
 )
 
 // ResourceInfo describes one REST resource.
@@ -77,16 +78,20 @@ var (
 		ShortNames: []string{"po"}, HasStatus: true, New: func() metav1.Object { return &corev1.Pod{} }}
 	Services = ResourceInfo{Version: "v1", Resource: "services", Singular: "service", Kind: "Service", Namespaced: true,
 		ShortNames: []string{"svc"}, HasStatus: true, New: func() metav1.Object { return &corev1.Service{} }}
+	Endpoints = ResourceInfo{Version: "v1", Resource: "endpoints", Singular: "endpoints", Kind: "Endpoints", Namespaced: true,
+		ShortNames: []string{"ep"}, New: func() metav1.Object { return &corev1.Endpoints{} }}
 	Events = ResourceInfo{Version: "v1", Resource: "events", Singular: "event", Kind: "Event", Namespaced: true,
 		ShortNames: []string{"ev"}, New: func() metav1.Object { return &corev1.Event{} }}
 	Deployments = ResourceInfo{Group: "apps", Version: "v1", Resource: "deployments", Singular: "deployment", Kind: "Deployment",
 		Namespaced: true, ShortNames: []string{"deploy"}, HasStatus: true, New: func() metav1.Object { return &appsv1.Deployment{} }}
 	ReplicaSets = ResourceInfo{Group: "apps", Version: "v1", Resource: "replicasets", Singular: "replicaset", Kind: "ReplicaSet",
 		Namespaced: true, ShortNames: []string{"rs"}, HasStatus: true, New: func() metav1.Object { return &appsv1.ReplicaSet{} }}
+	Ingresses = ResourceInfo{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses", Singular: "ingress", Kind: "Ingress",
+		Namespaced: true, ShortNames: []string{"ing"}, HasStatus: true, New: func() metav1.Object { return &networkingv1.Ingress{} }}
 )
 
 // All lists every registered resource in discovery order.
-var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Events, Deployments, ReplicaSets}
+var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, Deployments, ReplicaSets, Ingresses}
 
 // Lookup resolves a user-supplied name: plural, singular, short name, kind
 // (case-insensitive) or "plural.group".

@@ -1,7 +1,7 @@
 // Command mini is a multi-call binary, like Kubernetes' former hyperkube:
 // its first argument selects the component to run.
 //
-//	mini kube-apiserver | kube-controller-manager | kube-scheduler | node-init | gateway
+//	mini kube-apiserver | kube-controller-manager | kube-scheduler | node-init | kube-proxy | ingress-controller
 //	mini demo | pause | fetch URL | sleep DURATION | cat FILE... | write FILE TEXT | alloc SIZE
 //
 // Invoked as mini-cni or loopback (through symlinks in /opt/cni/bin) it is
@@ -34,7 +34,8 @@ var components = map[string]component{
 	"kube-controller-manager": runControllerManager,
 	"kube-scheduler":          runScheduler,
 	"node-init":               runNodeInit,
-	"gateway":                 runGateway,
+	"kube-proxy":              runKubeProxy,
+	"ingress-controller":      runIngressController,
 }
 
 func usage() string {

@@ -3,6 +3,7 @@ package v1
 import (
 	"strings"
 
+	"mini-k8s/pkg/util/intstr"
 	"mini-k8s/pkg/util/ptr"
 )
 
@@ -117,15 +118,44 @@ func GetPodQOS(spec *PodSpec) string {
 	return PodQOSBurstable
 }
 
-// SetDefaultsServiceSpec fills omitted Service port fields.
+// SetDefaultsServiceSpec fills omitted Service fields as Kubernetes does.
 func SetDefaultsServiceSpec(spec *ServiceSpec) {
+	if spec.Type == "" {
+		spec.Type = ServiceTypeClusterIP
+	}
+	if spec.SessionAffinity == "" {
+		spec.SessionAffinity = ServiceAffinityNone
+	}
+	if spec.SessionAffinity == ServiceAffinityClientIP {
+		if spec.SessionAffinityConfig == nil {
+			spec.SessionAffinityConfig = &SessionAffinityConfig{}
+		}
+		if spec.SessionAffinityConfig.ClientIP == nil {
+			spec.SessionAffinityConfig.ClientIP = &ClientIPConfig{}
+		}
+		if spec.SessionAffinityConfig.ClientIP.TimeoutSeconds == nil {
+			t := DefaultClientIPServiceAffinitySeconds
+			spec.SessionAffinityConfig.ClientIP.TimeoutSeconds = &t
+		}
+	}
 	for i := range spec.Ports {
 		p := &spec.Ports[i]
 		if p.Protocol == "" {
-			p.Protocol = "TCP"
+			p.Protocol = ProtocolTCP
 		}
-		if p.TargetPort == 0 {
-			p.TargetPort = p.Port
+		if !p.TargetPort.IsString && p.TargetPort.IntVal == 0 {
+			p.TargetPort = intstr.FromInt(int(p.Port))
+		}
+	}
+}
+
+// SetDefaultsEndpoints fills omitted port protocols.
+func SetDefaultsEndpoints(e *Endpoints) {
+	for i := range e.Subsets {
+		for j := range e.Subsets[i].Ports {
+			if e.Subsets[i].Ports[j].Protocol == "" {
+				e.Subsets[i].Ports[j].Protocol = ProtocolTCP
+			}
 		}
 	}
 }

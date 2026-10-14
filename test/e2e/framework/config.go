@@ -15,9 +15,10 @@ import (
 
 // TestContextType holds suite-wide settings resolved once before any spec runs.
 type TestContextType struct {
-	RepoRoot   string
-	APIURL     string
-	GatewayURL string
+	RepoRoot string
+	APIURL   string
+	// IngressURL is where the Ingress controller listens.
+	IngressURL string
 	Token      string
 	KKPath     string
 
@@ -48,7 +49,7 @@ func Setup() error {
 	TestContext = TestContextType{
 		RepoRoot:            root,
 		APIURL:              envOr("MINI_API", "http://127.0.0.1:18000"),
-		GatewayURL:          envOr("MINI_GATEWAY", "http://127.0.0.1:18080"),
+		IngressURL:          envOr("MINI_INGRESS", "http://127.0.0.1:18080"),
 		Token:               strings.TrimSpace(string(token)),
 		KKPath:              filepath.Join(root, "bin", "kk"),
 		ClusterReadyTimeout: 90 * time.Second,

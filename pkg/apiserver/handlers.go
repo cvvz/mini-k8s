@@ -162,10 +162,16 @@ func (s *Server) createFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	if errs := s.validate(res, st, obj); len(errs) > 0 {
 		return nil, errInvalid(res, m.Name, errs)
 	}
-	if err := s.admitCreate(ctx, res, obj); err != nil {
-		return nil, err
+	finish := FinishFunc(func(context.Context, bool) {})
+	if st.BeginCreate != nil {
+		f, err := st.BeginCreate(ctx, obj, dryRun)
+		if err != nil {
+			return nil, hookError(res, m.Name, err)
+		}
+		finish = f
 	}
 	if dryRun {
+		finish(ctx, false)
 		return obj, nil
 	}
 	for attempt := 0; ; attempt++ {
@@ -175,8 +181,18 @@ func (s *Server) createFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 			m.Name = m.GenerateName + randomSuffix()
 			continue
 		}
+		finish(ctx, err == nil)
 		return created, err
 	}
+}
+
+// hookError reports FieldErrors as Invalid and passes other errors on.
+func hookError(res scheme.ResourceInfo, name string, err error) error {
+	var fe FieldErrors
+	if errors.As(err, &fe) {
+		return errInvalid(res, name, fe)
+	}
+	return err
 }
 
 func (s *Server) validate(res scheme.ResourceInfo, st Strategy, obj metav1.Object) []string {
@@ -205,24 +221,6 @@ func (s *Server) admitNamespace(ctx context.Context, res scheme.ResourceInfo, na
 	if nsObj.(*corev1.Namespace).Status.Phase == corev1.NamespaceTerminating && res.Resource != scheme.Events.Resource {
 		return newStatus(http.StatusForbidden, metav1.ReasonForbidden,
 			"unable to create new content in namespace %s because it is being terminated", namespace)
-	}
-	return nil
-}
-
-// admitCreate applies resource-specific admission rules.
-func (s *Server) admitCreate(ctx context.Context, res scheme.ResourceInfo, obj metav1.Object) error {
-	if res.Resource != scheme.Services.Resource {
-		return nil
-	}
-	// The HTTP gateway serves exactly one Service until ClusterIP networking exists.
-	existing, _, err := s.list(ctx, scheme.Services, "")
-	if err != nil {
-		return err
-	}
-	if len(existing) > 0 {
-		m := existing[0].GetObjectMeta()
-		return newStatus(http.StatusConflict, metav1.ReasonConflict,
-			"only one Service is supported; Service %s/%s already exists", m.Namespace, m.Name)
 	}
 	return nil
 }
@@ -356,10 +354,14 @@ func (s *Server) updateFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	if st.Defaults != nil {
 		st.Defaults(result)
 	}
+	spec := info.subresource != "status"
+	if spec && st.PrepareForUpdate != nil {
+		st.PrepareForUpdate(result, old)
+	}
 	if errs := s.validate(res, st, result); len(errs) > 0 {
 		return nil, errInvalid(res, info.name, errs)
 	}
-	if info.subresource != "status" && st.ValidateUpdate != nil {
+	if spec && st.ValidateUpdate != nil {
 		if errs := st.ValidateUpdate(result, old); len(errs) > 0 {
 			return nil, errInvalid(res, info.name, errs)
 		}
@@ -367,17 +369,29 @@ func (s *Server) updateFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	if specChanged(result, old) {
 		rm.Generation = om.Generation + 1
 	}
-	if sameStoredForm(result, old) || dryRun {
-		if dryRun {
-			return result, nil
-		}
+	if sameStoredForm(result, old) {
 		return old, nil
+	}
+	finish := FinishFunc(func(context.Context, bool) {})
+	if spec && st.BeginUpdate != nil {
+		f, err := st.BeginUpdate(ctx, result, old, dryRun)
+		if err != nil {
+			return nil, hookError(res, info.name, err)
+		}
+		finish = f
+	}
+	if dryRun {
+		finish(ctx, false)
+		return result, nil
 	}
 	// Removing the last finalizer from an object pending deletion completes it.
 	if rm.DeletionTimestamp != nil && len(rm.Finalizers) == 0 && (rm.DeletionGracePeriodSeconds == nil || *rm.DeletionGracePeriodSeconds == 0) {
-		return result, s.remove(ctx, res, result)
+		err = s.remove(ctx, res, result)
+	} else {
+		result, err = s.update(ctx, res, result)
 	}
-	return s.update(ctx, res, result)
+	finish(ctx, err == nil)
+	return result, err
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, info requestInfo, dryRun bool) {

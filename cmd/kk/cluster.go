@@ -36,13 +36,14 @@ var images = []struct{ tag, dir string }{
 	{"mini-k8s:local", "mini"},
 	{"mini-k8s-pause:local", "pause"},
 	{"mini-k8s-node:local", "node"},
+	{"mini-k8s-kube-proxy:local", "kube-proxy"},
 	{"mini-k8s-etcd:3.5.17", "etcd"},
 }
 
 // nodeImages are preloaded into every node's containerd: the sandbox (pause)
-// image and the image of the components, examples and e2e workloads; the
-// control-plane node also gets the etcd image.
-var nodeImages = []string{"mini-k8s:local", "mini-k8s-pause:local"}
+// image, the image of the components, examples and e2e workloads, and
+// kube-proxy's; the control-plane node also gets the etcd image.
+var nodeImages = []string{"mini-k8s:local", "mini-k8s-pause:local", "mini-k8s-kube-proxy:local"}
 
 const etcdImage = "mini-k8s-etcd:3.5.17"
 
@@ -301,11 +302,16 @@ func (c cluster) up(ctx context.Context) error {
 	if err := c.loadImages(ctx, append(append([]string{}, nodeImages...), etcdImage), controlPlane); err != nil {
 		return err
 	}
-	if err := c.restartStaleControlPlane(ctx); err != nil {
+	if err := c.restartStaleStaticPods(ctx, controlPlane); err != nil {
 		return err
 	}
 	if err := c.loadImages(ctx, nodeImages, workerNames...); err != nil {
 		return err
+	}
+	for _, node := range workerNames {
+		if err := c.restartStaleStaticPods(ctx, node); err != nil {
+			return err
+		}
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -357,11 +363,11 @@ func (c cluster) loadImages(ctx context.Context, refs []string, nodes ...string)
 	return nil
 }
 
-// restartStaleControlPlane stops the control-plane node's static Pod
-// containers whose image name now refers to another image than the one they
+// restartStaleStaticPods stops a node's kube-system containers (the static
+// Pods) whose image name now refers to another image than the one they
 // run; the kubelet restarts them from the freshly loaded image.
-func (c cluster) restartStaleControlPlane(ctx context.Context) error {
-	node := nodeContainer(controlPlane)
+func (c cluster) restartStaleStaticPods(ctx context.Context, name string) error {
+	node := nodeContainer(name)
 	out, err := c.run(ctx, "docker", "exec", node, "crictl", "ps", "-o", "json", "--label", "io.kubernetes.pod.namespace=kube-system")
 	if err != nil {
 		return err

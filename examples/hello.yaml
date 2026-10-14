@@ -1,5 +1,6 @@
-# A Deployment without a Service. Use it in extra namespaces: the HTTP gateway
-# currently serves a single Service cluster-wide (lifted in milestone M6).
+# A Deployment exposed on every node through a NodePort Service: reach it
+# from the host at http://<node INTERNAL-IP>:<node port> (kk get nodes -o wide,
+# kk get svc hello).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,3 +20,15 @@ spec:
           image: mini-k8s:local
           command: ["/mini"]
           args: ["demo"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello
+spec:
+  type: NodePort
+  selector:
+    app: hello
+  ports:
+    - port: 80
+      targetPort: 8080

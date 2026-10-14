@@ -201,7 +201,7 @@ func TestClusterUpRestartsStaticPodsRunningAnOldImage(t *testing.T) {
 			return "", nil
 		},
 	}
-	if err := c.restartStaleControlPlane(context.Background()); err != nil {
+	if err := c.restartStaleStaticPods(context.Background(), "control-plane"); err != nil {
 		t.Fatal(err)
 	}
 	var stops []string

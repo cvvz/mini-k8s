@@ -5,7 +5,9 @@
 
 ## 已知问题
 
-暂无。
+| 问题 | 位置 | 影响 | 修法 |
+| --- | --- | --- | --- |
+| Service repair 先 List Service、再读分配表：两步之间被删除的 Service 释放的 IP/端口会被重新登记为已分配 | `pkg/registry/core/service/repair.go`（M6a 审查） | 该值要等 3 轮（约 3 分钟）后才被回收，期间显式申请它会得到 already allocated；不会重复分配 | 与 Kubernetes 的 repair 相同：先取分配表快照及其版本，再 List，最后用 CAS 整体写回重建的集合 |
 
 ## 改进想法
 

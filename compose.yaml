@@ -2,8 +2,10 @@ name: mini-k8s
 # Compose only starts the "machines". Each node is a privileged container,
 # like a kind node: it runs its own containerd (Pods are containers inside it)
 # and the kubelet. The control plane (etcd, kube-apiserver,
-# kube-controller-manager, kube-scheduler) and the gateway are static Pods
-# the control-plane node's kubelet runs from build/manifests/control-plane.
+# kube-controller-manager, kube-scheduler) and the Ingress controller are
+# static Pods the control-plane node's kubelet runs from
+# build/manifests/control-plane; the workers run the static Pods of
+# build/manifests/node. Every node runs kube-proxy that way.
 #
 # /var is a volume because containerd's overlay snapshots cannot live on the
 # container's own overlay filesystem, and it keeps etcd data and emptyDir
@@ -33,7 +35,7 @@ services:
       MINI_NODE_ROLE: control-plane
     ports:
       - "127.0.0.1:18000:8080" # kube-apiserver
-      - "127.0.0.1:18080:8081" # gateway
+      - "127.0.0.1:18080:8081" # Ingress controller
     volumes:
       - control-plane-var:/var
       - ./build/manifests/control-plane:/etc/kubernetes/manifests:ro
@@ -45,7 +47,10 @@ services:
       <<: *env
       MINI_NODE: worker-1
       MINI_NODE_ROLE: worker
-    volumes: [worker-1-var:/var]
+    volumes:
+      - worker-1-var:/var
+      - ./build/manifests/node:/etc/kubernetes/manifests:ro
+      - ./.mini-k8s/token:/etc/mini-k8s/token:ro
     depends_on: [control-plane]
   worker-2:
     <<: *node
@@ -54,7 +59,10 @@ services:
       <<: *env
       MINI_NODE: worker-2
       MINI_NODE_ROLE: worker
-    volumes: [worker-2-var:/var]
+    volumes:
+      - worker-2-var:/var
+      - ./build/manifests/node:/etc/kubernetes/manifests:ro
+      - ./.mini-k8s/token:/etc/mini-k8s/token:ro
     depends_on: [control-plane]
 networks:
   cluster:

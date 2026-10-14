@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	corev1 "mini-k8s/pkg/apis/core/v1"
+	networkingv1 "mini-k8s/pkg/apis/networking/v1"
 )
 
 func TestPodSummaryFollowsKubectl(t *testing.T) {
@@ -58,5 +59,38 @@ func TestPodSummaryFollowsKubectl(t *testing.T) {
 		if ready != tc.ready || reason != tc.reason || restarts != tc.restarts {
 			t.Errorf("%s: got %s %s %s, want %s %s %s", name, ready, reason, restarts, tc.ready, tc.reason, tc.restarts)
 		}
+	}
+}
+
+func TestServiceEndpointsAndIngressColumns(t *testing.T) {
+	svc := &corev1.Service{Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeNodePort, Ports: []corev1.ServicePort{
+		{Port: 80, NodePort: 30875, Protocol: "TCP"}, {Port: 81, Protocol: "UDP"}}}}
+	if got := servicePorts(svc); got != "80:30875/TCP,81/UDP" {
+		t.Errorf("PORT(S) = %q", got)
+	}
+	addrs := func(ips ...string) []corev1.EndpointAddress {
+		var out []corev1.EndpointAddress
+		for _, ip := range ips {
+			out = append(out, corev1.EndpointAddress{IP: ip})
+		}
+		return out
+	}
+	ep := &corev1.Endpoints{Subsets: []corev1.EndpointSubset{{
+		Addresses:         addrs("10.244.1.176", "10.244.1.212"),
+		NotReadyAddresses: addrs("10.244.2.9"),
+		Ports:             []corev1.EndpointPort{{Name: "http", Port: 8080}, {Name: "alt", Port: 9090}},
+	}}}
+	if got := formatEndpoints(ep); got != "10.244.1.176:8080,10.244.1.212:8080,10.244.1.176:9090 + 1 more..." {
+		t.Errorf("ENDPOINTS = %q", got)
+	}
+	if got := formatEndpoints(&corev1.Endpoints{}); got != "<none>" {
+		t.Errorf("empty ENDPOINTS = %q", got)
+	}
+	ing := &networkingv1.Ingress{Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{Host: "foo.example.com"}, {}}}}
+	if got := ingressHosts(ing); got != "foo.example.com" {
+		t.Errorf("HOSTS = %q", got)
+	}
+	if got := ingressHosts(&networkingv1.Ingress{Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{}}}}); got != "*" {
+		t.Errorf("HOSTS without hosts = %q", got)
 	}
 }

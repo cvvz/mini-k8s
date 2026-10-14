@@ -19,11 +19,10 @@ make e2e E2E_LABELS='Disruptive'           # 按 Ginkgo 标签筛选
 
 `go test ./...` 也会编译该套件，但没有 `MINI_E2E=1` 时直接跳过。
 
-网关目前只服务一个 Service：集群中已有其他 Service（例如 Quick Start 部署的示例）时，
-网关类用例会被跳过。要跑完整套件，先执行 `./bin/kk delete -f examples/demo.yaml`。
+Service 与 Ingress 用例使用各自的命名空间和 Ingress host，可以与 Quick Start 部署的示例共存。
 
 可选环境变量：`MINI_REPO_ROOT`（仓库根目录，默认自动向上查找）、`MINI_API`
-（默认 `http://127.0.0.1:18000`）、`MINI_GATEWAY`（默认 `http://127.0.0.1:18080`）。
+（默认 `http://127.0.0.1:18000`）、`MINI_INGRESS`（Ingress 控制器，默认 `http://127.0.0.1:18080`）。
 
 ## 目录结构
 
@@ -39,7 +38,7 @@ test/e2e/
 │   └── debug.go       # 失败时输出资源、容器与组件日志
 ├── apimachinery/      # [sig-api-machinery] 并发控制、校验、认证
 ├── apps/              # [sig-apps] 工作负载控制器
-├── network/           # [sig-network] Service 与网关
+├── network/           # [sig-network] Pod 网络、Service、kube-proxy 与 Ingress
 ├── node/              # [sig-node] Node 与 kubelet
 └── lifecycle/         # [sig-cluster-lifecycle] 控制面重启、down/up（Disruptive）
 ```

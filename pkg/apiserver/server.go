@@ -55,7 +55,7 @@ const Version = "v2.0.0-mini"
 // New returns a Server with defaults applied to cfg.
 func New(cfg Config) *Server {
 	if cfg.Strategies == nil {
-		panic("apiserver: Config.Strategies is required (use registry.Strategies())")
+		panic("apiserver: Config.Strategies is required (use registry.New(...).Strategies)")
 	}
 	if cfg.Prefix == "" {
 		cfg.Prefix = "/registry"

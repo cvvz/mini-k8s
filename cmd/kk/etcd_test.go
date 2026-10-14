@@ -38,20 +38,26 @@ func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
 		t.Fatal(err)
 	}
 	load := func(node string, extra ...string) []string {
-		return append(append(append([]string{"docker", "save", "mini-k8s:local", "mini-k8s-pause:local"}, extra...), "|",
+		return append(append(append([]string{"docker", "save", "mini-k8s:local", "mini-k8s-pause:local", "mini-k8s-kube-proxy:local"}, extra...), "|",
 			"docker", "exec", "-i", "mini-k8s-"+node+"-1"), "ctr", "-n", "k8s.io", "images", "import", "-")
+	}
+	ps := func(node string) []string {
+		return []string{"docker", "exec", "mini-k8s-" + node + "-1", "crictl", "ps", "-o", "json", "--label", "io.kubernetes.pod.namespace=kube-system"}
 	}
 	want := [][]string{
 		{"make", "build", "prepare-etcd"},
 		{"docker", "build", "-t", "mini-k8s:local", "-f", "build/images/mini/Dockerfile", "."},
 		{"docker", "build", "-t", "mini-k8s-pause:local", "-f", "build/images/pause/Dockerfile", "."},
 		{"docker", "build", "-t", "mini-k8s-node:local", "-f", "build/images/node/Dockerfile", "."},
+		{"docker", "build", "-t", "mini-k8s-kube-proxy:local", "-f", "build/images/kube-proxy/Dockerfile", "."},
 		{"docker", "build", "-t", "mini-k8s-etcd:3.5.17", "-f", "build/images/etcd/Dockerfile", "."},
 		{"docker", "compose", "up", "-d", "--pull", "never", "--remove-orphans"},
 		load("control-plane", "mini-k8s-etcd:3.5.17"),
-		{"docker", "exec", "mini-k8s-control-plane-1", "crictl", "ps", "-o", "json", "--label", "io.kubernetes.pod.namespace=kube-system"},
+		ps("control-plane"),
 		load("worker-1"),
 		load("worker-2"),
+		ps("worker-1"),
+		ps("worker-2"),
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("startup must build every image, never pull, and preload node images: %#v", calls)

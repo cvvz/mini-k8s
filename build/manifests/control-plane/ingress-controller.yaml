@@ -1,27 +1,27 @@
-# The HTTP gateway for the cluster's Service, a static Pod on the
-# control-plane node: hostNetwork on port 8081, published on 127.0.0.1:18080.
-# The node's kubelet keeps the routes to every node's Pod subnet. Replaced by
-# kube-proxy and an Ingress controller in M6.
+# The Ingress controller, a static Pod on the control-plane node: hostNetwork
+# on port 8081, published on 127.0.0.1:18080. It proxies to the endpoints
+# of the Services the Ingresses name, through the node's routes to every
+# node's Pod subnet.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: gateway
+  name: ingress-controller
   namespace: kube-system
   labels:
-    component: gateway
+    component: ingress-controller
 spec:
   hostNetwork: true
   containers:
-  - name: gateway
+  - name: ingress-controller
     image: mini-k8s:local
     imagePullPolicy: Never
-    command: ["/mini", "gateway"]
+    command: ["/mini", "ingress-controller"]
     env:
     - name: MINI_TOKEN_FILE
       value: /etc/mini-k8s/token
     - name: MINI_API
       value: http://127.0.0.1:8080
-    - name: MINI_GATEWAY_ADDR
+    - name: MINI_INGRESS_ADDR
       value: ":8081"
     volumeMounts:
     - name: credentials

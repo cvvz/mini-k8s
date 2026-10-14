@@ -1,8 +1,9 @@
 // Package v1 contains the core API group types (corev1): Namespace, Node,
-// Pod, Service, Event and Binding.
+// Pod, Service, Endpoints, Event and Binding.
 package v1
 
 import (
+	"fmt"
 	"time"
 
 	"mini-k8s/pkg/api/resource"
@@ -246,6 +247,21 @@ type Container struct {
 	ReadinessProbe *Probe `json:"readinessProbe,omitempty"`
 	// StartupProbe holds off the other probes until it succeeds once.
 	StartupProbe *Probe `json:"startupProbe,omitempty"`
+	// SecurityContext grants extra privileges, e.g. to kube-proxy.
+	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
+}
+
+// SecurityContext holds a container's privileges.
+type SecurityContext struct {
+	// Privileged gives the container all capabilities and devices of the node.
+	Privileged   *bool         `json:"privileged,omitempty"`
+	Capabilities *Capabilities `json:"capabilities,omitempty"`
+}
+
+// Capabilities adds or drops Linux capabilities such as NET_ADMIN.
+type Capabilities struct {
+	Add  []string `json:"add,omitempty"`
+	Drop []string `json:"drop,omitempty"`
 }
 
 // Resource names.
@@ -446,6 +462,27 @@ func IsPodReady(p *Pod) bool {
 	return c != nil && c.Status == ConditionTrue
 }
 
+// FindPort resolves a Service port's targetPort for a Pod: a number is used
+// as is, a name is looked up among the container ports with the same
+// protocol (like FindPort in k8s.io/kubernetes/pkg/api/v1/pod).
+func FindPort(p *Pod, port *ServicePort) (int32, error) {
+	if !port.TargetPort.IsString {
+		return port.TargetPort.IntVal, nil
+	}
+	for _, c := range p.Spec.Containers {
+		for _, cp := range c.Ports {
+			protocol := cp.Protocol
+			if protocol == "" {
+				protocol = ProtocolTCP
+			}
+			if cp.Name == port.TargetPort.StrVal && protocol == port.Protocol {
+				return cp.ContainerPort, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("no suitable port for manifest: %s", p.UID)
+}
+
 // Service exposes Pods selected by labels.
 type Service struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -454,22 +491,112 @@ type Service struct {
 	Status            ServiceStatus `json:"status,omitzero"`
 }
 
+// Service types.
+const (
+	ServiceTypeClusterIP = "ClusterIP"
+	ServiceTypeNodePort  = "NodePort"
+)
+
+// Service session affinities.
+const (
+	ServiceAffinityNone     = "None"
+	ServiceAffinityClientIP = "ClientIP"
+	// DefaultClientIPServiceAffinitySeconds is three hours, as in Kubernetes.
+	DefaultClientIPServiceAffinitySeconds int32 = 10800
+)
+
+// Protocols.
+const (
+	ProtocolTCP = "TCP"
+	ProtocolUDP = "UDP"
+)
+
 // ServiceSpec selects backends and ports.
 type ServiceSpec struct {
+	// Type is ClusterIP (the default) or NodePort.
+	Type string `json:"type,omitempty"`
+	// Selector picks the backend Pods; without one the Endpoints are
+	// managed by the user.
 	Selector map[string]string `json:"selector,omitempty"`
 	Ports    []ServicePort     `json:"ports"`
+	// ClusterIP is allocated from the Service CIDR unless given; it never
+	// changes afterwards.
+	ClusterIP string `json:"clusterIP,omitempty"`
+	// SessionAffinity is None or ClientIP (each client sticks to one backend).
+	SessionAffinity       string                 `json:"sessionAffinity,omitempty"`
+	SessionAffinityConfig *SessionAffinityConfig `json:"sessionAffinityConfig,omitempty"`
 }
 
-// ServicePort maps a Service port to a container port.
+// SessionAffinityConfig tunes ClientIP affinity.
+type SessionAffinityConfig struct {
+	ClientIP *ClientIPConfig `json:"clientIP,omitempty"`
+}
+
+// ClientIPConfig holds how long a client stays with its backend.
+type ClientIPConfig struct {
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
+}
+
+// ServicePort maps a Service port to a port of the backends.
 type ServicePort struct {
-	Name       string `json:"name,omitempty"`
-	Protocol   string `json:"protocol,omitempty"`
-	Port       int32  `json:"port"`
-	TargetPort int32  `json:"targetPort,omitempty"`
+	// Name is required when the Service has more than one port; Endpoints
+	// ports carry the same name.
+	Name     string `json:"name,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
+	Port     int32  `json:"port"`
+	// TargetPort is a number or the name of a container port; it defaults
+	// to Port.
+	TargetPort intstr.IntOrString `json:"targetPort,omitzero"`
+	// NodePort is opened on every node for NodePort Services; allocated
+	// from 30000-32767 unless given.
+	NodePort int32 `json:"nodePort,omitempty"`
 }
 
-// ServiceStatus is currently empty.
-type ServiceStatus struct{}
+// ServiceStatus mirrors Kubernetes' (always empty load balancer status).
+type ServiceStatus struct {
+	LoadBalancer LoadBalancerStatus `json:"loadBalancer"`
+}
+
+// LoadBalancerStatus lists load-balancer ingress points.
+type LoadBalancerStatus struct {
+	Ingress []LoadBalancerIngress `json:"ingress,omitempty"`
+}
+
+// LoadBalancerIngress is an address traffic for a Service or Ingress arrives on.
+type LoadBalancerIngress struct {
+	IP       string `json:"ip,omitempty"`
+	Hostname string `json:"hostname,omitempty"`
+}
+
+// Endpoints lists the addresses behind a Service, maintained by the
+// Endpoints controller for Services with a selector.
+type Endpoints struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Subsets           []EndpointSubset `json:"subsets,omitempty"`
+}
+
+// EndpointSubset is a set of addresses sharing the same ports.
+type EndpointSubset struct {
+	Addresses         []EndpointAddress `json:"addresses,omitempty"`
+	NotReadyAddresses []EndpointAddress `json:"notReadyAddresses,omitempty"`
+	Ports             []EndpointPort    `json:"ports,omitempty"`
+}
+
+// EndpointAddress is one backend.
+type EndpointAddress struct {
+	IP        string           `json:"ip"`
+	Hostname  string           `json:"hostname,omitempty"`
+	NodeName  *string          `json:"nodeName,omitempty"`
+	TargetRef *ObjectReference `json:"targetRef,omitempty"`
+}
+
+// EndpointPort is a port of the backends, named after the Service port.
+type EndpointPort struct {
+	Name     string `json:"name,omitempty"`
+	Port     int32  `json:"port"`
+	Protocol string `json:"protocol,omitempty"`
+}
 
 // Event records something that happened to an object.
 type Event struct {

@@ -119,12 +119,19 @@ func (f *Framework) WaitForEvent(ctx context.Context, name, reason string) corev
 
 // HTTPGet performs one GET with a short timeout and returns status and body.
 func HTTPGet(ctx context.Context, url string) (int, string, error) {
+	return HTTPGetHost(ctx, url, "")
+}
+
+// HTTPGetHost is HTTPGet with the Host header set (when not empty), for
+// Ingress host rules.
+func HTTPGetHost(ctx context.Context, url, host string) (int, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, "", err
 	}
+	req.Host = host
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, "", err
