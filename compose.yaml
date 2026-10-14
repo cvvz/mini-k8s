@@ -16,6 +16,8 @@ services:
       - --data-dir=/etcd-data
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://etcd:2379
+      - --auto-compaction-mode=periodic
+      - --auto-compaction-retention=10m
     environment:
       ETCD_UNSUPPORTED_ARCH: arm64
     volumes: [etcd-data:/etcd-data]

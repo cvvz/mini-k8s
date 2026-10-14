@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -45,6 +46,38 @@ func TestSchedulerAssignsTwoPodsAcrossTwoNodes(t *testing.T) {
 	}
 	if pods[0].Status.NodeName != "worker-1" || pods[1].Status.NodeName != "worker-2" {
 		t.Fatalf("unbalanced: %#v", pods)
+	}
+}
+
+func TestReconcileNodeSkipsUnchangedStatus(t *testing.T) {
+	pod := dockerTestPod()
+	pod.Status = Status{Phase: "Running", Reason: "ContainerRunning", NodeName: "node-a", ContainerID: "container-1", PodIP: "172.30.0.3", Restarts: 2}
+	d := dockerTestEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1.41/containers/json":
+			dockerTestJSON(w, []map[string]any{{"Id": "container-1", "Labels": dockerTestLabels("pod-1")}})
+		case "/v1.41/containers/container-1/json":
+			dockerTestInspect(w, dockerTestLabels("pod-1"), "running")
+		default:
+			t.Errorf("unexpected Docker call %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	var puts atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" {
+			puts.Add(1)
+		}
+		_ = json.NewEncoder(w).Encode([]Resource{pod})
+	}))
+	defer api.Close()
+	for i := 0; i < 2; i++ {
+		if err := ReconcileNode(context.Background(), NewClient(api.URL, "t"), d, "node-a"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := puts.Load(); n != 0 {
+		t.Fatalf("unchanged Pod status was written %d times", n)
 	}
 }
 

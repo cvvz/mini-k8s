@@ -46,16 +46,15 @@ independent machines or isolated container runtimes.
 | Requirement | Notes |
 | --- | --- |
 | Go 1.23 or later | `go` must be available on your `PATH`. |
-| Docker with Linux containers | macOS: Docker Desktop. Linux: a local, rootful Docker Engine. The worker adapter requires the daemon to accept Docker API **v1.41**. |
+| Docker Engine (Linux containers) | A local, rootful Docker Engine on Linux. The worker adapter requires the daemon to accept Docker API **v1.41**. |
 | Docker Compose v2 | `docker compose version` must work. |
 | `make`, `curl`, and `tar` | Used to build binaries and obtain etcd. |
 | Local Docker access | Your user must be able to use a local Unix socket. TCP, SSH, and remote Docker endpoints are rejected. |
 | Available host ports | `127.0.0.1:18000` for the API and `127.0.0.1:18080` for the demo service. |
 
-macOS ARM64 with Docker Desktop / Engine 27.4 has been exercised end to end.
-Linux and other architectures are intended targets, but have not received the
-same live acceptance testing. Native Windows and rootless Docker are not
-validated configurations.
+Verified end to end on Ubuntu 24.04 (WSL2, x86_64) with Docker Engine 29.9,
+Compose v5.6, and Go 1.27. The original v1 was also exercised on macOS ARM64 with
+Docker Desktop 27.4. Rootless Docker is not a validated configuration.
 
 Only one cluster per Docker Engine is supported: Compose project names, network
 names, and published ports are fixed. The host build architecture must match the
@@ -80,7 +79,7 @@ Run the following commands from the project root, which contains `go.mod`,
 
 ### 1. Check your environment
 
-Start Docker Desktop or your local Docker Engine, then run:
+Start your local Docker Engine, then run:
 
 ```sh
 go version
@@ -221,19 +220,19 @@ logical kubelet does not stop the containers it previously created.
 ## Development
 
 ```sh
+make vet
 make test
 go test -race ./...
-go vet ./...
 ```
 
 The opt-in live test needs a running cluster and `docker` on `PATH`:
 
 ```sh
-MINI_E2E=1 go test ./internal/mini -run '^TestLiveCluster$' \
-  -count=1 -v -timeout 5m
+make e2e
 ```
 
-**Run it only against a disposable project cluster.** It changes the example,
+**Run it only against a disposable project cluster.** It first removes any
+existing `web` example, then changes the example,
 kills an owned container, restarts this project's control plane, and executes
 `cluster down/up`. It checks actual container counts, HTTP access, logs,
 self-healing, version conflicts, and persistence. It leaves the two-replica
@@ -244,7 +243,7 @@ example running.
 | Symptom | What to check |
 | --- | --- |
 | `go`, `docker`, or `make` not found | Install the prerequisites and add their installation directories to your own `PATH`. |
-| Docker commands hang | Check the actual engine, not just API metadata. On Docker Desktop, inspect its UI/status. Restart only after considering other workloads. |
+| Docker commands hang | Check the actual engine, not just API metadata (for example `systemctl status docker`). Restart only after considering other workloads. |
 | etcd download fails | Check host network/proxy access to `storage.googleapis.com`, or provide a matching Linux etcd v3.5.17 binary at `bin/etcd`. |
 | Pod fails to pull an image | Use `describe pod` to inspect the error. The worker can use cached images or pull public images; private images must be pre-pulled into the same Engine. |
 | Gateway returns `503` | Wait for running Pods; check Service labels, target port, and worker heartbeats. `Running` is not an application health probe. |
@@ -270,8 +269,7 @@ docker compose logs --tail=100
 unset MINI_TOKEN MINI_DOCKER_SOCKET
 ```
 
-On macOS, the socket above is inside the Docker Desktop VM. On Linux, substitute
-the actual local Engine socket path if it differs.
+Substitute the actual local Engine socket path if it differs.
 
 For a specifically diagnosed credential-helper hang, optional
 `MINI_DOCKER_NO_CREDENTIALS=1 ./bin/kk cluster up` uses a temporary anonymous Docker
@@ -279,9 +277,21 @@ configuration without modifying your existing one. It does not repair an
 unresponsive daemon and does not carry private-registry credentials or your
 existing proxy/builder configuration.
 
+## Roadmap
+
+mini-k8s is evolving toward a compact but complete Kubernetes: Kubernetes-style
+REST and Watch, namespaces, ReplicaSets and rolling updates, multi-container Pods
+with probes, ClusterIP Services with DNS, node lifecycle, ConfigMaps/Secrets,
+volumes, and more workload types. See the
+[v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)
+for the architecture and milestone status.
+
 ## Design documentation
 
 - [Design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-design.md):
   goals, decisions, resource contracts, architecture, limitations, and acceptance.
 - [Implementation plan (Chinese)](docs/superpowers/plans/2026-10-14-mini-k8s-plan.md):
   retrospective task breakdown, interfaces, dependencies, and verification.
+- [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md):
+  the "compact but complete" architecture and milestones.
+- [M0 baseline plan (Chinese)](docs/superpowers/plans/2026-10-14-m0-baseline.md).

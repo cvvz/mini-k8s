@@ -115,6 +115,11 @@ func Heartbeat(ctx context.Context, c *Client, node string) error {
 	r.Status = Status{Phase: "Ready", Heartbeat: time.Now().UTC()}
 	return c.Update(ctx, r, true)
 }
+func statusEqual(a, b Status) bool {
+	return a.Phase == b.Phase && a.Reason == b.Reason && a.NodeName == b.NodeName &&
+		a.ContainerID == b.ContainerID && a.PodIP == b.PodIP && a.Restarts == b.Restarts &&
+		a.Heartbeat.Equal(b.Heartbeat)
+}
 func ReconcileNode(ctx context.Context, c *Client, d *Docker, node string) error {
 	pods, err := c.List(ctx, "Pod")
 	if err != nil {
@@ -134,6 +139,10 @@ func ReconcileNode(ctx context.Context, c *Client, d *Docker, node string) error
 			status.Phase = "Failed"
 			status.Reason = err.Error()
 			failures = append(failures, fmt.Errorf("%s: %w", p.Metadata.Name, err))
+		}
+		// Writing an identical status would only bump resourceVersion and churn etcd.
+		if statusEqual(p.Status, status) {
+			continue
 		}
 		p.Status = status
 		if err := c.Update(ctx, p, true); err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) {

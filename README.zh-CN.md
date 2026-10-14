@@ -42,14 +42,14 @@ localhost:18080 --> HTTP Service Proxy
 | 依赖 | 要求 |
 | --- | --- |
 | Go 1.23 或更新版本 | `go` 已加入 `PATH`。 |
-| 支持 Linux 容器的 Docker | macOS 使用 Docker Desktop；Linux 使用本地 rootful Docker Engine。worker 要求服务端接受 Docker API **v1.41**。 |
+| Docker Engine（Linux 容器） | Linux 上的本地 rootful Docker Engine。worker 要求服务端接受 Docker API **v1.41**。 |
 | Docker Compose v2 | `docker compose version` 可正常执行。 |
 | `make`、`curl`、`tar` | 用于构建程序和获取 etcd。 |
 | 本地 Docker 访问权限 | 当前用户能访问本地 Unix socket；不接受 TCP、SSH 或远程 Docker endpoint。 |
 | 空闲端口 | API 使用 `127.0.0.1:18000`，示例服务使用 `127.0.0.1:18080`。 |
 
-已完成 macOS ARM64、Docker Desktop / Engine 27.4 的真实端到端验证。
-Linux 和其他架构是预期运行目标，但尚未完成同等的现场验收；原生 Windows 和
+已在 Ubuntu 24.04（WSL2，x86_64）、Docker Engine 29.9、Compose v5.6、Go 1.27
+上完成端到端验证。v1 最初也在 macOS ARM64 + Docker Desktop 27.4 上验证过。
 rootless Docker 不属于已验证配置。
 
 每个 Docker Engine 只支持一套本项目集群：Compose 项目名、网络名和发布端口固定。
@@ -73,7 +73,7 @@ cd mini-k8s
 
 ### 1. 检查环境
 
-先启动 Docker Desktop 或本地 Docker Engine，然后执行：
+先启动本地 Docker Engine，然后执行：
 
 ```sh
 go version
@@ -204,19 +204,18 @@ HPA 或控制面 HA。停止一个逻辑 kubelet，不会停止它先前创建�
 ## 开发与测试
 
 ```sh
+make vet
 make test
 go test -race ./...
-go vet ./...
 ```
 
 实时集群测试需要先启动集群，并确保 `docker` 在 `PATH` 中：
 
 ```sh
-MINI_E2E=1 go test ./internal/mini -run '^TestLiveCluster$' \
-  -count=1 -v -timeout 5m
+make e2e
 ```
 
-**只在可重建的本项目实验集群上运行。** 测试会修改示例、终止一个受管理的容器、
+**只在可重建的本项目实验集群上运行。** 测试会先删除已有的 `web` 示例，再修改示例、终止一个受管理的容器、
 重启本项目控制面，并执行 `cluster down/up`。它检查实际容器数量、HTTP 访问、
 日志、自愈、版本冲突及持久化，结束时保留两副本示例运行。
 
@@ -225,7 +224,7 @@ MINI_E2E=1 go test ./internal/mini -run '^TestLiveCluster$' \
 | 现象 | 检查方式 |
 | --- | --- |
 | 找不到 `go`、`docker` 或 `make` | 安装依赖，将自己机器上的安装目录加入 `PATH`。 |
-| Docker 命令挂起 | 检查实际引擎，不只检查 API 元信息；Docker Desktop 可查看界面或状态。重启前确认对其他工作负载的影响。 |
+| Docker 命令挂起 | 检查实际引擎，不只检查 API 元信息（例如 `systemctl status docker`）。重启前确认对其他工作负载的影响。 |
 | etcd 下载失败 | 检查宿主机访问 `storage.googleapis.com` 的网络或代理；也可在 `bin/etcd` 预置匹配架构的 Linux etcd v3.5.17 二进制。 |
 | Pod 拉取镜像失败 | 使用 `describe pod` 查看原因。worker 能使用缓存镜像或拉取公共镜像；私有镜像需要事先拉入同一个 Engine。 |
 | 网关返回 `503` | 等待 Pod Running，检查 Service 标签、目标端口和 worker 心跳；`Running` 不代表应用通过了健康探针。 |
@@ -250,13 +249,19 @@ docker compose logs --tail=100
 unset MINI_TOKEN MINI_DOCKER_SOCKET
 ```
 
-macOS 中，上面的 socket 指 Docker Desktop VM 内部路径；Linux 中如果本地 Engine
-的 socket 不同，应改成实际路径。
+如果本地 Engine 的 socket 路径不同，应改成实际路径。
 
 仅在确认是凭据助手挂起时，可尝试
 `MINI_DOCKER_NO_CREDENTIALS=1 ./bin/kk cluster up`。它使用临时匿名 Docker 配置，
 不会修改现有配置，但不携带私有仓库凭据或原有代理、builder 配置，也不能修复
 无响应的 Docker daemon。
+
+## 路线图
+
+mini-k8s 正在向“精简但五脏俱全”的 Kubernetes 演进：K8s 风格 REST 与 Watch、
+命名空间、ReplicaSet 与滚动更新、带探针的多容器 Pod、带 DNS 的 ClusterIP Service、
+节点生命周期、ConfigMap/Secret、卷以及更多工作负载类型。架构与里程碑进度见
+[v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)。
 
 ## 设计文档
 
@@ -264,3 +269,6 @@ macOS 中，上面的 socket 指 Docker Desktop VM 内部路径；Linux 中如�
   目标、决策、资源契约、架构、边界与验收标准。
 - [实施计划](docs/superpowers/plans/2026-10-14-mini-k8s-plan.md)：
   事后整理的任务拆分、接口、依赖与验证方法。
+- [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：
+  “精简但五脏俱全”的架构与里程碑。
+- [M0 工程基线计划](docs/superpowers/plans/2026-10-14-m0-baseline.md)。

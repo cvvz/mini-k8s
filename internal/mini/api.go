@@ -49,6 +49,15 @@ func reply(w http.ResponseWriter, v any, err error) {
 	}
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+// serviceSingletonError explains the one-Service limit instead of surfacing the
+// version conflict produced by the shared singleton storage key.
+func serviceSingletonError(existing, requested string) error {
+	if existing == "" || existing == requested {
+		return nil
+	}
+	return fmt.Errorf("%w: only one Service is supported; Service %q already exists (requested %q)", ErrConflict, existing, requested)
+}
 func APIHandler(store *Store, token string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !authenticate(w, r, token) {
@@ -148,6 +157,19 @@ func APIHandler(store *Store, token string) http.Handler {
 			return
 		}
 		if r.Method == "POST" && name == "" {
+			if kind == "Service" {
+				existing, err := store.List(r.Context(), kind)
+				if err != nil {
+					reply(w, nil, err)
+					return
+				}
+				if len(existing) > 0 {
+					if err := serviceSingletonError(existing[0].Metadata.Name, obj.Metadata.Name); err != nil {
+						reply(w, nil, err)
+						return
+					}
+				}
+			}
 			obj.Metadata.UID = UID()
 			obj.Metadata.ResourceVersion = 0
 			obj.Status = Status{}

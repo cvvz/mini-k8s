@@ -86,7 +86,8 @@ Docker 故障处理、真实集群验收在用户允许继续后完成，不将�
 
 参考验收环境为 macOS ARM64、Docker Engine 27.4、Compose v2.31、
 Docker VM 约 4 核/5.8 GiB；这不是经过压力测试得到的最低资源要求。
-Linux、其他架构、rootless Docker 和 Windows 不应被写成已完成同等验证。
+其他架构与 rootless Docker 不应被写成已完成同等验证；Linux（Ubuntu 24.04 / WSL2、
+Docker Engine 29.9）已在 v2 的 M0 阶段完成端到端验证。
 
 ## 4. 组件与运行拓扑
 
