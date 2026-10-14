@@ -26,8 +26,11 @@ var _ = framework.SIGDescribe("apps", "Deployment", func() {
 		for _, p := range pods {
 			ref := metav1.ControllerOf(&p.ObjectMeta)
 			Expect(ref).NotTo(BeNil())
-			Expect(ref.UID).To(Equal(d.UID))
-			Expect(p.Labels).To(HaveKey(appsv1.DefaultDeploymentUniqueLabelKey))
+			Expect(ref.Kind).To(Equal("ReplicaSet"), "Deployments manage Pods through ReplicaSets")
+			rs, err := client.ReplicaSets(f.Client, f.Namespace).Get(ctx, ref.Name)
+			framework.ExpectNoError(err)
+			Expect(metav1.ControllerOf(&rs.ObjectMeta).UID).To(Equal(d.UID))
+			Expect(rs.Name).To(Equal("spread-" + p.Labels[appsv1.DefaultDeploymentUniqueLabelKey]))
 			Expect(p.Status.PodIP).NotTo(BeEmpty())
 		}
 		Eventually(ctx, func(g Gomega) {
@@ -38,7 +41,7 @@ var _ = framework.SIGDescribe("apps", "Deployment", func() {
 			g.Expect(d.Status.ObservedGeneration).To(Equal(d.Generation))
 		}).Should(Succeed())
 		Expect(f.KK(ctx, "get", "deployment", "spread")).To(MatchRegexp(`spread\s+2/2\s+2\s+2`))
-		f.WaitForEvent(ctx, "spread", "SuccessfulCreate")
+		f.WaitForEvent(ctx, "spread", "ScalingReplicaSet")
 	})
 
 	It("should scale up and down with API Pods matching Docker containers", func(ctx SpecContext) {
@@ -70,7 +73,7 @@ var _ = framework.SIGDescribe("apps", "Deployment", func() {
 		Expect(pods[0].UID).NotTo(Equal(old.UID))
 	})
 
-	It("should recreate its Pods when the Pod template changes", func(ctx SpecContext) {
+	It("should replace its Pods when the Pod template changes", func(ctx SpecContext) {
 		labels := map[string]string{"app": "recreate"}
 		obj := framework.NewDeployment("recreate", 2, labels, framework.DemoContainer())
 		f.Apply(ctx, obj)
@@ -106,23 +109,34 @@ var _ = framework.SIGDescribe("apps", "Deployment", func() {
 		}
 	})
 
-	It("should leave Pods running without an owner when deleted with --cascade=orphan", func(ctx SpecContext) {
+	It("should orphan its ReplicaSet, which keeps the Pods, when deleted with --cascade=orphan", func(ctx SpecContext) {
 		labels := map[string]string{"app": "orphan"}
 		f.Apply(ctx, framework.NewDeployment("orphan", 2, labels, framework.DemoContainer()))
-		f.WaitForRunningPods(ctx, labels, 2)
+		pods := f.WaitForRunningPods(ctx, labels, 2)
 
 		f.KK(ctx, "delete", "deployment", "orphan", "--cascade=orphan")
 		_, err := client.Deployments(f.Client, f.Namespace).Get(ctx, "orphan")
 		Expect(client.IsNotFound(err)).To(BeTrue())
 		Eventually(ctx, func(g Gomega) {
-			pods, err := f.Pods(ctx, labels)
+			list, err := client.ReplicaSets(f.Client, f.Namespace).List(ctx, client.ListOptions{})
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(pods).To(HaveLen(2))
-			for _, p := range pods {
-				g.Expect(p.OwnerReferences).To(BeEmpty())
-			}
+			g.Expect(list.Items).To(HaveLen(1))
+			g.Expect(list.Items[0].OwnerReferences).To(BeEmpty())
 		}).WithTimeout(framework.TestContext.PodStartTimeout).Should(Succeed())
-		f.WaitForRunningPods(ctx, labels, 2)
+		after := f.WaitForRunningPods(ctx, labels, 2)
+		Expect([]string{after[0].UID, after[1].UID}).To(ConsistOf(pods[0].UID, pods[1].UID), "the same Pods keep running")
+
+		By("re-creating the Deployment, which adopts the orphaned ReplicaSet and its Pods")
+		f.Apply(ctx, framework.NewDeployment("orphan", 2, labels, framework.DemoContainer()))
+		framework.KK(ctx, "rollout", "-n", f.Namespace, "status", "deployment/orphan", "--timeout", "60s")
+		d, err := client.Deployments(f.Client, f.Namespace).Get(ctx, "orphan")
+		framework.ExpectNoError(err)
+		list, err := client.ReplicaSets(f.Client, f.Namespace).List(ctx, client.ListOptions{})
+		framework.ExpectNoError(err)
+		Expect(list.Items).To(HaveLen(1))
+		Expect(metav1.ControllerOf(&list.Items[0].ObjectMeta).UID).To(Equal(d.UID))
+		adopted := f.WaitForRunningPods(ctx, labels, 2)
+		Expect([]string{adopted[0].UID, adopted[1].UID}).To(ConsistOf(pods[0].UID, pods[1].UID))
 	})
 
 	It("should keep Pods while deleting in the foreground until dependents are gone", func(ctx SpecContext) {

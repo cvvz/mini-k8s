@@ -35,7 +35,9 @@ Resources:
             [--grace-period N] [--force] [--cascade background|foreground|orphan] [--wait=false]
   kk logs POD [-c CONTAINER] [-f] [--tail N] [-p]
   kk exec POD [-c CONTAINER] -- COMMAND [ARG...]   run a command to completion (no stdin/tty)
-  kk scale deployment NAME --replicas N
+  kk scale deployment|replicaset NAME --replicas N
+  kk rollout status|history|undo|pause|resume|restart deployment/NAME
+            [--timeout DURATION] [--to-revision N]
   kk api-resources
   kk version
 
@@ -43,8 +45,8 @@ Global flags:
   -n, --namespace NS     namespace (default "default")
   -A, --all-namespaces   list across all namespaces
 
-TYPE accepts kubectl-style names: pods/pod/po, deployments/deploy, services/svc,
-nodes/no, namespaces/ns, events/ev. TYPE/NAME is also accepted.
+TYPE accepts kubectl-style names: pods/pod/po, deployments/deploy, replicasets/rs,
+services/svc, nodes/no, namespaces/ns, events/ev. TYPE/NAME is also accepted.
 `
 
 func execute(ctx context.Context, argv []string) error {

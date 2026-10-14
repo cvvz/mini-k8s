@@ -57,7 +57,7 @@ var _ = framework.SIGDescribe("api-machinery", "API server", func() {
 			_, err := client.Deployments(f.Client, f.Namespace).Get(ctx, "invalid")
 			Expect(client.IsNotFound(err)).To(BeTrue(), "invalid object must not be stored")
 		},
-		Entry("unknown field", func(o framework.Object) { o.Spec()["paused"] = true }, "unknown field"),
+		Entry("unknown field", func(o framework.Object) { o.Spec()["suspended"] = true }, "unknown field"),
 		Entry("negative replicas", func(o framework.Object) { o.Spec()["replicas"] = -1 }, "spec.replicas"),
 		Entry("selector not matching the template", func(o framework.Object) {
 			o.Spec()["selector"] = map[string]any{"matchLabels": map[string]any{"app": "other"}}

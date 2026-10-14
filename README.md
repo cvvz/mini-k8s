@@ -23,9 +23,10 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **Deletion semantics**: finalizers; graceful Pod termination (SIGTERM, then SIGKILL
   after the grace period); force deletion; ownerReferences and garbage collection with
   Background / Foreground / Orphan propagation; deleting a Namespace deletes its contents.
-- **Control plane**: event-driven informers and work queues; a Deployment controller
-  (Recreate replacement on template changes, status reporting); garbage collector;
-  namespace controller; scheduler binding through the `binding` subresource, honouring
+- **Control plane**: event-driven informers and work queues; Deployment and ReplicaSet
+  controllers (RollingUpdate with `maxSurge`/`maxUnavailable` or Recreate, revision
+  history, rollback, pause/resume, Available/Progressing conditions with a progress
+  deadline); garbage collector; namespace controller; scheduler binding through the `binding` subresource, honouring
   taints and tolerations, and reporting unschedulable Pods with conditions and events.
 - **Self-hosted like kubeadm**: etcd, kube-apiserver, kube-controller-manager,
   kube-scheduler and the gateway are **static Pods** of the `control-plane` node, visible
@@ -53,7 +54,7 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   hour by an etcd lease); `kk describe` shows an object's events.
 - **kk**: `get` (`-o wide|json|yaml|name`, `-l`, `--field-selector`, `-A`, `-w`),
   `describe`, `apply`/`create` (server-side dry run of the whole batch first), `delete`
-  (`--grace-period`, `--force`, `--cascade`), `logs -f/-p/-c`, `exec`, `scale`, `api-resources`,
+  (`--grace-period`, `--force`, `--cascade`), `logs -f/-p/-c`, `exec`, `scale`, `rollout status|history|undo|pause|resume|restart`, `api-resources`,
   `version`, cluster lifecycle and `image load` (copy local images into the nodes).
 
 ```text
@@ -92,7 +93,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | Component | Responsibility | Status |
 | --- | --- | --- |
 | kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources | done |
-| controller-manager | Deployment, garbage collector, namespace and node IPAM controllers; later ReplicaSet, Endpoints, node lifecycle and more | done, growing |
+| controller-manager | Deployment, ReplicaSet, garbage collector, namespace and node IPAM controllers; later Endpoints, node lifecycle and more | done, growing |
 | scheduler | Picks a node for each Pod (honouring taints and tolerations) and binds it | done |
 | kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
@@ -140,7 +141,7 @@ pkg/apiserver                generic API server (as k8s.io/apiserver)
 pkg/registry/<group>/<res>   per-resource strategies: defaults, validation, mutability, field selectors
 pkg/storage/etcd3            etcd storage
 pkg/client/...               client, informers, workqueue, record (as client-go)
-pkg/controller/<name>        deployment, garbagecollector, namespace, nodeipam controllers
+pkg/controller/<name>        deployment, replicaset, garbagecollector, namespace, nodeipam controllers
 pkg/scheduler                scheduler
 pkg/kubelet                  node agent and static Pods; kuberuntime (CRI client), prober, dns (node-local forwarder)
 pkg/network/{cni,hostgw}     CNI plugin and host-gw route agent
@@ -267,6 +268,11 @@ kk get pods                              # 0/1 after ~2s; the gateway only uses 
 kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/recover
 kk exec POD_NAME -- /mini cat /sys/fs/cgroup/memory.max          # the 64Mi limit: 67108864
 kk scale deployment web --replicas 3
+kk rollout restart deployment/web        # a rolling update: new ReplicaSet, Pods replaced one by one
+kk rollout status deployment/web         # wait for it to finish
+kk get replicasets                       # the old ReplicaSet is kept at 0 for rollbacks
+kk rollout history deployment/web
+kk rollout undo deployment/web           # back to the previous revision
 kk delete pod POD_NAME                   # graceful; the Deployment replaces it
 kk delete pod POD_NAME --force           # removed from the API immediately
 
@@ -319,7 +325,8 @@ into the nodes), also delete the volumes:
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
 | Node | `v1` | Registered and heartbeated by kubelets with `capacity`/`allocatable` (cpu, memory, pods) and role labels; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` and `spec.taints` (NoSchedule, PreferNoSchedule, NoExecute) are honoured by the scheduler; the control-plane node is tainted `node-role.kubernetes.io/control-plane:NoSchedule`. |
 | Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`); `hostNetwork`; `tolerations`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
-| Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always). Template changes replace Pods (Recreate). |
+| Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always), `strategy` (RollingUpdate with `maxSurge`/`maxUnavailable`, 25% each by default, or Recreate), `minReadySeconds`, `revisionHistoryLimit` (10), `paused`, `progressDeadlineSeconds` (600). Each template version runs as a ReplicaSet; annotations `deployment.kubernetes.io/revision` and `kubernetes.io/change-cause`. |
+| ReplicaSet | `apps/v1` | `replicas`, `selector` (immutable), `template`, `minReadySeconds`; usually owned by a Deployment. |
 | Service | `v1` | One cluster-wide HTTP gateway Service: `selector`, one `port: 80`, `targetPort`. |
 | Event | `v1` | Recorded by components, queryable, expire after one hour. |
 
@@ -335,7 +342,9 @@ still not a cross-resource transaction.
   scheduler ignores resource requests (resource-aware scheduling is M7). `kk exec` runs a
   command to completion and returns its output; there is no interactive session (stdin/tty),
   unlike Kubernetes' streaming exec.
-- Deployments manage Pods directly: no ReplicaSets, rolling updates or rollbacks.
+- Rollouts do not scale proportionally when `replicas` changes mid-rollout, and ReplicaSets
+  do not adopt orphaned Pods. `kk apply` is a merge patch: switching a Deployment to
+  `Recreate` needs `rollingUpdate: null` in the manifest.
 - One HTTP gateway Service; no ClusterIP, cluster DNS, NodePort or Ingress (Pods resolve
   the Docker network's names, e.g. `control-plane`, through their node).
 - One control-plane node and two workers, fixed in `compose.yaml`; nodes are containers
@@ -426,7 +435,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M3b | Pods: liveness/readiness/startup probes, resource requests and limits, QoS, node capacity | ✅ |
 | M3c | Pods: volumes (emptyDir, hostPath), hostNetwork | ✅ |
 | M4 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system, taints and tolerations | ✅ |
-| M5 | ReplicaSets, rolling updates and rollbacks | planned |
+| M5 | ReplicaSets, rolling updates and rollbacks, `kk rollout` | ✅ |
 | M6 | ClusterIP, Endpoints, iptables kube-proxy, DNS, NodePort, Ingress | planned |
 | M7 | Scheduling framework, node leases and eviction, taints, cordon/drain | planned |
 | M8 | ConfigMaps, Secrets, volumes, PVCs | planned |
@@ -435,6 +444,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M5 ReplicaSets and rollouts plan (Chinese)](docs/superpowers/plans/2026-10-15-m5-replicaset-rollout.md)
 - [M4 self-hosted control plane plan (Chinese)](docs/superpowers/plans/2026-10-15-m4-self-hosted-control-plane.md)
 - [M3c volumes and host network plan (Chinese)](docs/superpowers/plans/2026-10-15-m3c-volumes-hostnetwork.md)
 - [M3b probes and resources plan (Chinese)](docs/superpowers/plans/2026-10-15-m3b-probes-resources.md)

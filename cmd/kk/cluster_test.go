@@ -171,7 +171,7 @@ func TestReadinessRequiresAuthenticatedHealthAndAllFreshNodes(t *testing.T) {
 			c := cluster{client: client.New(server.URL, "secret")}
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
-			err := c.waitReady(ctx)
+			err := c.waitReady(ctx, time.Now().Add(-10*time.Second))
 			if scenario == "ready" {
 				if err != nil {
 					t.Fatal(err)
@@ -180,5 +180,37 @@ func TestReadinessRequiresAuthenticatedHealthAndAllFreshNodes(t *testing.T) {
 				t.Fatalf("unready cluster did not fail clearly: %v", err)
 			}
 		})
+	}
+}
+
+func TestClusterUpRestartsStaticPodsRunningAnOldImage(t *testing.T) {
+	var calls []string
+	c := cluster{
+		out: io.Discard,
+		run: func(_ context.Context, name string, args ...string) (string, error) {
+			cmd := strings.Join(append([]string{name}, args...), " ")
+			calls = append(calls, cmd)
+			switch {
+			case strings.Contains(cmd, "crictl ps -o json"):
+				return `{"containers": [
+					{"id": "old", "imageRef": "sha256:1", "image": {"image": "docker.io/library/mini-k8s:local"}, "labels": {"io.kubernetes.pod.name": "kube-apiserver-control-plane"}},
+					{"id": "fresh", "imageRef": "sha256:2", "image": {"image": "docker.io/library/mini-k8s:local"}, "labels": {}}]}`, nil
+			case strings.Contains(cmd, "inspecti"):
+				return "sha256:2\n", nil
+			}
+			return "", nil
+		},
+	}
+	if err := c.restartStaleControlPlane(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var stops []string
+	for _, cmd := range calls {
+		if strings.Contains(cmd, "crictl stop") {
+			stops = append(stops, cmd)
+		}
+	}
+	if len(stops) != 1 || !strings.HasSuffix(stops[0], " old") {
+		t.Fatalf("only the container on the old image restarts: %v", stops)
 	}
 }

@@ -40,6 +40,7 @@ var commandFlags = map[string][]flagSpec{
 		{long: "previous", short: "p"}},
 	"exec":          {{long: "container", short: "c", takesValue: true}},
 	"scale":         {{long: "replicas", takesValue: true}},
+	"rollout":       {{long: "to-revision", takesValue: true}, {long: "timeout", takesValue: true}},
 	"api-resources": {},
 	"version":       {},
 	"cluster":       {{long: "volumes"}},

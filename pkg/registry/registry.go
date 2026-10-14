@@ -5,6 +5,7 @@ package registry
 import (
 	"mini-k8s/pkg/apiserver"
 	"mini-k8s/pkg/registry/apps/deployment"
+	"mini-k8s/pkg/registry/apps/replicaset"
 	"mini-k8s/pkg/registry/core/event"
 	"mini-k8s/pkg/registry/core/namespace"
 	"mini-k8s/pkg/registry/core/node"
@@ -22,5 +23,6 @@ func Strategies() map[string]apiserver.Strategy {
 		scheme.Services.Resource:    service.Strategy,
 		scheme.Events.Resource:      event.Strategy,
 		scheme.Deployments.Resource: deployment.Strategy,
+		scheme.ReplicaSets.Resource: replicaset.Strategy,
 	}
 }

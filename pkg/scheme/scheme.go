@@ -81,10 +81,12 @@ var (
 		ShortNames: []string{"ev"}, New: func() metav1.Object { return &corev1.Event{} }}
 	Deployments = ResourceInfo{Group: "apps", Version: "v1", Resource: "deployments", Singular: "deployment", Kind: "Deployment",
 		Namespaced: true, ShortNames: []string{"deploy"}, HasStatus: true, New: func() metav1.Object { return &appsv1.Deployment{} }}
+	ReplicaSets = ResourceInfo{Group: "apps", Version: "v1", Resource: "replicasets", Singular: "replicaset", Kind: "ReplicaSet",
+		Namespaced: true, ShortNames: []string{"rs"}, HasStatus: true, New: func() metav1.Object { return &appsv1.ReplicaSet{} }}
 )
 
 // All lists every registered resource in discovery order.
-var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Events, Deployments}
+var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Events, Deployments, ReplicaSets}
 
 // Lookup resolves a user-supplied name: plural, singular, short name, kind
 // (case-insensitive) or "plural.group".

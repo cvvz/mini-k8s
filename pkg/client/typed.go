@@ -63,6 +63,11 @@ func Deployments(c *Client, ns string) Resource[appsv1.Deployment, *appsv1.Deplo
 	return For[appsv1.Deployment](c, scheme.Deployments, ns)
 }
 
+// ReplicaSets returns a ReplicaSet client.
+func ReplicaSets(c *Client, ns string) Resource[appsv1.ReplicaSet, *appsv1.ReplicaSet] {
+	return For[appsv1.ReplicaSet](c, scheme.ReplicaSets, ns)
+}
+
 // InNamespace returns a copy of the client bound to ns.
 func (r Resource[T, PT]) InNamespace(ns string) Resource[T, PT] {
 	r.ns = ns
