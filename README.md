@@ -3,7 +3,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 mini-k8s is a compact Kubernetes written from scratch in Go. It implements its own
-API server, scheduler, controller manager, kubelet, CNI plugin, HTTP gateway and a CLI
+API server, scheduler, controller manager, kubelet, kube-proxy, CNI plugin, Ingress
+controller and a CLI
 called **`kk`**, reusing only etcd for storage, containerd as the container runtime and a
 local Docker Engine to host the cluster's "machines".
 
@@ -26,12 +27,13 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **Control plane**: event-driven informers and work queues; Deployment and ReplicaSet
   controllers (RollingUpdate with `maxSurge`/`maxUnavailable` or Recreate, revision
   history, rollback, pause/resume, Available/Progressing conditions with a progress
-  deadline); garbage collector; namespace controller; scheduler binding through the `binding` subresource, honouring
+  deadline); Endpoints controller; garbage collector; namespace controller; scheduler binding through the `binding` subresource, honouring
   taints and tolerations, and reporting unschedulable Pods with conditions and events.
 - **Self-hosted like kubeadm**: etcd, kube-apiserver, kube-controller-manager,
-  kube-scheduler and the gateway are **static Pods** of the `control-plane` node, visible
-  as mirror Pods in `kube-system`; the node is tainted so workloads stay on the workers;
-  a crashed component is restarted by the kubelet.
+  kube-scheduler and the Ingress controller are **static Pods** of the `control-plane`
+  node, and kube-proxy is a static Pod of every node, all visible as mirror Pods in
+  `kube-system`; the control-plane node is tainted so workloads stay on the workers; a
+  crashed component is restarted by the kubelet.
 - **Nodes like kind**: each node is a privileged container running its own containerd;
   the kubelet manages Pods over **CRI** (a sandbox per Pod, then its container);
   Ready only when the runtime, the Pod network and the sandbox image are ready.
@@ -50,6 +52,15 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   a home-grown CNI plugin (`mini-cni`: bridge, veth, IP allocation) wires each Pod; a
   host-gw route agent connects the nodes' Pod subnets, so Pods reach each other across
   nodes without NAT; Pods resolve names and reach the outside world through their node.
+- **Services**: the API server allocates cluster IPs from `10.96.0.0/12` and node ports
+  from `30000-32767`; the Endpoints controller tracks ready and unready Pods (named target
+  ports, several ports); **kube-proxy** programs iptables like the real one's iptables mode
+  (`KUBE-SERVICES` → `KUBE-SVC-*` → `KUBE-SEP-*`, random balancing, ClientIP session
+  affinity, masquerading for NodePort and hairpin traffic, immediate rejection without
+  endpoints); NodePort Services answer on every node.
+- **Ingress**: an Ingress controller on `127.0.0.1:18080` routes by host (exact or
+  wildcard) and path (Exact or Prefix) to the ready endpoints of Services, with a default
+  backend, 404/503 answers and the address published in the Ingress status.
 - **Observability**: Events (identical events aggregated with a count, expired after one
   hour by an etcd lease); `kk describe` shows an object's events.
 - **kk**: `get` (`-o wide|json|yaml|name`, `-l`, `--field-selector`, `-A`, `-w`),
@@ -57,30 +68,59 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   (`--grace-period`, `--force`, `--cascade`), `logs -f/-p/-c`, `exec`, `scale`, `rollout status|history|undo|pause|resume|restart`, `api-resources`,
   `version`, cluster lifecycle and `image load` (copy local images into the nodes).
 
-```text
- kk ── HTTP + bearer token ──▶ 127.0.0.1:18000          127.0.0.1:18080 (gateway)
-                                     │                          │
- ┌─ node container control-plane ────┼──────────────────────────┼──────────────────┐
- │ kubelet ──CRI──▶ containerd ──▶ static Pods (hostNetwork), mirrored in kube-system:
- │   etcd ◀── kube-apiserver :8080 ◀── kube-controller-manager, kube-scheduler,    │
- │                                      gateway :8081                              │
- │ taint node-role.kubernetes.io/control-plane:NoSchedule                          │
- └───────────────────────────────────┬─────────────────────────────────────────────┘
-                     list / watch / write (http://control-plane:8080)
- ┌─ node container worker-1 ─────────┴───────────┐   ┌─ node container worker-2 ─────┐
- │ kubelet ──CRI──▶ containerd ──▶ Pods          │   │ kubelet ─▶ containerd ─▶ Pods │
- │ mini-cni: cni0 bridge, 10.244.1.0/24          │◀─▶│ cni0, 10.244.2.0/24           │
- └───────────────────────────────────────────────┘   └───────────────────────────────┘
-          host-gw routes connect every node's Pod subnet (and the gateway's node)
+```mermaid
+flowchart TB
+    user(["Linux host: kk and curl"])
+
+    subgraph cp["control-plane node container · static Pods"]
+        api["kube-apiserver"]
+        etcd[("etcd")]
+        ctl["kube-controller-manager<br/>kube-scheduler"]
+        ing["ingress-controller"]
+    end
+
+    subgraph w2["worker-2 node container"]
+        k2["kubelet · containerd<br/>kube-proxy"]
+        p2["Pods<br/>10.244.2.0/24"]
+    end
+
+    subgraph w1["worker-1 node container"]
+        k1["kubelet · containerd<br/>kube-proxy"]
+        p1["Pods<br/>10.244.1.0/24"]
+    end
+
+    user -- "API · 127.0.0.1:18000" --> api
+    user -- "HTTP · 127.0.0.1:18080" --> ing
+    api --- etcd
+    api <-- watch --> ctl
+    api <-- "watch / status" --> k1
+    api <-- "watch / status" --> k2
+    k1 -- CRI --> p1
+    k2 -- CRI --> p2
+    ing -.-> p1
+    ing -.-> p2
 ```
 
-Every component is a role of the single `mini` binary. Docker Compose only starts three
-**privileged node containers** (like [kind](https://kind.sigs.k8s.io) nodes), each with its
-own containerd and kubelet. As with kubeadm, the control plane runs as static Pods that
-the control-plane node's kubelet starts from manifests in
-[build/manifests/control-plane](build/manifests/control-plane) before the API exists; Pods
-are therefore not visible to the host's `docker ps`. All nodes share one Docker network,
-which plays the role of the machines' L2 network.
+How to read it:
+
+- Each box is a privileged Docker container that plays a machine; the three share the
+  Docker network `mini-k8s`.
+- The control-plane node's kubelet runs etcd, the API server, the controller manager, the
+  scheduler and the Ingress controller as static Pods; the node's taint keeps workloads on
+  the workers. Every node (the control-plane one too) also runs kube-proxy.
+- Solid arrows are API traffic: every component lists and watches the API server and
+  writes back; only the API server talks to etcd. The kubelet starts Pods through containerd (CRI).
+- Dotted arrows: the Ingress controller forwards requests on `127.0.0.1:18080` to ready
+  Pods. Pods on different nodes reach each other directly over host-gw routes; cluster IPs
+  (`10.96.0.0/12`) exist only as kube-proxy's iptables rules on each node, and node ports
+  answer on every node's address.
+
+Every component is a role of the single `mini` binary. Docker Compose only starts the
+three node containers (like [kind](https://kind.sigs.k8s.io) nodes); as with kubeadm, each
+kubelet starts its static Pods from a manifest directory before the API exists
+([build/manifests/control-plane](build/manifests/control-plane),
+[build/manifests/node](build/manifests/node) on the workers). Pods run in the nodes'
+containerd, so the host's `docker ps` shows only the three nodes.
 
 ## What is built here and what is reused
 
@@ -92,18 +132,19 @@ container runtime) uses those open-source components as-is, configured but not m
 
 | Component | Responsibility | Status |
 | --- | --- | --- |
-| kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources | done |
-| controller-manager | Deployment, ReplicaSet, garbage collector, namespace and node IPAM controllers; later Endpoints, node lifecycle and more | done, growing |
+| kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation | done |
+| controller-manager | Deployment, ReplicaSet, Endpoints, garbage collector, namespace and node IPAM controllers; later node lifecycle and more | done, growing |
 | scheduler | Picks a node for each Pod (honouring taints and tolerations) and binds it | done |
 | kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
-| gateway | Forwards HTTP on `127.0.0.1:18080` to a Service's ready Pods; a static Pod of the control-plane node | done |
-| control-plane manifests | Static Pod manifests in `build/manifests/control-plane` (like kubeadm's) | done |
+| kube-proxy | iptables mode: cluster IPs, node ports, session affinity, masquerading; a static Pod of every node (it runs the iptables tools of its Ubuntu-based image) | done |
+| Ingress controller | networking.k8s.io/v1 Ingress: host and path routing to Service endpoints on `127.0.0.1:18080` (the role ingress-nginx plays in kind); a static Pod of the control-plane node | done |
+| static Pod manifests | `build/manifests/control-plane` and `build/manifests/node` (like kubeadm's) | done |
 | `kk` | CLI, cluster lifecycle, image loading | done |
 | demo app | HTTP server for examples and tests; `mini fetch` is a tiny HTTP client for images without a shell | done |
 | `mini-cni` + host-gw route agent | Pod networking: bridge, veth, IP allocation, loopback, cross-node routes, egress masquerading | done |
 | `mini node-init`, pause image | Node container entrypoint (cgroup delegation, containerd configuration and start, then the kubelet); Pod sandbox process | done |
-| kube-proxy, cluster DNS, Ingress | iptables rules for ClusterIP/NodePort; service discovery | M6 |
+| cluster DNS | Service discovery (`*.svc.cluster.local`) | M6b |
 
 **Open-source components used as-is**:
 
@@ -113,7 +154,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | Docker Engine + Compose | Hosts the three node containers (the "machines"); never runs Pods or the control plane directly | in use |
 | [containerd](https://containerd.io) + [runc](https://github.com/opencontainers/runc) | Container runtime inside each node (Ubuntu packages); containerd's built-in CRI plugin is the CRI server, the kubelet is the client | in use |
 | [crictl](https://github.com/kubernetes-sigs/cri-tools) | Debugging tool in the node image (`crictl ps`), used by e2e tests | in use |
-| Ubuntu 24.04 base image, iptables, iproute2 | Operating environment of the node containers | in use |
+| Ubuntu 24.04 base image, iptables, iproute2 | Operating environment of the node containers and of the kube-proxy image (iptables/conntrack tools) | in use |
 | Linux kernel features | namespaces, cgroups, netfilter, bridges, veth | in use |
 
 **Go dependencies**: `gopkg.in/yaml.v3` (manifests), `google.golang.org/grpc` and
@@ -129,24 +170,27 @@ side by side (full mapping in
 
 ```text
 cmd/mini/                    multi-call binary: mini kube-apiserver | kube-controller-manager | kube-scheduler |
-                             node-init | gateway | demo | pause | fetch; as mini-cni/loopback the CNI plugin
+                             node-init | kube-proxy | ingress-controller | demo | pause | fetch;
+                             as mini-cni/loopback the CNI plugin
 cmd/kk/                      CLI (kubectl plus cluster lifecycle)
-build/images/<name>/         Dockerfiles: mini (components, demo), node, pause, etcd
-build/manifests/control-plane static Pod manifests of the control plane (like /etc/kubernetes/manifests)
-pkg/apis/{meta,core,apps}/v1 resource types (metav1, corev1, appsv1) and validation
+build/images/<name>/         Dockerfiles: mini (components, demo), node, pause, etcd, kube-proxy
+build/manifests/<node role>  static Pod manifests (like /etc/kubernetes/manifests)
+pkg/apis/<group>/v1          resource types (metav1, corev1, appsv1, networkingv1) and validation
 pkg/api/resource, util/intstr quantities ("500m", "64Mi") and int-or-string values
 pkg/labels, fields, watch    selectors and watch event types (as in apimachinery)
 pkg/scheme                   resource registry
 pkg/apiserver                generic API server (as k8s.io/apiserver)
-pkg/registry/<group>/<res>   per-resource strategies: defaults, validation, mutability, field selectors
+pkg/registry/<group>/<res>   per-resource strategies: defaults, validation, mutability, field selectors;
+                             Service cluster IP and node port allocators with their repair loop
 pkg/storage/etcd3            etcd storage
 pkg/client/...               client, informers, workqueue, record (as client-go)
-pkg/controller/<name>        deployment, replicaset, garbagecollector, namespace, nodeipam controllers
+pkg/controller/<name>        deployment, replicaset, endpoint, garbagecollector, namespace, nodeipam controllers
 pkg/scheduler                scheduler
 pkg/kubelet                  node agent and static Pods; kuberuntime (CRI client), prober, dns (node-local forwarder)
 pkg/network/{cni,hostgw}     CNI plugin and host-gw route agent
+pkg/proxy/iptables           kube-proxy (iptables mode)
+pkg/ingress                  Ingress controller
 pkg/nodeinit                 node container entrypoint
-pkg/gateway                  HTTP gateway
 test/e2e, test/integration   end-to-end and integration tests
 ```
 
@@ -159,7 +203,7 @@ test/e2e, test/integration   end-to-end and integration tests
 | Docker Compose v2 | `docker compose version` must work. |
 | `make`, `curl`, `tar` | Used to build binaries and obtain etcd. |
 | Local Docker access | A local Unix socket; TCP, SSH and remote Docker endpoints are rejected. |
-| Free host ports | `127.0.0.1:18000` (API) and `127.0.0.1:18080` (gateway). |
+| Free host ports | `127.0.0.1:18000` (API) and `127.0.0.1:18080` (Ingress). |
 
 | Environment | Status |
 | --- | --- |
@@ -214,12 +258,13 @@ make build
 ```
 
 `cluster up` builds the components, prepares etcd (on first use it downloads v3.5.17
-from `storage.googleapis.com` with host-side curl), builds four images from
-`build/images/` (components, node, pause and etcd; the node image takes about a minute
-the first time), starts the three node containers, loads the images into each node's
-containerd (the control-plane node's kubelet then starts etcd, the API server, the
-controller manager, the scheduler and the gateway as static Pods), and waits up to two
-minutes for a healthy API and fresh Ready heartbeats from every node.
+from `storage.googleapis.com` with host-side curl), builds five images from
+`build/images/` (components, node, pause, etcd and kube-proxy; the node image takes about a
+minute the first time), starts the three node containers, loads the images into each
+node's containerd (the control-plane node's kubelet then starts etcd, the API server, the
+controller manager, the scheduler and the Ingress controller as static Pods, and every
+node starts kube-proxy), and waits up to two minutes for a healthy API and fresh Ready
+heartbeats from every node.
 
 ```text
 API healthy
@@ -241,16 +286,17 @@ control plane is visible like in kubeadm clusters:
 
 ```sh
 ./bin/kk apply -f examples/demo.yaml
-./bin/kk get deployments,pods,services -o wide
+./bin/kk get deployments,pods,services,endpoints,ingresses -o wide
 curl -sS --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/
 ```
 
-The [example](examples/demo.yaml) creates a two-replica Deployment and a Service; its
-container has CPU/memory requests and limits and readiness/liveness probes. The Pods get
-addresses from their nodes' Pod CIDRs (`10.244.x.y`, see `-o wide`); the gateway
-round-robins across ready Pods; responses look like `hello from web-997d7b744-f8shs` (the
-Pod name is its hostname). The gateway may answer `503` while the Pods start; the curl
-command above retries.
+The [example](examples/demo.yaml) creates a two-replica Deployment, a Service and an
+Ingress; its container has CPU/memory requests and limits and readiness/liveness probes.
+The Pods get addresses from their nodes' Pod CIDRs (`10.244.x.y`, see `-o wide`); the
+Service gets a cluster IP from `10.96.0.0/12` and its Endpoints list the ready Pods; the
+Ingress controller round-robins requests on `127.0.0.1:18080` across them; responses look
+like `hello from web-997d7b744-f8shs` (the Pod name is its hostname). The Ingress
+controller may answer `503` while the Pods start; the curl command above retries.
 
 ### 4. Observe and operate
 
@@ -264,9 +310,12 @@ kk logs -f POD_NAME                      # a name printed by kk get pods
 kk logs -p POD_NAME                      # the previous instance after a restart
 kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/   # run a command in the Pod
 kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/fail-ready  # its readiness probe now fails:
-kk get pods                              # 0/1 after ~2s; the gateway only uses the other Pod
+kk get pods,endpoints                    # 0/1 after ~2s; the Pod moves to notReadyAddresses
 kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/recover
 kk exec POD_NAME -- /mini cat /sys/fs/cgroup/memory.max          # the 64Mi limit: 67108864
+kk get svc web                           # its CLUSTER-IP is reachable from every Pod and node:
+kk exec POD_NAME -- /mini fetch http://CLUSTER_IP/               # kube-proxy picks a ready Pod
+docker exec mini-k8s-worker-1-1 iptables -t nat -S KUBE-SERVICES # the rules behind it
 kk scale deployment web --replicas 3
 kk rollout restart deployment/web        # a rolling update: new ReplicaSet, Pods replaced one by one
 kk rollout status deployment/web         # wait for it to finish
@@ -277,7 +326,9 @@ kk delete pod POD_NAME                   # graceful; the Deployment replaces it
 kk delete pod POD_NAME --force           # removed from the API immediately
 
 kk create namespace team
-kk apply -n team -f examples/hello.yaml  # deploy into another namespace (no Service)
+kk apply -n team -f examples/hello.yaml  # another namespace, exposed by a NodePort Service
+kk get svc -n team hello                 # PORT(S) shows 80:NODE_PORT/TCP
+kk get nodes -o wide                     # curl http://NODE_INTERNAL_IP:NODE_PORT/ from the host
 kk get pods -A                           # list across namespaces
 kk delete namespace team                 # deletes everything inside
 
@@ -327,7 +378,9 @@ into the nodes), also delete the volumes:
 | Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`); `hostNetwork`; `tolerations`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
 | Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always), `strategy` (RollingUpdate with `maxSurge`/`maxUnavailable`, 25% each by default, or Recreate), `minReadySeconds`, `revisionHistoryLimit` (10), `paused`, `progressDeadlineSeconds` (600). Each template version runs as a ReplicaSet; annotations `deployment.kubernetes.io/revision` and `kubernetes.io/change-cause`. |
 | ReplicaSet | `apps/v1` | `replicas`, `selector` (immutable), `template`, `minReadySeconds`; usually owned by a Deployment. |
-| Service | `v1` | One cluster-wide HTTP gateway Service: `selector`, one `port: 80`, `targetPort`. |
+| Service | `v1` | `type` ClusterIP (default) or NodePort; `selector` (optional: without one, write the Endpoints yourself); `ports` (`name`, `port`, `targetPort` number or container port name, `protocol` TCP/UDP, `nodePort` from 30000-32767); `clusterIP` (allocated from `10.96.0.0/12` unless given; immutable); `sessionAffinity` None/ClientIP with `sessionAffinityConfig.clientIP.timeoutSeconds`. |
+| Endpoints | `v1` | Maintained by the Endpoints controller for Services with a selector: `subsets` of `addresses` (ready) and `notReadyAddresses` with `nodeName`/`targetRef`, and `ports` named after the Service ports. |
+| Ingress | `networking.k8s.io/v1` | `rules` (`host`, exact or `*.domain`; `http.paths` with `path`, `pathType` Exact/Prefix/ImplementationSpecific, `backend.service` name and port number or name), `defaultBackend`, `ingressClassName` (none or `mini`); status reports `localhost`. No TLS. |
 | Event | `v1` | Recorded by components, queryable, expire after one hour. |
 
 `kk apply` uses JSON merge patch: fields in the manifest overwrite server values, but
@@ -345,12 +398,15 @@ still not a cross-resource transaction.
 - Rollouts do not scale proportionally when `replicas` changes mid-rollout, and ReplicaSets
   do not adopt orphaned Pods. `kk apply` is a merge patch: switching a Deployment to
   `Recreate` needs `rollingUpdate: null` in the manifest.
-- One HTTP gateway Service; no ClusterIP, cluster DNS, NodePort or Ingress (Pods resolve
-  the Docker network's names, e.g. `control-plane`, through their node).
+- No cluster DNS yet (M6b): Pods reach Services by cluster IP and resolve only the Docker
+  network's names (e.g. `control-plane`) through their node; no headless or ExternalName
+  Services, no LoadBalancer type, no EndpointSlices, `externalTrafficPolicy` or IPv6.
+  Node ports are reachable from the Linux host at the nodes' addresses (as in kind), not on
+  `127.0.0.1`. The Ingress controller speaks plain HTTP only.
 - One control-plane node and two workers, fixed in `compose.yaml`; nodes are containers
   sharing the host kernel.
 - Lost nodes are not marked NotReady and their Pods are not evicted (nor by NoExecute
-  taints); no resource-aware scheduling or affinity.
+  taints), so their Pods stay in Endpoints; no resource-aware scheduling or affinity.
 - No DaemonSets, Jobs, CronJobs, StatefulSets, HPA, RBAC or control-plane HA.
 
 ## Development
@@ -376,15 +432,9 @@ make e2e E2E_FOCUS='sig-apps'     # run a subset by name
 ```
 
 **Run them only against a disposable project cluster.** Disruptive specs restart the
-control-plane node, a control-plane component and a worker, cordon the workers for a moment
-and run `cluster down/up`. The gateway serves a single Service for now, so
-gateway specs require that no other Service exists and are skipped otherwise. If you
-deployed the quick-start example, delete it before running the full suite:
-
-```sh
-./bin/kk delete -f examples/demo.yaml
-make e2e
-```
+control-plane node, a control-plane component and a worker, cordon the workers for a moment,
+flush kube-proxy's rules on a node and run `cluster down/up`. Specs use their own
+namespaces and Ingress hosts, so the quick-start example may stay deployed.
 
 Every new feature ships with e2e specs.
 
@@ -402,10 +452,10 @@ Every new feature ships with e2e specs.
 | Node build fails at `apt-get` or the crictl download | The node image needs Docker Hub, the Ubuntu archive and GitHub on first build; retry or configure a proxy/mirror. |
 | Node containers exit at start with a cgroup error | The host must use cgroup v2 and allow privileged containers. |
 | Pod shows `CrashLoopBackOff` | `kk logs NAME` shows the application output and `kk logs -p NAME` the previous run's; restarts back off from 1s up to 30s. |
-| Gateway returns `503` | Wait for ready Pods; check the Service selector, targetPort and node heartbeats. |
+| `127.0.0.1:18080` returns `503` | The Service has no ready endpoints: `kk get endpoints NAME` (unready Pods are not listed under ENDPOINTS); check the selector and `targetPort`. `404 default backend` means no Ingress rule matches the host and path. |
+| A cluster IP or node port does not answer | `kk get pods -n kube-system` (kube-proxy must run on every node), `kk logs -n kube-system kube-proxy-worker-1`, and `docker exec mini-k8s-worker-1-1 iptables -t nat -S` for the rules. `connection refused` means the Service has no ready endpoints. |
 | `Error from server (Invalid)` | Fix the field named in the message; unknown fields are rejected too. |
 | Port or project-name conflict | Free the ports or stop the conflicting project; `MINI_API` alone does not change Compose ports. |
-| `only one Service is supported` | The gateway serves a single Service for now; in other namespaces use Service-less manifests such as `examples/hello.yaml`. |
 | A fresh clone shows old resources | One Docker Engine hosts one cluster and one set of node disks (etcd lives on the control-plane node's); reset with `kk cluster down --volumes` as in step 5. |
 | Upgrading from a version with separate control-plane containers | etcd data moved onto the control-plane node: run `kk cluster down --volumes`, `docker volume rm mini-k8s_etcd-data`, then `kk cluster up`. |
 
@@ -436,7 +486,8 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M3c | Pods: volumes (emptyDir, hostPath), hostNetwork | ✅ |
 | M4 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system, taints and tolerations | ✅ |
 | M5 | ReplicaSets, rolling updates and rollbacks, `kk rollout` | ✅ |
-| M6 | ClusterIP, Endpoints, iptables kube-proxy, DNS, NodePort, Ingress | planned |
+| M6a | ClusterIP and NodePort Services, Endpoints, iptables kube-proxy, Ingress | ✅ |
+| M6b | Cluster DNS, headless and ExternalName Services, the `kubernetes` Service | planned |
 | M7 | Scheduling framework, node leases and eviction, taints, cordon/drain | planned |
 | M8 | ConfigMaps, Secrets, volumes, PVCs | planned |
 | M9 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
@@ -444,6 +495,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M6a Services, kube-proxy and Ingress plan (Chinese)](docs/superpowers/plans/2026-10-15-m6a-services-kube-proxy-ingress.md)
 - [M5 ReplicaSets and rollouts plan (Chinese)](docs/superpowers/plans/2026-10-15-m5-replicaset-rollout.md)
 - [M4 self-hosted control plane plan (Chinese)](docs/superpowers/plans/2026-10-15-m4-self-hosted-control-plane.md)
 - [M3c volumes and host network plan (Chinese)](docs/superpowers/plans/2026-10-15-m3c-volumes-hostnetwork.md)

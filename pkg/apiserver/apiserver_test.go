@@ -25,7 +25,8 @@ import (
 
 func newServer(t *testing.T) (*client.Client, string) {
 	t.Helper()
-	s := apiserver.New(apiserver.Config{Strategies: registry.Strategies(), Store: etcd3.New(etcdtesting.URL(t)), Token: "secret", Prefix: etcdtesting.Prefix(t)})
+	store, prefix := etcd3.New(etcdtesting.URL(t)), etcdtesting.Prefix(t)
+	s := apiserver.New(apiserver.Config{Strategies: registry.New(store, prefix).Strategies, Store: store, Token: "secret", Prefix: prefix})
 	if err := s.Bootstrap(context.Background()); err != nil {
 		t.Fatal(err)
 	}

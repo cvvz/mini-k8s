@@ -10,6 +10,7 @@ import (
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
+	networkingv1 "mini-k8s/pkg/apis/networking/v1"
 	"mini-k8s/pkg/scheme"
 	"mini-k8s/pkg/watch"
 )
@@ -53,6 +54,11 @@ func Services(c *Client, ns string) Resource[corev1.Service, *corev1.Service] {
 	return For[corev1.Service](c, scheme.Services, ns)
 }
 
+// Endpoints returns an Endpoints client.
+func Endpoints(c *Client, ns string) Resource[corev1.Endpoints, *corev1.Endpoints] {
+	return For[corev1.Endpoints](c, scheme.Endpoints, ns)
+}
+
 // Events returns an Event client.
 func Events(c *Client, ns string) Resource[corev1.Event, *corev1.Event] {
 	return For[corev1.Event](c, scheme.Events, ns)
@@ -66,6 +72,11 @@ func Deployments(c *Client, ns string) Resource[appsv1.Deployment, *appsv1.Deplo
 // ReplicaSets returns a ReplicaSet client.
 func ReplicaSets(c *Client, ns string) Resource[appsv1.ReplicaSet, *appsv1.ReplicaSet] {
 	return For[appsv1.ReplicaSet](c, scheme.ReplicaSets, ns)
+}
+
+// Ingresses returns an Ingress client.
+func Ingresses(c *Client, ns string) Resource[networkingv1.Ingress, *networkingv1.Ingress] {
+	return For[networkingv1.Ingress](c, scheme.Ingresses, ns)
 }
 
 // InNamespace returns a copy of the client bound to ns.

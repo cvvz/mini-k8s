@@ -158,8 +158,13 @@ func (s *Server) remove(ctx context.Context, res scheme.ResourceInfo, obj metav1
 		return errNotFound(res, m.Name)
 	case errors.Is(err, etcd3.ErrConflict):
 		return errConflict(res, m.Name)
+	case err != nil:
+		return err
 	}
-	return err
+	if st := s.cfg.Strategies[res.Resource]; st.AfterDelete != nil {
+		st.AfterDelete(ctx, obj)
+	}
+	return nil
 }
 
 // decodeStrict parses a request body, rejecting unknown fields.

@@ -19,7 +19,7 @@ import (
 type Agent struct {
 	Run network.Runner
 	// Self is the local node, whose own subnet is reached through its bridge;
-	// empty on hosts that are not nodes (the gateway).
+	// empty on hosts that are not nodes.
 	Self string
 	// ClusterCIDR covers every Pod subnet, e.g. 10.244.0.0/16.
 	ClusterCIDR string

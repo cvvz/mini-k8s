@@ -6,23 +6,48 @@ import (
 	"mini-k8s/pkg/apiserver"
 	"mini-k8s/pkg/registry/apps/deployment"
 	"mini-k8s/pkg/registry/apps/replicaset"
+	"mini-k8s/pkg/registry/core/endpoints"
 	"mini-k8s/pkg/registry/core/event"
 	"mini-k8s/pkg/registry/core/namespace"
 	"mini-k8s/pkg/registry/core/node"
 	"mini-k8s/pkg/registry/core/pod"
 	"mini-k8s/pkg/registry/core/service"
+	"mini-k8s/pkg/registry/networking/ingress"
 	"mini-k8s/pkg/scheme"
+	"mini-k8s/pkg/storage/etcd3"
 )
 
-// Strategies returns the strategy of every served resource, keyed by resource.
-func Strategies() map[string]apiserver.Strategy {
-	return map[string]apiserver.Strategy{
-		scheme.Namespaces.Resource:  namespace.Strategy,
-		scheme.Nodes.Resource:       node.Strategy,
-		scheme.Pods.Resource:        pod.Strategy,
-		scheme.Services.Resource:    service.Strategy,
-		scheme.Events.Resource:      event.Strategy,
-		scheme.Deployments.Resource: deployment.Strategy,
-		scheme.ReplicaSets.Resource: replicaset.Strategy,
+// Registry holds the strategy of every served resource and the background
+// loop the Service allocators need.
+type Registry struct {
+	// Strategies is keyed by resource; pass it to apiserver.Config.
+	Strategies map[string]apiserver.Strategy
+	// ServiceAllocators hand out cluster IPs and node ports.
+	ServiceAllocators *service.Allocators
+	// ServiceRepair reconciles them with the stored Services.
+	ServiceRepair *service.Repair
+}
+
+// New returns the registry for the objects stored in store under prefix
+// (the API server's etcd prefix, "/registry" by default).
+func New(store *etcd3.Store, prefix string) *Registry {
+	if prefix == "" {
+		prefix = "/registry"
+	}
+	allocators := service.NewAllocators(store, prefix)
+	return &Registry{
+		Strategies: map[string]apiserver.Strategy{
+			scheme.Namespaces.Resource:  namespace.Strategy,
+			scheme.Nodes.Resource:       node.Strategy,
+			scheme.Pods.Resource:        pod.Strategy,
+			scheme.Services.Resource:    service.NewStrategy(allocators),
+			scheme.Endpoints.Resource:   endpoints.Strategy,
+			scheme.Events.Resource:      event.Strategy,
+			scheme.Deployments.Resource: deployment.Strategy,
+			scheme.ReplicaSets.Resource: replicaset.Strategy,
+			scheme.Ingresses.Resource:   ingress.Strategy,
+		},
+		ServiceAllocators: allocators,
+		ServiceRepair:     service.NewRepair(store, prefix, allocators),
 	}
 }

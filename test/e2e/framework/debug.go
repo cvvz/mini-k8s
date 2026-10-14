@@ -6,8 +6,9 @@ import (
 	"github.com/onsi/ginkgo/v2"
 )
 
-// ControlPlaneComponents are the static Pods of the control-plane node.
-var ControlPlaneComponents = []string{"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler", "gateway"}
+// ControlPlaneComponents are the static Pods of the control-plane node;
+// kube-proxy also runs on every worker.
+var ControlPlaneComponents = []string{"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler", "ingress-controller", "kube-proxy"}
 
 // DumpDebugInfo writes cluster state, the namespace's objects and events, and
 // recent component logs to the spec report.
@@ -17,7 +18,7 @@ func DumpDebugInfo(ctx context.Context, namespace string) {
 	commands := [][]string{{"get", "nodes", "-o", "wide"}}
 	if namespace != "" {
 		commands = append(commands,
-			[]string{"get", "deployments,pods,services", "-o", "wide", "-n", namespace},
+			[]string{"get", "deployments,pods,services,endpoints,ingresses", "-o", "wide", "-n", namespace},
 			[]string{"get", "events", "-n", namespace})
 	}
 	for _, args := range commands {

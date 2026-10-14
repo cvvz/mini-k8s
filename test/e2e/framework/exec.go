@@ -141,3 +141,9 @@ func StartKK(ctx context.Context, args ...string) (out *gbytes.Buffer, stop func
 		<-done
 	}
 }
+
+// FetchFromPod GETs url from inside a Pod of the spec namespace with
+// `kk exec POD -- /mini fetch URL`; out is the status code line and body.
+func (f *Framework) FetchFromPod(ctx context.Context, pod, url string) (string, error) {
+	return RunKK(ctx, "exec", "-n", f.Namespace, pod, "--", "/mini", "fetch", url)
+}

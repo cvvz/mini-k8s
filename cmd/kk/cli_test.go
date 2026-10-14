@@ -268,18 +268,18 @@ func TestPodStatusReasonAndAges(t *testing.T) {
 }
 
 // TestExamplesFollowTheREADME replays the README walkthrough: the demo in the
-// default namespace, then the Service-less example in a second namespace.
+// default namespace, then the NodePort example in a second namespace.
 func TestExamplesFollowTheREADME(t *testing.T) {
 	c := framework.StartTestServer(t)
 	example := func(name string) string { return filepath.Join("..", "..", "examples", name) }
 	out, err := kk(t, c, "", "apply", "-f", example("demo.yaml"))
-	if err != nil || !strings.Contains(out, "deployment.apps/web created") || !strings.Contains(out, "service/web created") {
+	if err != nil || out != "deployment.apps/web created\nservice/web created\ningress.networking.k8s.io/web created\n" {
 		t.Fatalf("%q %v", out, err)
 	}
 	if _, err := kk(t, c, "", "create", "namespace", "team"); err != nil {
 		t.Fatal(err)
 	}
-	if out, err = kk(t, c, "", "apply", "-n", "team", "-f", example("hello.yaml")); err != nil || out != "deployment.apps/hello created\n" {
+	if out, err = kk(t, c, "", "apply", "-n", "team", "-f", example("hello.yaml")); err != nil || out != "deployment.apps/hello created\nservice/hello created\n" {
 		t.Fatalf("hello.yaml in a second namespace: %q %v", out, err)
 	}
 	if out, err = kk(t, c, "", "apply", "-n", "team", "-f", example("init-and-sidecar.yaml")); err != nil || !strings.Contains(out, "pod/web-with-sidecar created") {

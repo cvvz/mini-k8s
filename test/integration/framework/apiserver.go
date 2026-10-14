@@ -21,11 +21,21 @@ const Token = "test-token"
 // when no etcd binary is available.
 func StartTestServer(t testing.TB) *client.Client {
 	t.Helper()
-	s := apiserver.New(apiserver.Config{Strategies: registry.Strategies(), Store: etcd3.New(etcdtesting.URL(t)), Token: Token, Prefix: etcdtesting.Prefix(t)})
+	c, _ := StartTestServerWithRegistry(t)
+	return c
+}
+
+// StartTestServerWithRegistry also returns the server's registry, whose
+// Service repair loop tests run by hand.
+func StartTestServerWithRegistry(t testing.TB) (*client.Client, *registry.Registry) {
+	t.Helper()
+	store, prefix := etcd3.New(etcdtesting.URL(t)), etcdtesting.Prefix(t)
+	reg := registry.New(store, prefix)
+	s := apiserver.New(apiserver.Config{Strategies: reg.Strategies, Store: store, Token: Token, Prefix: prefix})
 	if err := s.Bootstrap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	hs := httptest.NewServer(s)
 	t.Cleanup(hs.Close)
-	return client.New(hs.URL, Token)
+	return client.New(hs.URL, Token), reg
 }

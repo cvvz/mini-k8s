@@ -170,7 +170,7 @@ func (m *Manager) sandboxConfig(pod *corev1.Pod, attempt uint32) *runtimeapi.Pod
 		DnsConfig:    m.DNS,
 		Labels:       podLabels(pod),
 		Linux: &runtimeapi.LinuxPodSandboxConfig{SecurityContext: &runtimeapi.LinuxSandboxSecurityContext{
-			NamespaceOptions: namespaces(pod)}},
+			NamespaceOptions: namespaces(pod), Privileged: hasPrivilegedContainer(pod)}},
 	}
 	if pod.Spec.HostNetwork {
 		// The node's hostname and resolver apply, as for host-network Pods
@@ -193,7 +193,7 @@ func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32, volume
 		Labels:   labels,
 		LogPath:  fmt.Sprintf("%s/%d.log", c.Name, attempt),
 		Linux: &runtimeapi.LinuxContainerConfig{Resources: linuxResources(c.Resources),
-			SecurityContext: &runtimeapi.LinuxContainerSecurityContext{NamespaceOptions: namespaces(pod)}},
+			SecurityContext: securityContext(pod, c)},
 	}
 	for _, e := range c.Env {
 		cfg.Envs = append(cfg.Envs, &runtimeapi.KeyValue{Key: e.Name, Value: []byte(e.Value)})
@@ -202,6 +202,31 @@ func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32, volume
 		cfg.Mounts = append(cfg.Mounts, &runtimeapi.Mount{ContainerPath: vm.MountPath, HostPath: volumes[vm.Name], Readonly: vm.ReadOnly})
 	}
 	return cfg
+}
+
+// securityContext maps a container's privileges to CRI; the sandbox of a
+// Pod with a privileged container must be privileged as well.
+func securityContext(pod *corev1.Pod, c corev1.Container) *runtimeapi.LinuxContainerSecurityContext {
+	sc := &runtimeapi.LinuxContainerSecurityContext{NamespaceOptions: namespaces(pod)}
+	if c.SecurityContext == nil {
+		return sc
+	}
+	sc.Privileged = c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged
+	if caps := c.SecurityContext.Capabilities; caps != nil {
+		sc.Capabilities = &runtimeapi.Capability{AddCapabilities: caps.Add, DropCapabilities: caps.Drop}
+	}
+	return sc
+}
+
+func hasPrivilegedContainer(pod *corev1.Pod) bool {
+	for _, list := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+		for _, c := range list {
+			if c.SecurityContext != nil && c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CPU settings: the CFS period limits are expressed in (100ms), the largest

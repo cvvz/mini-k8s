@@ -160,3 +160,21 @@ func TestVolumeErrorsBlockOnlyNewContainersAndPodDirsAreRemoved(t *testing.T) {
 		t.Fatalf("killed Pod left its volumes: %v %v", err, m.Mounter.(*fakeMounter).mounted)
 	}
 }
+
+func TestSecurityContextInCRIConfig(t *testing.T) {
+	_, m, _ := newTestManager(t)
+	pod := testPod()
+	if cfg := containerConfig(pod, pod.Spec.Containers[0], 0, nil); cfg.Linux.SecurityContext.Privileged || m.sandboxConfig(pod, 0).Linux.SecurityContext.Privileged {
+		t.Fatal("containers are unprivileged by default")
+	}
+	privileged := true
+	pod.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: &privileged,
+		Capabilities: &corev1.Capabilities{Add: []string{"NET_ADMIN"}, Drop: []string{"MKNOD"}}}
+	sc := containerConfig(pod, pod.Spec.Containers[0], 0, nil).Linux.SecurityContext
+	if !sc.Privileged || sc.Capabilities.AddCapabilities[0] != "NET_ADMIN" || sc.Capabilities.DropCapabilities[0] != "MKNOD" {
+		t.Fatalf("security context: %+v", sc)
+	}
+	if !m.sandboxConfig(pod, 0).Linux.SecurityContext.Privileged {
+		t.Fatal("a privileged container needs a privileged sandbox")
+	}
+}

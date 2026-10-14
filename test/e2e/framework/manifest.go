@@ -116,7 +116,7 @@ func NewDeployment(name string, replicas int, labels map[string]string, c Contai
 	}
 }
 
-// NewService builds a Service manifest for the HTTP gateway.
+// NewService builds a ClusterIP Service with port 80 to targetPort.
 func NewService(name string, selector map[string]string, targetPort int) Object {
 	return Object{
 		"apiVersion": "v1", "kind": "Service",
