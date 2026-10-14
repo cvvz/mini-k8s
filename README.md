@@ -51,8 +51,45 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 ```
 
 Every component is a role of the single `mini` binary. Components and workloads share
-one local Docker Engine and a dedicated Docker network; workers are **logical nodes**,
-not separate machines.
+one local Docker Engine and a dedicated Docker network; workers are currently **logical
+nodes**, not separate machines (kind-style nodes from M2, see the roadmap).
+
+## What is built here and what is reused
+
+The split mirrors the Kubernetes project itself: everything Kubernetes implements is
+written from scratch here; what Kubernetes delegates to other projects (storage, the
+container runtime) uses those open-source components as-is, configured but not modified.
+
+**Built here** (Go, all in this repository):
+
+| Component | Responsibility | Status |
+| --- | --- | --- |
+| kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources | done |
+| controller-manager | Deployment, garbage collector, namespace controllers; later ReplicaSet, node IPAM, Endpoints, node lifecycle and more | done, growing |
+| scheduler | Picks a node for each Pod and binds it | done |
+| kubelet | Node registration and heartbeats, Pod lifecycle, status, graceful termination, logs; talks to the Docker API today and becomes a CRI client in M2 | done, reworked in M2 |
+| client libraries | Generic REST client, informers, work queues, event recorder | done |
+| gateway | Forwards HTTP on `127.0.0.1:18080` to a Service's ready Pods | done |
+| `kk` | CLI and cluster lifecycle | done |
+| demo app | HTTP server for examples and tests | done |
+| `mini-cni` + host-gw route agent | Pod networking: veth, bridge, IP allocation, cross-node routes | M2 |
+| `mini node-init`, pause image | Node container entrypoint (cgroup delegation, starts containerd and kubelet); Pod sandbox process | M2 |
+| kube-proxy, cluster DNS, Ingress | iptables rules for ClusterIP/NodePort; service discovery | M6 |
+
+**Open-source components used as-is**:
+
+| Component | Use | Status |
+| --- | --- | --- |
+| [etcd](https://etcd.io) v3.5.17 | The only state store (accessed through its v3 JSON gateway) | in use |
+| Docker Engine + Compose | Today: runs every component and workload; from M2: only runs the node containers (the "machines") | in use |
+| [containerd](https://containerd.io) + [runc](https://github.com/opencontainers/runc) | Container runtime inside each node; containerd's built-in CRI plugin is the CRI server, the kubelet is the client | M2 |
+| Ubuntu 24.04 base image, iptables, iproute2 | Operating environment of the node containers | M2 |
+| Linux kernel features | namespaces, cgroups, netfilter, bridges, veth | in use |
+
+**Go dependencies**: `gopkg.in/yaml.v3` (manifests); from M2 also `google.golang.org/grpc`
+and `k8s.io/cri-api` (the CRI protocol definitions only, no implementation); tests use
+Ginkgo/Gomega. The project depends on neither client-go nor any Kubernetes component's
+implementation.
 
 ## Prerequisites
 

@@ -46,7 +46,42 @@ Controller Manager、kubelet、HTTP 网关和命令行工具 **`kk`**，只复�
 ```
 
 所有组件是同一个二进制 `mini` 的不同角色，与业务容器共享一个本地 Docker Engine 和专用
-Docker 网络。worker 是**逻辑节点**，不是独立机器。
+Docker 网络。worker 目前是**逻辑节点**，不是独立机器（M2 起改为 kind 式节点，见路线图）。
+
+## 自研与复用的组件
+
+mini-k8s 的分工与 Kubernetes 项目本身一致：Kubernetes 自己实现的部分在这里全部自研；
+Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用开源组件，只写配置，不改代码。
+
+**自研**（Go，均在本仓库中）：
+
+| 组件 | 职责 | 状态 |
+| --- | --- | --- |
+| kube-apiserver | K8s 风格 REST、Watch、准入与校验、删除语义、子资源 | 已实现 |
+| controller-manager | Deployment、垃圾回收、Namespace 控制器；后续加入 ReplicaSet、node IPAM、Endpoints、节点生命周期等 | 已实现，持续扩展 |
+| scheduler | 为 Pod 选择节点并通过 binding 绑定 | 已实现 |
+| kubelet | 节点注册与心跳、Pod 生命周期、状态上报、优雅终止、日志；当前直接调用 Docker API，M2 起改为 CRI 客户端 | 已实现，M2 改造 |
+| 客户端库 | 泛型 REST 客户端、Informer、WorkQueue、Event 记录器 | 已实现 |
+| 网关 | 把 `127.0.0.1:18080` 的 HTTP 请求转发给 Service 的就绪 Pod | 已实现 |
+| `kk` | 命令行客户端与集群生命周期管理 | 已实现 |
+| demo 应用 | 示例与测试用的 HTTP 服务 | 已实现 |
+| `mini-cni` + host-gw 路由代理 | Pod 网络：veth、网桥、IP 分配、跨节点路由 | M2 |
+| `mini node-init`、pause 镜像 | 节点容器的入口（cgroup 委派、拉起 containerd 与 kubelet）；Pod 沙箱进程 | M2 |
+| kube-proxy、集群 DNS、Ingress | iptables 规则实现 ClusterIP/NodePort；服务发现 | M6 |
+
+**直接使用的开源组件**：
+
+| 组件 | 用途 | 状态 |
+| --- | --- | --- |
+| [etcd](https://etcd.io) v3.5.17 | 唯一的状态存储（通过 v3 JSON gateway 访问） | 已使用 |
+| Docker Engine + Compose | 当前：所有组件和业务容器的运行环境；M2 起：只用来运行节点容器（相当于“机器”） | 已使用 |
+| [containerd](https://containerd.io) + [runc](https://github.com/opencontainers/runc) | 节点内的容器运行时；containerd 内置的 CRI 插件是 CRI 服务端，kubelet 是客户端 | M2 |
+| Ubuntu 24.04 基础镜像、iptables、iproute2 | 节点容器的操作系统环境 | M2 |
+| Linux 内核能力 | namespace、cgroup、netfilter、bridge、veth | 已使用 |
+
+**Go 依赖**：`gopkg.in/yaml.v3`（解析清单）；M2 起增加 `google.golang.org/grpc` 与
+`k8s.io/cri-api`（仅为 CRI 协议定义，不含实现）；测试使用 Ginkgo/Gomega。项目不依赖
+client-go 或任何 Kubernetes 组件的实现代码。
 
 ## 环境要求
 
