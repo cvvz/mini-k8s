@@ -1,4 +1,6 @@
-package controller_test
+// Package controlplane runs the API server, controllers and scheduler together
+// against a real etcd, with a fake kubelet, to test their interplay.
+package controlplane
 
 import (
 	"context"
@@ -6,16 +8,18 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/client"
-	"mini-k8s/pkg/controller"
 	"mini-k8s/pkg/client/informers"
 	"mini-k8s/pkg/client/record"
+	"mini-k8s/pkg/controller/deployment"
+	"mini-k8s/pkg/controller/garbagecollector"
+	"mini-k8s/pkg/controller/namespace"
 	"mini-k8s/pkg/scheduler"
-	"mini-k8s/test/integration/framework"
-	metav1 "mini-k8s/pkg/apis/meta/v1"
-	corev1 "mini-k8s/pkg/apis/core/v1"
-	appsv1 "mini-k8s/pkg/apis/apps/v1"
 	"mini-k8s/pkg/util/ptr"
+	"mini-k8s/test/integration/framework"
 )
 
 // startControlPlane runs the controllers, the scheduler and a fake kubelet
@@ -38,10 +42,10 @@ func startControlPlane(t *testing.T, c *client.Client, nodes ...string) context.
 	nodeInf := informers.New(client.Nodes(c), client.ListOptions{}, 0)
 	deps := informers.New(client.Deployments(c, ""), client.ListOptions{}, 0)
 	nss := informers.New(client.Namespaces(c), client.ListOptions{}, 0)
-	dc := controller.NewDeploymentController(c, deps, pods, rec)
-	nc := controller.NewNamespaceController(c, nss)
+	dc := deployment.NewDeploymentController(c, deps, pods, rec)
+	nc := namespace.NewNamespaceController(c, nss)
 	sched := scheduler.New(c, pods, nodeInf, rec)
-	gc := controller.NewGarbageCollector(c, controller.GCResources())
+	gc := garbagecollector.NewGarbageCollector(c, garbagecollector.TrackedResources())
 	for _, run := range []func(context.Context){pods.Run, nodeInf.Run, deps.Run, nss.Run} {
 		go run(ctx)
 	}
@@ -107,7 +111,7 @@ func eventually(t *testing.T, what string, cond func() (bool, string)) {
 	t.Fatalf("timed out waiting for %s: %s", what, last)
 }
 
-func deployment(name string, replicas int32, image string) *appsv1.Deployment {
+func newDeployment(name string, replicas int32, image string) *appsv1.Deployment {
 	labels := map[string]string{"app": name}
 	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: appsv1.DeploymentSpec{
 		Replicas: ptr.To[int32](replicas), Selector: &metav1.LabelSelector{MatchLabels: labels},
@@ -135,7 +139,7 @@ func TestDeploymentScalesSpreadsAndReportsStatus(t *testing.T) {
 	c := framework.StartTestServer(t)
 	ctx := startControlPlane(t, c, "worker-1", "worker-2")
 	deps := client.Deployments(c, "default")
-	d, err := deps.Create(ctx, deployment("web", 4, "img:1"))
+	d, err := deps.Create(ctx, newDeployment("web", 4, "img:1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +171,7 @@ func TestDeploymentTemplateChangeRecreatesPods(t *testing.T) {
 	c := framework.StartTestServer(t)
 	ctx := startControlPlane(t, c, "worker-1")
 	deps := client.Deployments(c, "default")
-	if _, err := deps.Create(ctx, deployment("app", 2, "img:1")); err != nil {
+	if _, err := deps.Create(ctx, newDeployment("app", 2, "img:1")); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "2 pods", func() (bool, string) { return len(livePods(t, c, "default", "app=app")) == 2, "" })
@@ -192,7 +196,7 @@ func TestGarbageCollectionPolicies(t *testing.T) {
 	ctx := startControlPlane(t, c, "worker-1")
 	deps := client.Deployments(c, "default")
 	for _, name := range []string{"bg", "orphan", "fg"} {
-		if _, err := deps.Create(ctx, deployment(name, 2, "img")); err != nil {
+		if _, err := deps.Create(ctx, newDeployment(name, 2, "img")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -240,7 +244,7 @@ func TestNamespaceDeletionRemovesContents(t *testing.T) {
 	if _, err := client.Namespaces(c).Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Deployments(c, "team").Create(ctx, deployment("web", 2, "img")); err != nil {
+	if _, err := client.Deployments(c, "team").Create(ctx, newDeployment("web", 2, "img")); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "pods in team", func() (bool, string) { return len(livePods(t, c, "team", "")) == 2, "" })
@@ -281,7 +285,7 @@ func TestNamespaceDeletedWithOrphanPolicyIsReleased(t *testing.T) {
 	if _, err := client.Namespaces(c).Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "orphaned"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Deployments(c, "orphaned").Create(ctx, deployment("web", 1, "img")); err != nil {
+	if _, err := client.Deployments(c, "orphaned").Create(ctx, newDeployment("web", 1, "img")); err != nil {
 		t.Fatal(err)
 	}
 	orphan := metav1.DeletePropagationOrphan

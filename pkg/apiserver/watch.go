@@ -52,7 +52,7 @@ func (s *Server) serveWatch(w http.ResponseWriter, r *http.Request, info request
 			return
 		}
 		for _, obj := range objs {
-			if matches(obj, sel, fsel) {
+			if s.matches(info.res, obj, sel, fsel) {
 				initial = append(initial, obj)
 			}
 		}
@@ -128,8 +128,8 @@ func (s *Server) translate(res scheme.ResourceInfo, ev etcd3.Event, sel labels.S
 		}
 		prev = obj
 	}
-	curMatch := cur != nil && matches(cur, sel, fsel)
-	prevMatch := prev != nil && matches(prev, sel, fsel)
+	curMatch := cur != nil && s.matches(res, cur, sel, fsel)
+	prevMatch := prev != nil && s.matches(res, prev, sel, fsel)
 	switch {
 	case ev.Type == etcd3.Delete:
 		if prevMatch {

@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
   apiserver:
     <<: *common
-    command: [apiserver]
+    command: [kube-apiserver]
     environment:
       <<: *env
       MINI_ETCD: http://etcd:2379
@@ -33,11 +33,11 @@ services:
     depends_on: [etcd]
   scheduler:
     <<: *common
-    command: [scheduler]
+    command: [kube-scheduler]
     depends_on: [apiserver]
   controller:
     <<: *common
-    command: [controller-manager]
+    command: [kube-controller-manager]
     depends_on: [apiserver]
   worker-1:
     <<: *common
@@ -57,7 +57,7 @@ services:
     depends_on: [apiserver]
   proxy:
     <<: *common
-    command: [proxy]
+    command: [gateway]
     ports: ["127.0.0.1:18080:8080"]
     depends_on: [apiserver]
 networks:

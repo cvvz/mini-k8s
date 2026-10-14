@@ -1,4 +1,5 @@
-package controller
+// Package deployment implements the Deployment controller.
+package deployment
 
 import (
 	"context"
@@ -12,6 +13,7 @@ import (
 	"mini-k8s/pkg/client/informers"
 	"mini-k8s/pkg/client/record"
 	"mini-k8s/pkg/client/workqueue"
+	"mini-k8s/pkg/controller"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
@@ -27,50 +29,41 @@ type DeploymentController struct {
 	pods        *informers.Informer[corev1.Pod, *corev1.Pod]
 	recorder    *record.Recorder
 	queue       *workqueue.Queue
-	expect      *expectations
+	expect      *controller.Expectations
 }
 
 // NewDeploymentController wires event handlers onto the shared informers.
 func NewDeploymentController(c *client.Client, deployments *informers.Informer[appsv1.Deployment, *appsv1.Deployment],
 	pods *informers.Informer[corev1.Pod, *corev1.Pod], recorder *record.Recorder) *DeploymentController {
 	dc := &DeploymentController{client: c, deployments: deployments, pods: pods, recorder: recorder,
-		queue: workqueue.New(), expect: newExpectations()}
+		queue: workqueue.New(), expect: controller.NewExpectations()}
 	enqueue := func(d *appsv1.Deployment) { dc.queue.Add(informers.Key(d)) }
 	deployments.AddHandler(informers.Handler[*appsv1.Deployment]{
 		OnAdd: enqueue, OnUpdate: func(_, d *appsv1.Deployment) { enqueue(d) }, OnDelete: enqueue,
 	})
 	pods.AddHandler(informers.Handler[*corev1.Pod]{
 		OnAdd: func(p *corev1.Pod) {
-			if key := ownerKey(p, "Deployment"); key != "" {
-				dc.expect.observeAdd(key)
+			if key := controller.OwnerKey(p, "Deployment"); key != "" {
+				dc.expect.ObserveAdd(key)
 				dc.queue.Add(key)
 			}
 		},
 		OnUpdate: func(old, cur *corev1.Pod) {
-			if key := ownerKey(cur, "Deployment"); key != "" {
+			if key := controller.OwnerKey(cur, "Deployment"); key != "" {
 				if cur.DeletionTimestamp != nil && old.DeletionTimestamp == nil {
-					dc.expect.observeDelete(key, cur.UID)
+					dc.expect.ObserveDelete(key, cur.UID)
 				}
 				dc.queue.Add(key)
 			}
 		},
 		OnDelete: func(p *corev1.Pod) {
-			if key := ownerKey(p, "Deployment"); key != "" {
-				dc.expect.observeDelete(key, p.UID)
+			if key := controller.OwnerKey(p, "Deployment"); key != "" {
+				dc.expect.ObserveDelete(key, p.UID)
 				dc.queue.Add(key)
 			}
 		},
 	})
 	return dc
-}
-
-// ownerKey returns "namespace/name" of the managing controller of kind.
-func ownerKey(obj metav1.Object, kind string) string {
-	m := obj.GetObjectMeta()
-	if ref := metav1.ControllerOf(m); ref != nil && ref.Kind == kind {
-		return m.Namespace + "/" + ref.Name
-	}
-	return ""
 }
 
 // Run processes Deployments until ctx ends.
@@ -101,10 +94,10 @@ func (dc *DeploymentController) sync(ctx context.Context, key string) error {
 	ns, name := informers.SplitKey(key)
 	d, ok := dc.deployments.Get(ns, name)
 	if !ok {
-		dc.expect.forget(key)
+		dc.expect.Forget(key)
 		return nil
 	}
-	if d.DeletionTimestamp != nil || !dc.expect.satisfied(key) {
+	if d.DeletionTimestamp != nil || !dc.expect.Satisfied(key) {
 		return nil
 	}
 	sel, err := d.Spec.Selector.AsSelector()
@@ -144,7 +137,7 @@ func (dc *DeploymentController) sync(ctx context.Context, key string) error {
 	for i, p := range deletes {
 		uids[i] = p.UID
 	}
-	dc.expect.expect(key, creates, uids)
+	dc.expect.Expect(key, creates, uids)
 	if err := dc.manage(ctx, d, hash, creates, deletes); err != nil {
 		return err
 	}
@@ -161,7 +154,7 @@ func (dc *DeploymentController) manage(ctx context.Context, d *appsv1.Deployment
 			defer wg.Done()
 			p, err := client.Pods(dc.client, d.Namespace).Create(ctx, podFromTemplate(d, hash))
 			if err != nil {
-				dc.expect.observeAdd(key)
+				dc.expect.ObserveAdd(key)
 				dc.recorder.Eventf(d, corev1.EventTypeWarning, "FailedCreate", "Error creating pod: %v", err)
 				errs <- err
 				return
@@ -175,7 +168,7 @@ func (dc *DeploymentController) manage(ctx context.Context, d *appsv1.Deployment
 			defer wg.Done()
 			err := client.Pods(dc.client, p.Namespace).Delete(ctx, p.Name, &metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &p.UID}})
 			if err != nil && !client.IsNotFound(err) {
-				dc.expect.observeDelete(key, p.UID)
+				dc.expect.ObserveDelete(key, p.UID)
 				errs <- err
 				return
 			}

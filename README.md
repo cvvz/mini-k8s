@@ -91,6 +91,29 @@ and `k8s.io/cri-api` (the CRI protocol definitions only, no implementation); tes
 Ginkgo/Gomega. The project depends on neither client-go nor any Kubernetes component's
 implementation.
 
+## Code structure
+
+Directories and package names follow the Kubernetes source tree, so the two can be read
+side by side (full mapping in
+[v2 design specification §15](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)):
+
+```text
+cmd/mini/                    multi-call binary: mini kube-apiserver | kube-controller-manager | kube-scheduler | kubelet | gateway | demo
+cmd/kk/                      CLI (kubectl plus cluster lifecycle)
+pkg/apis/{meta,core,apps}/v1 resource types (metav1, corev1, appsv1) and validation
+pkg/labels, fields, watch    selectors and watch event types (as in apimachinery)
+pkg/scheme                   resource registry
+pkg/apiserver                generic API server (as k8s.io/apiserver)
+pkg/registry/<group>/<res>   per-resource strategies: defaults, validation, mutability, field selectors
+pkg/storage/etcd3            etcd storage
+pkg/client/...               client, informers, workqueue, record (as client-go)
+pkg/controller/<name>        deployment, garbagecollector, namespace controllers
+pkg/scheduler                scheduler
+pkg/kubelet[/dockershim]     node agent and its Docker runtime adapter
+pkg/gateway                  HTTP gateway
+test/e2e, test/integration   end-to-end and integration tests
+```
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -249,8 +272,9 @@ make test                # unit and component tests (a throwaway etcd from bin/e
 go test -race ./...
 ```
 
-Component tests run the real API server in-process against a temporary etcd started
-from `bin/etcd` (prepared by `make prepare-etcd`); they are skipped when it is missing.
+Integration tests (`test/integration`, and package tests using `test/integration/framework`)
+run the real API server in-process against a temporary etcd started from `bin/etcd`
+(prepared by `make prepare-etcd`); they are skipped when it is missing.
 
 End-to-end tests are a Ginkgo v2 suite modelled after Kubernetes' `test/e2e` (see
 [test/e2e/README.md](test/e2e/README.md)). Each spec runs in its own namespace, which is

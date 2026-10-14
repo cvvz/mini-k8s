@@ -1,4 +1,6 @@
-package controller
+// Package garbagecollector implements ownerReference-based garbage
+// collection with Background, Foreground and Orphan propagation.
+package garbagecollector
 
 import (
 	"context"
@@ -26,9 +28,9 @@ type GarbageCollector struct {
 	trigger chan struct{}
 }
 
-// GCResources are the resources the garbage collector tracks: every kind
+// TrackedResources are the resources the garbage collector tracks: every kind
 // that can own or be owned. Events are excluded; they never take part.
-func GCResources() []scheme.ResourceInfo {
+func TrackedResources() []scheme.ResourceInfo {
 	var out []scheme.ResourceInfo
 	for _, r := range scheme.All {
 		if r.Resource != scheme.Events.Resource {

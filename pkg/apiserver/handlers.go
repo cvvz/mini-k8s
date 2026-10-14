@@ -31,7 +31,7 @@ func readBody(r *http.Request) ([]byte, error) {
 }
 
 // selectors parses and validates labelSelector/fieldSelector query parameters.
-func selectors(info requestInfo, q map[string][]string) (labels.Selector, fields.Selector, error) {
+func (s *Server) selectors(info requestInfo, q map[string][]string) (labels.Selector, fields.Selector, error) {
 	get := func(k string) string {
 		if v := q[k]; len(v) > 0 {
 			return v[0]
@@ -46,19 +46,15 @@ func selectors(info requestInfo, q map[string][]string) (labels.Selector, fields
 	if err != nil {
 		return nil, nil, errBadRequest("invalid fieldSelector: %v", err)
 	}
-	if err := fsel.Validate(fieldsOf(info.res.New())); err != nil {
+	if err := fsel.Validate(s.fieldsOf(info.res, info.res.New())); err != nil {
 		return nil, nil, errBadRequest("%v", err)
 	}
 	return sel, fsel, nil
 }
 
-func matches(obj metav1.Object, sel labels.Selector, fsel fields.Selector) bool {
-	return sel.Matches(obj.GetObjectMeta().Labels) && fsel.Matches(fieldsOf(obj))
-}
-
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request, info requestInfo) {
 	q := r.URL.Query()
-	sel, fsel, err := selectors(info, q)
+	sel, fsel, err := s.selectors(info, q)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -78,7 +74,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request, info request
 		Items:    []metav1.Object{},
 	}
 	for _, obj := range objs {
-		if matches(obj, sel, fsel) {
+		if s.matches(info.res, obj, sel, fsel) {
 			list.Items = append(list.Items, obj)
 		}
 	}
@@ -127,7 +123,7 @@ func (s *Server) createFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	if m.ResourceVersion != "" {
 		return nil, errBadRequest("resourceVersion should not be set on objects to be created")
 	}
-	st := strategies[res.Resource]
+	st := s.cfg.Strategies[res.Resource]
 	generated := m.Name == "" && m.GenerateName != ""
 	if generated {
 		base := m.GenerateName
@@ -139,7 +135,7 @@ func (s *Server) createFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	if m.Name == "" {
 		return nil, errInvalid(res, "", []string{"metadata.name: Required value: name or generateName is required"})
 	}
-	if !validName(m.Name, st.nameIsLabel) {
+	if !validName(m.Name, st.NameIsDNSLabel) {
 		return nil, errInvalid(res, m.Name, []string{"metadata.name: Invalid value: must be a lowercase RFC 1123 DNS name"})
 	}
 	if res.Namespaced {
@@ -157,11 +153,11 @@ func (s *Server) createFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	if res.HasStatus {
 		resetField(obj, "Status")
 	}
-	if st.defaults != nil {
-		st.defaults(obj)
+	if st.Defaults != nil {
+		st.Defaults(obj)
 	}
-	if st.prepareForCreate != nil {
-		st.prepareForCreate(obj)
+	if st.PrepareForCreate != nil {
+		st.PrepareForCreate(obj)
 	}
 	if errs := s.validate(res, st, obj); len(errs) > 0 {
 		return nil, errInvalid(res, m.Name, errs)
@@ -183,7 +179,7 @@ func (s *Server) createFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	}
 }
 
-func (s *Server) validate(res scheme.ResourceInfo, st strategy, obj metav1.Object) []string {
+func (s *Server) validate(res scheme.ResourceInfo, st Strategy, obj metav1.Object) []string {
 	m := obj.GetObjectMeta()
 	var errs []string
 	if err := labels.ValidateLabels(m.Labels); err != nil {
@@ -194,8 +190,8 @@ func (s *Server) validate(res scheme.ResourceInfo, st strategy, obj metav1.Objec
 			errs = append(errs, "metadata.ownerReferences: Invalid value: apiVersion, kind, name and uid are required")
 		}
 	}
-	if st.validate != nil {
-		errs = append(errs, st.validate(obj)...)
+	if st.Validate != nil {
+		errs = append(errs, st.Validate(obj)...)
 	}
 	return errs
 }
@@ -356,15 +352,15 @@ func (s *Server) updateFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	rm := result.GetObjectMeta()
 	rm.ResourceVersion = om.ResourceVersion
 	res.SetTypeMeta(result)
-	st := strategies[res.Resource]
-	if st.defaults != nil {
-		st.defaults(result)
+	st := s.cfg.Strategies[res.Resource]
+	if st.Defaults != nil {
+		st.Defaults(result)
 	}
 	if errs := s.validate(res, st, result); len(errs) > 0 {
 		return nil, errInvalid(res, info.name, errs)
 	}
-	if info.subresource != "status" && st.validateUpdate != nil {
-		if errs := st.validateUpdate(result, old); len(errs) > 0 {
+	if info.subresource != "status" && st.ValidateUpdate != nil {
+		if errs := st.ValidateUpdate(result, old); len(errs) > 0 {
 			return nil, errInvalid(res, info.name, errs)
 		}
 	}

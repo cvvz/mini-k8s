@@ -34,6 +34,9 @@ type Config struct {
 	EventTTL time.Duration
 	// WatchTimeout closes idle watch streams so clients re-establish them.
 	WatchTimeout time.Duration
+	// Strategies holds the per-resource strategies, keyed by resource
+	// (see pkg/registry). Required.
+	Strategies map[string]Strategy
 }
 
 // Server is an http.Handler serving the API.
@@ -51,6 +54,9 @@ const Version = "v2.0.0-mini"
 
 // New returns a Server with defaults applied to cfg.
 func New(cfg Config) *Server {
+	if cfg.Strategies == nil {
+		panic("apiserver: Config.Strategies is required (use registry.Strategies())")
+	}
 	if cfg.Prefix == "" {
 		cfg.Prefix = "/registry"
 	}

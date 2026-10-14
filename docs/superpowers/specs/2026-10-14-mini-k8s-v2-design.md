@@ -407,3 +407,31 @@ kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
 - `kk image load IMAGE...`：`docker save` 后在每个节点 `ctr -n k8s.io images import`。
 - e2e：断言“Pod 有真实运行的容器”改为在节点内经 CRI 查询；新增跨节点 Pod 互通、Pod 源 IP
   保留、Pod 出网（TCP）、停止节点容器后其 Pod 不可达、`kk image load` 等用例。
+
+## 15. 代码结构（2026-10-15 起）
+
+目录与包名对齐 Kubernetes，熟悉 k8s 源码的读者可以直接对照：
+
+| 路径 | 内容 | 对应的 Kubernetes 位置 |
+| --- | --- | --- |
+| `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`kubelet`、`gateway`、`demo` | `cmd/kube-*`（及早期的 `hyperkube`） |
+| `cmd/kk` | 命令行客户端与集群生命周期 | `kubectl`、`kind` |
+| `pkg/apis/{meta,core,apps}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
+| `pkg/apis/{core,apps}/validation` | 资源校验 | `pkg/apis/*/validation` |
+| `pkg/labels`、`pkg/fields`、`pkg/watch` | 选择器与 watch 事件类型 | `apimachinery/pkg/{labels,fields,watch}` |
+| `pkg/scheme` | 资源注册表（REST 坐标、Kind、构造函数） | `runtime.Scheme`、`RESTMapper` |
+| `pkg/apiserver` | 通用 API 服务：路由、存储读写、删除语义、watch、子资源 | `k8s.io/apiserver` |
+| `pkg/registry/{core,apps}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器） | `pkg/registry/<group>/<resource>` |
+| `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
+| `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
+| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器 | `pkg/controller` |
+| `pkg/scheduler` | 调度器 | `pkg/scheduler` |
+| `pkg/kubelet`、`pkg/kubelet/dockershim` | 节点代理；Docker 运行时适配（M2 由 CRI 客户端取代） | `pkg/kubelet`、已移除的 dockershim |
+| `pkg/gateway` | 单 Service 的 HTTP 网关（M6 由 kube-proxy 与 Ingress 取代） | 无直接对应 |
+| `pkg/util/{ptr,deepcopy,validation}` | 通用小工具 | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation` |
+| `test/e2e` | Ginkgo 端到端测试 | `test/e2e` |
+| `test/integration` | 真实 etcd + 进程内 API Server 的集成测试与框架 | `test/integration` |
+
+所有包都在 `pkg/` 下、可被外部模块导入（与 Kubernetes 的 `pkg/` 一样不承诺 API 稳定）；
+`pkg/apis` 与 `pkg/client` 足以让外部程序编写自己的控制器。
+

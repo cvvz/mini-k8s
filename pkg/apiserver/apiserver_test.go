@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mini-k8s/pkg/apiserver"
+	"mini-k8s/pkg/registry"
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/storage/etcd3"
 	etcdtesting "mini-k8s/pkg/storage/etcd3/testing"
@@ -24,7 +25,7 @@ import (
 
 func newServer(t *testing.T) (*client.Client, string) {
 	t.Helper()
-	s := apiserver.New(apiserver.Config{Store: etcd3.New(etcdtesting.URL(t)), Token: "secret", Prefix: etcdtesting.Prefix(t)})
+	s := apiserver.New(apiserver.Config{Strategies: registry.Strategies(), Store: etcd3.New(etcdtesting.URL(t)), Token: "secret", Prefix: etcdtesting.Prefix(t)})
 	if err := s.Bootstrap(context.Background()); err != nil {
 		t.Fatal(err)
 	}

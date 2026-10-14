@@ -1,4 +1,6 @@
-package controller
+// Package namespace implements the namespace controller, which empties
+// terminating namespaces.
+package namespace
 
 import (
 	"context"
