@@ -7,10 +7,15 @@ func SetDefaultsPodSpec(spec *PodSpec) {
 	if spec.TerminationGracePeriodSeconds == nil {
 		spec.TerminationGracePeriodSeconds = ptr.To[int64](30)
 	}
-	for i := range spec.Containers {
-		for j := range spec.Containers[i].Ports {
-			if spec.Containers[i].Ports[j].Protocol == "" {
-				spec.Containers[i].Ports[j].Protocol = "TCP"
+	if spec.RestartPolicy == "" {
+		spec.RestartPolicy = RestartPolicyAlways
+	}
+	for _, list := range [][]Container{spec.InitContainers, spec.Containers} {
+		for i := range list {
+			for j := range list[i].Ports {
+				if list[i].Ports[j].Protocol == "" {
+					list[i].Ports[j].Protocol = "TCP"
+				}
 			}
 		}
 	}

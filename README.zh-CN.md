@@ -25,6 +25,9 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   调度器（通过 binding 子资源绑定，不可调度时写入条件和事件）。
 - **kind 式节点**：每个节点是一个运行自己 containerd 的特权容器；kubelet 通过 **CRI**
   管理 Pod（每个 Pod 先建沙箱，再建容器）；只有运行时、Pod 网络和沙箱镜像都就绪时节点才 Ready。
+- **Pod**：多个容器共享同一网络命名空间；init 容器按顺序逐个运行至成功；`restartPolicy`
+  Always/OnFailure/Never，终态 Succeeded/Failed 与 Initialized/ContainersReady/Ready 条件按
+  Kubernetes kubelet 的规则计算；`kk exec` 在容器内执行命令。
 - **kubelet**：节点注册与心跳；每个 Pod 一个 worker；带退避的重启（CrashLoopBackOff）；
   镜像拉取失败上报（ErrImagePull/ImagePullBackOff）；节点重启后重建沙箱；
   日志（支持 follow/tail/`--previous`）；清理孤儿沙箱。
@@ -35,7 +38,7 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   `kk describe` 会展示对象关联的事件。
 - **kk**：`get`（`-o wide|json|yaml|name`、`-l`、`--field-selector`、`-A`、`-w`）、`describe`、
   `apply`/`create`（先整体 dry-run 再写入）、`delete`（`--grace-period`、`--force`、
-  `--cascade`）、`logs -f/-p`、`scale`、`api-resources`、`version`、集群生命周期命令，
+  `--cascade`）、`logs -f/-p/-c`、`exec`、`scale`、`api-resources`、`version`、集群生命周期命令，
   以及 `image load`（把本地镜像导入各节点）。
 
 ```text
@@ -218,6 +221,7 @@ kk describe deployment web               # 详情与关联事件
 kk get events
 kk logs -f POD_NAME                      # POD_NAME 换成 get pods 输出的名字
 kk logs -p POD_NAME                      # 容器重启后查看上一个实例的日志
+kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/   # 在 Pod 中执行命令
 kk scale deployment web --replicas 3
 kk delete pod POD_NAME                   # 优雅终止，Deployment 会补建新 Pod
 kk delete pod POD_NAME --force           # 立即从 API 删除
@@ -226,6 +230,10 @@ kk create namespace team
 kk apply -n team -f examples/hello.yaml  # 在另一个命名空间部署（不含 Service）
 kk get pods -A                           # 跨命名空间查看
 kk delete namespace team                 # 级联删除其中所有资源
+
+kk apply -f examples/init-and-sidecar.yaml   # init 容器 + 共享网络的两个容器
+kk get pod web-with-sidecar              # 先 Init:0/1，之后 2/2 Running
+kk exec web-with-sidecar -c sidecar -- /mini fetch http://127.0.0.1:8080/
 
 docker exec mini-k8s-worker-1-1 crictl ps    # 像登录真实机器一样查看节点内部
 ```
@@ -261,8 +269,8 @@ kk image load my-app:v1
 | --- | --- | --- |
 | Namespace | `v1` | 创建、删除（Terminating → 清空内容 → 删除）。启动时自动创建 `default`、`kube-system`。 |
 | Node | `v1` | 由 kubelet 注册并心跳；`spec.podCIDR` 由 node IPAM 一次性分配；`spec.unschedulable` 会被调度器遵守。 |
-| Pod | `v1` | **单容器**：`name`、`image`、`command`、`args`、`env`、`ports`；`terminationGracePeriodSeconds`；`nodeName`。创建后 spec 不可变。 |
-| Deployment | `apps/v1` | `replicas`（默认 1）、`selector`（matchLabels/matchExpressions，创建后不可变）、`template`。模板变化时按 Recreate 策略替换 Pod。 |
+| Pod | `v1` | `containers`（一个或多个）与 `initContainers`：`name`、`image`、`command`、`args`、`env`、`ports`；`restartPolicy`（Always、OnFailure、Never）；`terminationGracePeriodSeconds`；`nodeName`。创建后 spec 不可变。子资源 `log` 与 `exec`。 |
+| Deployment | `apps/v1` | `replicas`（默认 1）、`selector`（matchLabels/matchExpressions，创建后不可变）、`template`（`restartPolicy` 必须为 Always）。模板变化时按 Recreate 策略替换 Pod。 |
 | Service | `v1` | 整个集群一个 HTTP 网关 Service：`selector`，一个 `port: 80`，`targetPort`。 |
 | Event | `v1` | 由组件记录，可查询；1 小时后过期。 |
 
@@ -272,7 +280,8 @@ kk image load my-app:v1
 
 ## 当前限制（后续里程碑会解决）
 
-- Pod 只支持一个容器，没有探针、资源限制、ConfigMap/Secret 和卷。
+- Pod 没有探针、资源限制、ConfigMap/Secret 和卷。`kk exec` 把命令执行完再返回输出，
+  不支持交互式会话（stdin/tty），与 Kubernetes 的流式 exec 不同。
 - Deployment 直接管理 Pod，没有 ReplicaSet，也没有滚动更新和回滚。
 - 只有一个 HTTP 网关 Service，没有 ClusterIP、集群 DNS、NodePort 和 Ingress
   （Pod 经节点解析 Docker 网络中的名字，例如 `apiserver`）。
@@ -352,7 +361,8 @@ unset MINI_TOKEN
 | E2E | Ginkgo e2e 框架 | ✅ |
 | M1 | API 机制：K8s 风格 REST、Namespace、Watch、Informer/WorkQueue、GC、优雅删除、Events | ✅ |
 | M2 | kind 式节点：节点内 containerd、kubelet 经 CRI 管理 Pod、自研 CNI（host-gw 跨节点路由） | ✅ |
-| M3 | Pod 与 kubelet：多容器、init 容器、探针、资源限制、exec | 计划中 |
+| M3a | Pod：多容器、init 容器、重启策略与终态、`kk exec` | ✅ |
+| M3b | Pod：探针、资源限制、卷（emptyDir、hostPath）、hostNetwork | 计划中 |
 | M4 | 控制面自托管：control-plane 节点、static/mirror Pod，etcd 与控制面组件运行在 kube-system | 计划中 |
 | M5 | ReplicaSet、滚动更新与回滚 | 计划中 |
 | M6 | ClusterIP、Endpoints、iptables kube-proxy、DNS、NodePort、Ingress | 计划中 |
@@ -363,6 +373,7 @@ unset MINI_TOKEN
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M3a 多容器 Pod 计划](docs/superpowers/plans/2026-10-15-m3a-multi-container.md)
 - [M2 kind 式节点计划](docs/superpowers/plans/2026-10-15-m2-kind-nodes.md)
 - [M1 API 机制计划](docs/superpowers/plans/2026-10-14-m1-api-machinery.md)
 - [kind 式节点可行性验证](docs/superpowers/spikes/2026-10-15-kind-node-spike.md)：节点内 containerd、CRI、host-gw 跨节点网络的实测配方

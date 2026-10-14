@@ -38,6 +38,7 @@ var commandFlags = map[string][]flagSpec{
 		{long: "ignore-not-found"}, {long: "all"}},
 	"logs": {{long: "container", short: "c", takesValue: true}, {long: "follow", short: "f"}, {long: "tail", takesValue: true},
 		{long: "previous", short: "p"}},
+	"exec":          {{long: "container", short: "c", takesValue: true}},
 	"scale":         {{long: "replicas", takesValue: true}},
 	"api-resources": {},
 	"version":       {},

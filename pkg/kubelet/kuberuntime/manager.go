@@ -58,6 +58,7 @@ type Manager struct {
 
 type backoff struct {
 	attempts int
+	delay    time.Duration
 	next     time.Time
 	err      error
 }
@@ -208,6 +209,6 @@ func (m *Manager) postpone(prev backoff, err error) backoff {
 	if delay > 30*time.Second {
 		delay = 30 * time.Second
 	}
-	prev.next, prev.err = m.now().Add(delay), err
+	prev.delay, prev.next, prev.err = delay, m.now().Add(delay), err
 	return prev
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -27,17 +28,27 @@ func (m *Manager) KillPod(ctx context.Context, pod *corev1.Pod, grace int64) err
 			errs = append(errs, err)
 			continue
 		}
+		// Containers stop in parallel, so the whole Pod takes at most one
+		// grace period.
+		var wg sync.WaitGroup
+		var mu sync.Mutex
 		for _, c := range resp.Containers {
 			if c.State != runtimeapi.ContainerState_CONTAINER_RUNNING {
 				continue
 			}
-			stopCtx, cancel := context.WithTimeout(ctx, time.Duration(grace)*time.Second+30*time.Second)
-			_, err := m.runtime.StopContainer(stopCtx, &runtimeapi.StopContainerRequest{ContainerId: c.Id, Timeout: grace})
-			cancel()
-			if err != nil {
-				errs = append(errs, err)
-			}
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				stopCtx, cancel := context.WithTimeout(ctx, time.Duration(grace)*time.Second+30*time.Second)
+				defer cancel()
+				if _, err := m.runtime.StopContainer(stopCtx, &runtimeapi.StopContainerRequest{ContainerId: id, Timeout: grace}); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+			}(c.Id)
 		}
+		wg.Wait()
 		if err := m.removeSandbox(ctx, sb.Id); err != nil {
 			errs = append(errs, err)
 		}

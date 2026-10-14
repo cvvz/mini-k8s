@@ -39,8 +39,12 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 		labels := map[string]string{"app": "reboot"}
 		obj := framework.NewPod("reboot", labels, framework.DemoContainer())
 		obj.Spec()["nodeName"] = "worker-2"
-		f.Apply(ctx, obj)
+		never := framework.NewPod("reboot-never", map[string]string{"app": "reboot-never"}, framework.DemoContainer()).
+			WithRestartPolicy(corev1.RestartPolicyNever)
+		never.Spec()["nodeName"] = "worker-2"
+		f.Apply(ctx, obj, never)
 		before := f.WaitForRunningPods(ctx, labels, 1)[0]
+		f.WaitForRunningPods(ctx, map[string]string{"app": "reboot-never"}, 1)
 
 		By("restarting the worker-2 node container, which kills its containerd and Pods")
 		_, err := framework.Docker(ctx, "restart", framework.ComponentContainer("worker-2"))
@@ -55,6 +59,11 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 		Eventually(ctx, func() (string, error) {
 			return framework.RunKK(ctx, "logs", "reboot", "-n", f.Namespace)
 		}).Should(ContainSubstring("demo web server started"))
+
+		By("checking that a restartPolicy Never Pod is not run again but fails")
+		lost := f.WaitForPod(ctx, "reboot-never", "fails", func(p *corev1.Pod) bool { return p.Status.Phase == corev1.PodFailed })
+		Expect(lost.Status.ContainerStatuses[0].State.Terminated.Reason).To(Equal("ContainerStatusUnknown"))
+		Expect(framework.PodContainers(ctx, lost.UID, true)).To(BeEmpty())
 	})
 
 	It("should remove workloads on cluster down and restore them on cluster up", func(ctx SpecContext) {

@@ -46,7 +46,7 @@ func ContainerID(p corev1.Pod) string {
 }
 
 // WaitForRunningPods waits until exactly count live Pods match podLabels, all
-// are Running and Ready, and each has exactly one running container.
+// are Running and Ready, and each runs exactly one instance of each of its containers.
 func (f *Framework) WaitForRunningPods(ctx context.Context, podLabels map[string]string, count int) []corev1.Pod {
 	var pods []corev1.Pod
 	gomega.EventuallyWithOffset(1, ctx, func(g gomega.Gomega) {
@@ -58,7 +58,7 @@ func (f *Framework) WaitForRunningPods(ctx context.Context, podLabels map[string
 			g.Expect(corev1.IsPodReady(&p)).To(gomega.BeTrue(), "Pod %s not Ready", p.Name)
 			ids, err := PodContainers(ctx, p.UID, true)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
-			g.Expect(ids).To(gomega.HaveLen(1), "running containers of Pod %s", p.Name)
+			g.Expect(ids).To(gomega.HaveLen(len(p.Spec.Containers)), "running containers of Pod %s", p.Name)
 		}
 		pods = ps
 	}).WithTimeout(TestContext.PodStartTimeout).WithPolling(TestContext.Poll).Should(gomega.Succeed())

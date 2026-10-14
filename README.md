@@ -30,6 +30,10 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **Nodes like kind**: each node is a privileged container running its own containerd;
   the kubelet manages Pods over **CRI** (a sandbox per Pod, then its container);
   Ready only when the runtime, the Pod network and the sandbox image are ready.
+- **Pods**: several containers sharing one network namespace; init containers that run
+  one after another to completion; `restartPolicy` Always/OnFailure/Never with the
+  Succeeded/Failed phases and the Initialized/ContainersReady/Ready conditions computed
+  like the Kubernetes kubelet; `kk exec` runs commands in containers.
 - **kubelet**: node registration and heartbeats; one worker per Pod; restarts with
   backoff (CrashLoopBackOff); image pull errors (ErrImagePull/ImagePullBackOff); sandbox
   recreation after a node restart; logs with follow/tail/`--previous`; orphan cleanup.
@@ -41,7 +45,7 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   hour by an etcd lease); `kk describe` shows an object's events.
 - **kk**: `get` (`-o wide|json|yaml|name`, `-l`, `--field-selector`, `-A`, `-w`),
   `describe`, `apply`/`create` (server-side dry run of the whole batch first), `delete`
-  (`--grace-period`, `--force`, `--cascade`), `logs -f/-p`, `scale`, `api-resources`,
+  (`--grace-period`, `--force`, `--cascade`), `logs -f/-p/-c`, `exec`, `scale`, `api-resources`,
   `version`, cluster lifecycle and `image load` (copy local images into the nodes).
 
 ```text
@@ -234,6 +238,7 @@ kk describe deployment web               # details and related events
 kk get events
 kk logs -f POD_NAME                      # a name printed by kk get pods
 kk logs -p POD_NAME                      # the previous instance after a restart
+kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/   # run a command in the Pod
 kk scale deployment web --replicas 3
 kk delete pod POD_NAME                   # graceful; the Deployment replaces it
 kk delete pod POD_NAME --force           # removed from the API immediately
@@ -242,6 +247,10 @@ kk create namespace team
 kk apply -n team -f examples/hello.yaml  # deploy into another namespace (no Service)
 kk get pods -A                           # list across namespaces
 kk delete namespace team                 # deletes everything inside
+
+kk apply -f examples/init-and-sidecar.yaml   # init container + two containers sharing a network
+kk get pod web-with-sidecar              # Init:0/1, then 2/2 Running
+kk exec web-with-sidecar -c sidecar -- /mini fetch http://127.0.0.1:8080/
 
 docker exec mini-k8s-worker-1-1 crictl ps    # look inside a node, like on a real machine
 ```
@@ -279,8 +288,8 @@ into the nodes), also delete the volumes:
 | --- | --- | --- |
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
 | Node | `v1` | Registered and heartbeated by kubelets; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` is honoured by the scheduler. |
-| Pod | `v1` | **One container**: `name`, `image`, `command`, `args`, `env`, `ports`; `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. |
-| Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template`. Template changes replace Pods (Recreate). |
+| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`; `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Subresources `log` and `exec`. |
+| Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always). Template changes replace Pods (Recreate). |
 | Service | `v1` | One cluster-wide HTTP gateway Service: `selector`, one `port: 80`, `targetPort`. |
 | Event | `v1` | Recorded by components, queryable, expire after one hour. |
 
@@ -292,7 +301,9 @@ still not a cross-resource transaction.
 
 ## Current limitations (addressed by upcoming milestones)
 
-- Pods have one container and no probes, resource limits, ConfigMaps/Secrets or volumes.
+- Pods have no probes, resource limits, ConfigMaps/Secrets or volumes. `kk exec` runs a
+  command to completion and returns its output; there is no interactive session (stdin/tty),
+  unlike Kubernetes' streaming exec.
 - Deployments manage Pods directly: no ReplicaSets, rolling updates or rollbacks.
 - One HTTP gateway Service; no ClusterIP, cluster DNS, NodePort or Ingress (Pods resolve
   the Docker network's names, e.g. `apiserver`, through their node).
@@ -376,7 +387,8 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | E2E | Ginkgo e2e framework | ✅ |
 | M1 | API machinery: Kubernetes-style REST, namespaces, watch, informers/work queues, GC, graceful deletion, events | ✅ |
 | M2 | kind-style nodes: containerd inside each node, kubelet managing Pods over CRI, home-grown CNI (host-gw routing) | ✅ |
-| M3 | Pods and kubelet: multiple and init containers, probes, resource limits, exec | planned |
+| M3a | Pods: multiple and init containers, restart policies and terminal phases, `kk exec` | ✅ |
+| M3b | Pods: probes, resource limits, volumes (emptyDir, hostPath), hostNetwork | planned |
 | M4 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system | planned |
 | M5 | ReplicaSets, rolling updates and rollbacks | planned |
 | M6 | ClusterIP, Endpoints, iptables kube-proxy, DNS, NodePort, Ingress | planned |
@@ -387,6 +399,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M3a multi-container Pods plan (Chinese)](docs/superpowers/plans/2026-10-15-m3a-multi-container.md)
 - [M2 kind-style nodes plan (Chinese)](docs/superpowers/plans/2026-10-15-m2-kind-nodes.md)
 - [M1 API machinery plan (Chinese)](docs/superpowers/plans/2026-10-14-m1-api-machinery.md)
 - [kind-style node feasibility spike (Chinese)](docs/superpowers/spikes/2026-10-15-kind-node-spike.md): verified recipe for containerd in node containers, CRI and host-gw networking

@@ -15,7 +15,7 @@ func deployment() *appsv1.Deployment {
 	return &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
 		Replicas: ptr.To[int32](1), Selector: &metav1.LabelSelector{MatchLabels: labels},
 		Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels},
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "img"}}}},
+			Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyAlways, Containers: []corev1.Container{{Name: "web", Image: "img"}}}},
 	}}
 }
 
@@ -32,6 +32,11 @@ func TestValidateDeployment(t *testing.T) {
 		if !strings.Contains(errs, want) {
 			t.Errorf("missing %q in:\n%s", want, errs)
 		}
+	}
+	never := deployment()
+	never.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
+	if errs := strings.Join(ValidateDeployment(never), "\n"); !strings.Contains(errs, `spec.template.spec.restartPolicy: Unsupported value: "Never"`) {
+		t.Errorf("Deployment template must require restartPolicy Always: %s", errs)
 	}
 	changed := deployment()
 	changed.Spec.Selector.MatchLabels = map[string]string{"app": "web", "tier": "x"}

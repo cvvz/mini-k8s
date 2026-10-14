@@ -34,6 +34,7 @@ Resources:
   kk delete -f FILE | TYPE NAME... | TYPE -l SELECTOR | TYPE --all
             [--grace-period N] [--force] [--cascade background|foreground|orphan] [--wait=false]
   kk logs POD [-c CONTAINER] [-f] [--tail N] [-p]
+  kk exec POD [-c CONTAINER] -- COMMAND [ARG...]   run a command to completion (no stdin/tty)
   kk scale deployment NAME --replicas N
   kk api-resources
   kk version
@@ -95,6 +96,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := execute(ctx, os.Args[1:]); err != nil {
+		var exit exitCodeError
+		if errors.As(err, &exit) {
+			// Like kubectl exec: report and pass on the command's exit code.
+			fmt.Fprintln(os.Stderr, exit.Error())
+			os.Exit(exit.code)
+		}
 		fmt.Fprintln(os.Stderr, formatError(err))
 		os.Exit(1)
 	}

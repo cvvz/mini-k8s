@@ -211,6 +211,33 @@ func (c *Client) PodLogs(ctx context.Context, namespace, name string, o LogOptio
 	return resp.Body, nil
 }
 
+// ExecOptions selects the container and the command of an exec request.
+type ExecOptions struct {
+	Container string
+	Command   []string
+	// Timeout bounds the command's run time on the node (0: the kubelet's default).
+	Timeout time.Duration
+}
+
+// PodExec runs a command to completion in a Pod container.
+func (c *Client) PodExec(ctx context.Context, namespace, name string, o ExecOptions) (*corev1.PodExecResult, error) {
+	q := url.Values{"command": o.Command}
+	if o.Container != "" {
+		q.Set("container", o.Container)
+	}
+	if o.Timeout > 0 {
+		q.Set("timeout", fmt.Sprint(int(o.Timeout/time.Second)))
+	}
+	// The command may run longer than the regular request timeout.
+	resp, err := c.Request(ctx, http.MethodPost, scheme.Pods.Path(namespace, name, "exec"), q, "", nil, true)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var res corev1.PodExecResult
+	return &res, json.NewDecoder(resp.Body).Decode(&res)
+}
+
 // BindPod assigns a Pod to a node through the binding subresource.
 func (c *Client) BindPod(ctx context.Context, namespace, name, node string) error {
 	b := corev1.Binding{

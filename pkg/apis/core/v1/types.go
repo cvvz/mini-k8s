@@ -129,10 +129,22 @@ type Pod struct {
 
 // PodSpec is the desired state of a Pod.
 type PodSpec struct {
-	Containers                    []Container `json:"containers"`
-	TerminationGracePeriodSeconds *int64      `json:"terminationGracePeriodSeconds,omitempty"`
-	NodeName                      string      `json:"nodeName,omitempty"`
+	// InitContainers run one after another, each to successful completion,
+	// before the containers start.
+	InitContainers []Container `json:"initContainers,omitempty"`
+	Containers     []Container `json:"containers"`
+	// RestartPolicy is Always (default), OnFailure or Never.
+	RestartPolicy                 string `json:"restartPolicy,omitempty"`
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+	NodeName                      string `json:"nodeName,omitempty"`
 }
+
+// Restart policies.
+const (
+	RestartPolicyAlways    = "Always"
+	RestartPolicyOnFailure = "OnFailure"
+	RestartPolicyNever     = "Never"
+)
 
 // Container is one process image in a Pod.
 type Container struct {
@@ -159,14 +171,15 @@ type ContainerPort struct {
 
 // PodStatus is reported by the scheduler and kubelet.
 type PodStatus struct {
-	Phase             string            `json:"phase,omitempty"`
-	Conditions        []PodCondition    `json:"conditions,omitempty"`
-	Message           string            `json:"message,omitempty"`
-	Reason            string            `json:"reason,omitempty"`
-	HostIP            string            `json:"hostIP,omitempty"`
-	PodIP             string            `json:"podIP,omitempty"`
-	StartTime         *metav1.Time      `json:"startTime,omitempty"`
-	ContainerStatuses []ContainerStatus `json:"containerStatuses,omitempty"`
+	Phase                 string            `json:"phase,omitempty"`
+	Conditions            []PodCondition    `json:"conditions,omitempty"`
+	Message               string            `json:"message,omitempty"`
+	Reason                string            `json:"reason,omitempty"`
+	HostIP                string            `json:"hostIP,omitempty"`
+	PodIP                 string            `json:"podIP,omitempty"`
+	StartTime             *metav1.Time      `json:"startTime,omitempty"`
+	InitContainerStatuses []ContainerStatus `json:"initContainerStatuses,omitempty"`
+	ContainerStatuses     []ContainerStatus `json:"containerStatuses,omitempty"`
 }
 
 // Pod phases.
@@ -353,4 +366,13 @@ func IsNodeReady(n *Node, now time.Time) bool {
 // IsPodTerminal reports whether the Pod has finished for good.
 func IsPodTerminal(p *Pod) bool {
 	return p.Status.Phase == PodSucceeded || p.Status.Phase == PodFailed
+}
+
+// PodExecResult is the outcome of a command run in a container through the
+// Pod exec subresource. Kubernetes streams exec sessions over SPDY or
+// WebSocket; mini-k8s runs non-interactive commands to completion instead.
+type PodExecResult struct {
+	Stdout   []byte `json:"stdout"`
+	Stderr   []byte `json:"stderr"`
+	ExitCode int32  `json:"exitCode"`
 }

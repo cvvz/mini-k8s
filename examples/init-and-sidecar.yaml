@@ -1,0 +1,25 @@
+# A Pod with an init container and two containers that share its network.
+#   kk apply -f examples/init-and-sidecar.yaml
+#   kk get pod web-with-sidecar -w          # Init:0/1 while the init container runs, then 2/2 Running
+#   kk logs web-with-sidecar -c wait-for-api
+#   kk exec web-with-sidecar -c sidecar -- /mini fetch http://127.0.0.1:8080/
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-with-sidecar
+  labels:
+    app: web-with-sidecar
+spec:
+  initContainers:
+  - name: wait-for-api            # runs to completion before the containers start
+    image: mini-k8s:local
+    command: ["/mini", "fetch", "http://apiserver:8080/healthz"]
+  containers:
+  - name: web
+    image: mini-k8s:local
+    command: ["/mini", "demo"]
+    ports:
+    - containerPort: 8080
+  - name: sidecar                 # same network namespace: reaches web on 127.0.0.1
+    image: mini-k8s:local
+    command: ["/mini", "pause"]

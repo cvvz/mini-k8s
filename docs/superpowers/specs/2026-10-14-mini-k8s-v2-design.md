@@ -283,7 +283,8 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | E2E ✅ | Ginkgo v2 e2e 框架，迁移全部 live 用例（22 个 spec） |
 | M1 ✅ | API 机制重构 + 所有组件迁移到 informer/workqueue；Namespace、Event、GC、优雅删除 |
 | M2 ✅ | kind 式节点：节点镜像与 `mini node-init`、节点内 containerd、kubelet 的 CRI 客户端、`mini-cni` + node IPAM + host-gw 路由、本地镜像导入与自建 pause；退役逻辑节点模式（设计见 §14） |
-| M3 | Pod 与 kubelet：多容器、init 容器、重启策略、探针、资源限制、logs `--previous`、exec、hostNetwork、emptyDir/hostPath |
+| M3a ✅ | Pod：多容器、init 容器、重启策略与终态、exec（非交互，CRI `ExecSync`）；logs `--previous` 已在 M2 完成（[计划](../plans/2026-10-15-m3a-multi-container.md)） |
+| M3b | Pod 与 kubelet：探针、资源限制、hostNetwork、emptyDir/hostPath |
 | M4 | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system |
 | M5 | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout` |
 | M6 | 网络：ClusterIP、Endpoints、iptables kube-proxy、DNS、NodePort、Headless、Ingress |
@@ -301,7 +302,7 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
 | --- | --- |
 | 逻辑节点：kubelet 经 Docker API 直接管理宿主 Docker 上的容器，所有节点共享一个网桥 | M2 kind 式节点（已替换） |
 | Deployment 直接拥有 Pod（`pod-template-hash` 标签），模板变化按 Recreate 替换 | M5 ReplicaSet + RollingUpdate |
-| Pod 只允许单容器，kubelet 重启同一个容器 | M3 多容器与重启语义 |
+| Pod 只允许单容器，kubelet 重启同一个容器 | M3 多容器与重启语义（M2/M3a 已替换） |
 | 控制面组件与网关由 Compose 直接启动，不在 API 中可见 | M4 控制面自托管 |
 | Service 仍是全局唯一的 HTTP 网关（准入保证），无 ClusterIP | M6 |
 | 节点通过 Node status 的 Ready 条件每 5 秒心跳，消费者按 20 秒新鲜度判断就绪；无 Lease、无驱逐 | M7 |
