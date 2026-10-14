@@ -1,17 +1,15 @@
 name: mini-k8s
-x-common: &common
-  image: mini-k8s:local
-  restart: unless-stopped
-  environment: &env
-    MINI_API: http://apiserver:8080
-    MINI_TOKEN: ${MINI_TOKEN:?run kk cluster up}
-  networks: [cluster]
-# A node is a privileged container, like a kind node: it runs its own
-# containerd (Pods are containers inside it) and the kubelet. /var is a volume
-# because containerd's overlay snapshots cannot live on the container's own
-# overlay filesystem; /run and /tmp start empty on every boot. containerd
+# Compose only starts the "machines". Each node is a privileged container,
+# like a kind node: it runs its own containerd (Pods are containers inside it)
+# and the kubelet. The control plane (etcd, kube-apiserver,
+# kube-controller-manager, kube-scheduler) and the gateway are static Pods
+# the control-plane node's kubelet runs from build/manifests/control-plane.
+#
+# /var is a volume because containerd's overlay snapshots cannot live on the
+# container's own overlay filesystem, and it keeps etcd data and emptyDir
+# volumes across restarts; /run and /tmp start empty on every boot. containerd
 # shims daemonize and are re-parented to PID 1 when they exit, so an init
-# process (Docker's tini) reaps them instead of `mini node-init`.
+# process (Docker's tini) reaps them.
 x-node: &node
   image: mini-k8s-node:local
   restart: unless-stopped
@@ -21,65 +19,47 @@ x-node: &node
   security_opt: [seccomp=unconfined, apparmor=unconfined]
   tmpfs: [/run, /tmp]
   networks: [cluster]
-  depends_on: [apiserver]
+  environment: &env
+    MINI_API: http://control-plane:8080
+    MINI_TOKEN: ${MINI_TOKEN:?run kk cluster up}
 services:
-  etcd:
-    image: mini-k8s-etcd:3.5.17
-    command:
-      - /usr/local/bin/etcd
-      - --data-dir=/etcd-data
-      - --listen-client-urls=http://0.0.0.0:2379
-      - --advertise-client-urls=http://etcd:2379
-      - --auto-compaction-mode=periodic
-      - --auto-compaction-retention=10m
-    environment:
-      ETCD_UNSUPPORTED_ARCH: arm64
-    volumes: [etcd-data:/etcd-data]
-    networks: [cluster]
-    restart: unless-stopped
-  apiserver:
-    <<: *common
-    command: [kube-apiserver]
+  control-plane:
+    <<: *node
+    hostname: control-plane
     environment:
       <<: *env
-      MINI_ETCD: http://etcd:2379
-    ports: ["127.0.0.1:18000:8080"]
-    depends_on: [etcd]
-  scheduler:
-    <<: *common
-    command: [kube-scheduler]
-    depends_on: [apiserver]
-  controller:
-    <<: *common
-    command: [kube-controller-manager]
-    depends_on: [apiserver]
+      MINI_API: http://127.0.0.1:8080
+      MINI_NODE: control-plane
+      MINI_NODE_ROLE: control-plane
+    ports:
+      - "127.0.0.1:18000:8080" # kube-apiserver
+      - "127.0.0.1:18080:8081" # gateway
+    volumes:
+      - control-plane-var:/var
+      - ./build/manifests/control-plane:/etc/kubernetes/manifests:ro
+      - ./.mini-k8s/token:/etc/mini-k8s/token:ro
   worker-1:
     <<: *node
     hostname: worker-1
     environment:
       <<: *env
       MINI_NODE: worker-1
+      MINI_NODE_ROLE: worker
     volumes: [worker-1-var:/var]
+    depends_on: [control-plane]
   worker-2:
     <<: *node
     hostname: worker-2
     environment:
       <<: *env
       MINI_NODE: worker-2
+      MINI_NODE_ROLE: worker
     volumes: [worker-2-var:/var]
-  # The gateway is not a node but needs routes to the Pod subnets, so it uses
-  # the node image (for iproute2) with NET_ADMIN.
-  gateway:
-    <<: *common
-    image: mini-k8s-node:local
-    entrypoint: [/usr/local/bin/mini, gateway]
-    cap_add: [NET_ADMIN]
-    ports: ["127.0.0.1:18080:8080"]
-    depends_on: [apiserver]
+    depends_on: [control-plane]
 networks:
   cluster:
     name: mini-k8s
 volumes:
-  etcd-data:
+  control-plane-var:
   worker-1-var:
   worker-2-var:

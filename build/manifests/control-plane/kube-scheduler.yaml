@@ -1,0 +1,30 @@
+# Static Pod run by the control-plane node's kubelet.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-scheduler
+  namespace: kube-system
+  labels:
+    component: kube-scheduler
+    tier: control-plane
+spec:
+  hostNetwork: true
+  containers:
+  - name: kube-scheduler
+    image: mini-k8s:local
+    imagePullPolicy: Never
+    command: ["/mini", "kube-scheduler"]
+    env:
+    - name: MINI_TOKEN_FILE
+      value: /etc/mini-k8s/token
+    - name: MINI_API
+      value: http://127.0.0.1:8080
+    volumeMounts:
+    - name: credentials
+      mountPath: /etc/mini-k8s
+      readOnly: true
+  volumes:
+  - name: credentials
+    hostPath:
+      path: /etc/mini-k8s
+      type: Directory

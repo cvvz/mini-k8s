@@ -6,8 +6,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 )
 
-// ControlPlaneComponents are the Compose services whose logs help diagnose failures.
-var ControlPlaneComponents = []string{"apiserver", "scheduler", "controller", "worker-1", "worker-2", "gateway"}
+// ControlPlaneComponents are the static Pods of the control-plane node.
+var ControlPlaneComponents = []string{"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler", "gateway"}
 
 // DumpDebugInfo writes cluster state, the namespace's objects and events, and
 // recent component logs to the spec report.
@@ -27,12 +27,14 @@ func DumpDebugInfo(ctx context.Context, namespace string) {
 			w.Printf("error: %v\n", err)
 		}
 	}
-	for _, node := range Workers {
+	for _, node := range Nodes {
 		out, _ := Crictl(ctx, node, "ps", "-a")
 		w.Printf("$ crictl ps -a (on %s)\n%s", node, out)
+		out, _ = Docker(ctx, "logs", "--tail", "15", ComponentContainer(node))
+		w.Printf("----- node %s: containerd and kubelet (last 15 lines) -----\n%s", node, out)
 	}
 	for _, c := range ControlPlaneComponents {
-		out, _ := Docker(ctx, "logs", "--tail", "15", ComponentContainer(c))
+		out, _ := RunKK(ctx, "logs", "-n", "kube-system", c+"-control-plane", "--tail", "15")
 		w.Printf("----- %s (last 15 lines) -----\n%s", c, out)
 	}
 }

@@ -291,7 +291,14 @@ func (r *podRun) start(c corev1.Container, cs *corev1.ContainerStatus, attempt u
 		cs.State = waitingState(ReasonCreateContainerConfigError, r.volumeErr.Error())
 		return outcomeWaiting
 	}
-	if inBackoff, err := m.ensureImage(ctx, c.Image, r.sandbox); err != nil {
+	if c.ImagePullPolicy == corev1.PullNever {
+		// Never pull: wait (without backoff) until the image is loaded.
+		if present, err := m.imagePresent(ctx, c.Image); err != nil || !present {
+			cs.State = waitingState(ReasonErrImageNeverPull,
+				fmt.Sprintf("Container image %q is not present with pull policy of Never", c.Image))
+			return outcomeWaiting
+		}
+	} else if inBackoff, err := m.ensureImage(ctx, c.Image, c.ImagePullPolicy == corev1.PullAlways, r.sandbox); err != nil {
 		reason := ReasonErrImagePull
 		if inBackoff {
 			reason = ReasonImagePullBackOff
@@ -429,13 +436,14 @@ func (m *Manager) stopSandboxes(ctx context.Context, uid string) {
 	}
 }
 
-// ensureImage pulls a missing image with per-image backoff. The bool reports
-// whether a backoff is in effect.
-func (m *Manager) ensureImage(ctx context.Context, image string, sandbox *runtimeapi.PodSandboxConfig) (bool, error) {
+// ensureImage pulls the image when it is missing, or always, with per-image
+// backoff. The bool reports whether a backoff is in effect.
+func (m *Manager) ensureImage(ctx context.Context, image string, always bool, sandbox *runtimeapi.PodSandboxConfig) (bool, error) {
 	present, err := m.imagePresent(ctx, image)
 	if err != nil {
 		return false, err
 	}
+	present = present && !always
 	m.mu.Lock()
 	b := m.pulls[image]
 	if present {

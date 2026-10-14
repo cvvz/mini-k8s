@@ -19,7 +19,7 @@ import (
 
 func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
 	server := fakeNodeServer(t, "test-token", func() []corev1.Node {
-		return []corev1.Node{readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
+		return []corev1.Node{readyNode("control-plane", time.Now()), readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
 	})
 	var calls [][]string
 	c := cluster{
@@ -37,9 +37,9 @@ func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
 	if err := c.up(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	load := func(node string) []string {
-		return []string{"docker", "save", "mini-k8s:local", "mini-k8s-pause:local", "|",
-			"docker", "exec", "-i", "mini-k8s-" + node + "-1", "ctr", "-n", "k8s.io", "images", "import", "-"}
+	load := func(node string, extra ...string) []string {
+		return append(append(append([]string{"docker", "save", "mini-k8s:local", "mini-k8s-pause:local"}, extra...), "|",
+			"docker", "exec", "-i", "mini-k8s-"+node+"-1"), "ctr", "-n", "k8s.io", "images", "import", "-")
 	}
 	want := [][]string{
 		{"make", "build", "prepare-etcd"},
@@ -48,6 +48,7 @@ func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
 		{"docker", "build", "-t", "mini-k8s-node:local", "-f", "build/images/node/Dockerfile", "."},
 		{"docker", "build", "-t", "mini-k8s-etcd:3.5.17", "-f", "build/images/etcd/Dockerfile", "."},
 		{"docker", "compose", "up", "-d", "--pull", "never", "--remove-orphans"},
+		load("control-plane", "mini-k8s-etcd:3.5.17"),
 		load("worker-1"),
 		load("worker-2"),
 	}

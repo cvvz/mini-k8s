@@ -34,6 +34,52 @@ func ValidatePodSpec(path string, spec *corev1.PodSpec) []string {
 	if spec.NodeName != "" && !validation.IsDNS1123Subdomain(spec.NodeName) {
 		errs = append(errs, path+".nodeName: Invalid value: must be a DNS subdomain")
 	}
+	for i, t := range spec.Tolerations {
+		errs = append(errs, validateToleration(fmt.Sprintf("%s.tolerations[%d]", path, i), t)...)
+	}
+	return errs
+}
+
+var effects = map[string]bool{corev1.TaintEffectNoSchedule: true, corev1.TaintEffectPreferNoSchedule: true, corev1.TaintEffectNoExecute: true}
+
+func validateToleration(path string, t corev1.Toleration) []string {
+	var errs []string
+	switch t.Operator {
+	case "", corev1.TolerationOpEqual:
+		if t.Key == "" {
+			errs = append(errs, path+".operator: Invalid value: operator must be Exists when `key` is empty, which means \"match all values and all keys\"")
+		}
+	case corev1.TolerationOpExists:
+		if t.Value != "" {
+			errs = append(errs, path+".operator: Invalid value: value must be empty when `operator` is 'Exists'")
+		}
+	default:
+		errs = append(errs, fmt.Sprintf(`%s.operator: Unsupported value: %q: supported values: "Equal", "Exists"`, path, t.Operator))
+	}
+	if t.Effect != "" && !effects[t.Effect] {
+		errs = append(errs, fmt.Sprintf(`%s.effect: Unsupported value: %q: supported values: "NoSchedule", "PreferNoSchedule", "NoExecute"`, path, t.Effect))
+	}
+	return errs
+}
+
+// ValidateTaints checks node taints: a qualified key, a known effect and no
+// duplicate key/effect pairs.
+func ValidateTaints(path string, taints []corev1.Taint) []string {
+	var errs []string
+	seen := map[string]bool{}
+	for i, t := range taints {
+		p := fmt.Sprintf("%s[%d]", path, i)
+		if err := labels.ValidateLabels(map[string]string{t.Key: t.Value}); err != nil || t.Key == "" {
+			errs = append(errs, fmt.Sprintf("%s: Invalid value: taint key and value must be a valid label key and value", p))
+		}
+		if !effects[t.Effect] {
+			errs = append(errs, fmt.Sprintf(`%s.effect: Unsupported value: %q: supported values: "NoSchedule", "PreferNoSchedule", "NoExecute"`, p, t.Effect))
+		}
+		if seen[t.Key+":"+t.Effect] {
+			errs = append(errs, fmt.Sprintf("%s: Duplicate value: taints must be unique by key and effect", p))
+		}
+		seen[t.Key+":"+t.Effect] = true
+	}
 	return errs
 }
 
@@ -52,6 +98,11 @@ func validateContainers(path string, containers []corev1.Container, seen map[str
 		seen[c.Name] = true
 		if c.Image == "" {
 			errs = append(errs, p+".image: Required value")
+		}
+		switch c.ImagePullPolicy {
+		case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+		default:
+			errs = append(errs, fmt.Sprintf(`%s.imagePullPolicy: Unsupported value: %q: supported values: "Always", "IfNotPresent", "Never"`, p, c.ImagePullPolicy))
 		}
 		for _, e := range c.Env {
 			if !validation.IsEnvVarName(e.Name) {

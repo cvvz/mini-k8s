@@ -18,8 +18,14 @@ import (
 	"mini-k8s/pkg/client"
 )
 
-// workerNames are the node containers Compose starts.
-var workerNames = []string{"worker-1", "worker-2"}
+// The node containers Compose starts: the control-plane node, which runs the
+// control plane as static Pods, and the workers.
+const controlPlane = "control-plane"
+
+var (
+	workerNames = []string{"worker-1", "worker-2"}
+	nodeNames   = append([]string{controlPlane}, workerNames...)
+)
 
 // nodeContainer is the Compose container of a node, e.g. mini-k8s-worker-1-1.
 func nodeContainer(node string) string { return "mini-k8s-" + node + "-1" }
@@ -33,8 +39,11 @@ var images = []struct{ tag, dir string }{
 }
 
 // nodeImages are preloaded into every node's containerd: the sandbox (pause)
-// image and the image of the examples and e2e workloads.
+// image and the image of the components, examples and e2e workloads; the
+// control-plane node also gets the etcd image.
 var nodeImages = []string{"mini-k8s:local", "mini-k8s-pause:local"}
+
+const etcdImage = "mini-k8s-etcd:3.5.17"
 
 type cluster struct {
 	run func(context.Context, string, ...string) (string, error)
@@ -282,15 +291,19 @@ func (c cluster) up(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := c.loadImages(ctx, nodeImages); err != nil {
+	// The control plane's static Pods start as soon as their images arrive.
+	if err := c.loadImages(ctx, append(append([]string{}, nodeImages...), etcdImage), controlPlane); err != nil {
 		return err
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	if err := c.loadImages(ctx, nodeImages, workerNames...); err != nil {
+		return err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if err := c.waitReady(waitCtx); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintln(c.out, "mini-k8s ready: API http://127.0.0.1:18000; workers worker-1, worker-2 Ready")
+	_, err := fmt.Fprintf(c.out, "mini-k8s ready: API http://127.0.0.1:18000; nodes %s Ready\n", strings.Join(nodeNames, ", "))
 	return err
 }
 
@@ -306,11 +319,11 @@ func (c cluster) step(ctx context.Context, command []string) error {
 	return err
 }
 
-// loadImages copies local Docker images into the containerd of every node,
+// loadImages copies local Docker images into the containerd of the nodes,
 // like `kind load docker-image`. A node's containerd may still be starting,
 // so each import is retried for a while.
-func (c cluster) loadImages(ctx context.Context, refs []string) error {
-	for _, node := range workerNames {
+func (c cluster) loadImages(ctx context.Context, refs []string, nodes ...string) error {
+	for _, node := range nodes {
 		if _, err := fmt.Fprintf(c.out, "Loading %s into %s\n", strings.Join(refs, " "), node); err != nil {
 			return err
 		}
@@ -352,9 +365,9 @@ func (c cluster) waitReady(ctx context.Context) error {
 					}
 				}
 				missing := []string{}
-				for _, w := range workerNames {
-					if !ready[w] {
-						missing = append(missing, w)
+				for _, n := range nodeNames {
+					if !ready[n] {
+						missing = append(missing, n)
 					}
 				}
 				if len(missing) == 0 {
@@ -371,11 +384,11 @@ func (c cluster) waitReady(ctx context.Context) error {
 	}
 }
 
-// down stops the reconcilers and the nodes first, so nothing recreates Pods
-// while the rest is removed; Pods die with their node containers. With
-// volumes it also deletes the etcd data and the nodes' disks.
+// down stops the workers first, then removes everything with the
+// control-plane node; Pods die with their node containers. With volumes it
+// also deletes the nodes' disks, including the etcd data.
 func (c cluster) down(ctx context.Context, volumes bool) error {
-	stop := append(append([]string{"compose", "stop"}, workerNames...), "controller", "scheduler")
+	stop := append([]string{"compose", "stop"}, workerNames...)
 	if _, err := c.run(ctx, "docker", stop...); err != nil {
 		return err
 	}
@@ -453,5 +466,5 @@ func runImage(ctx context.Context, root string, a args) (result error) {
 			}
 		}()
 	}
-	return c.loadImages(ctx, a.positional[1:])
+	return c.loadImages(ctx, a.positional[1:], nodeNames...)
 }

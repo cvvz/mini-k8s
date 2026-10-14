@@ -12,8 +12,12 @@ import (
 	corev1 "mini-k8s/pkg/apis/core/v1"
 )
 
-// Workers are the node containers of the cluster.
-var Workers = []string{"worker-1", "worker-2"}
+// Workers are the worker nodes; Nodes adds the control-plane node, which runs
+// the control plane as static Pods.
+var (
+	Workers = []string{"worker-1", "worker-2"}
+	Nodes   = append([]string{"control-plane"}, Workers...)
+)
 
 // RunKK runs the project's kk binary from the repository root and returns its
 // combined output.
@@ -68,7 +72,7 @@ func PodSandboxes(ctx context.Context, label string) ([]string, error) {
 
 func acrossNodes(ctx context.Context, crictlArgs []string) ([]string, error) {
 	var ids []string
-	for _, node := range Workers {
+	for _, node := range Nodes {
 		out, err := Crictl(ctx, node, crictlArgs...)
 		if err != nil {
 			return nil, err
@@ -92,7 +96,7 @@ func ComponentContainer(component string) string {
 // PodLogDirs lists a Pod UID's log directories (/var/log/pods/<ns>_<name>_<uid>) across all nodes.
 func PodLogDirs(ctx context.Context, podUID string) ([]string, error) {
 	var dirs []string
-	for _, node := range Workers {
+	for _, node := range Nodes {
 		out, err := Docker(ctx, "exec", ComponentContainer(node), "sh", "-c", "ls /var/log/pods 2>/dev/null || true")
 		if err != nil {
 			return nil, err

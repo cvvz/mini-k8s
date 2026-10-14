@@ -162,6 +162,18 @@ func podRestarts(p *corev1.Pod) string {
 	return fmt.Sprint(restarts)
 }
 
+// nodeRoles lists the node-role.kubernetes.io/<role> labels, like kubectl.
+func nodeRoles(n *corev1.Node) string {
+	var roles []string
+	for k := range n.Labels {
+		if role, ok := strings.CutPrefix(k, corev1.LabelNodeRolePrefix); ok && role != "" {
+			roles = append(roles, role)
+		}
+	}
+	sort.Strings(roles)
+	return orNone(strings.Join(roles, ","))
+}
+
 func orNone(s string) string {
 	if s == "" {
 		return "<none>"
@@ -253,7 +265,7 @@ func columnsFor(res scheme.ResourceInfo) []column {
 	case scheme.Nodes.Resource:
 		return []column{nameColumn(),
 			{header: "STATUS", value: func(o metav1.Object, now time.Time) string { return nodeStatus(o.(*corev1.Node), now) }},
-			{header: "ROLES", value: func(metav1.Object, time.Time) string { return "worker" }},
+			{header: "ROLES", value: func(o metav1.Object, _ time.Time) string { return nodeRoles(o.(*corev1.Node)) }},
 			ageColumn(),
 			{header: "VERSION", value: func(o metav1.Object, _ time.Time) string { return o.(*corev1.Node).Status.NodeInfo.KubeletVersion }},
 			{header: "INTERNAL-IP", wide: true, value: func(o metav1.Object, _ time.Time) string { return orNone(o.(*corev1.Node).InternalIP()) }},

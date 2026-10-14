@@ -17,6 +17,7 @@ import (
 
 	_ "mini-k8s/test/e2e/apimachinery"
 	_ "mini-k8s/test/e2e/apps"
+	_ "mini-k8s/test/e2e/controlplane"
 	_ "mini-k8s/test/e2e/lifecycle"
 	_ "mini-k8s/test/e2e/network"
 	_ "mini-k8s/test/e2e/node"
@@ -32,5 +33,5 @@ func TestE2E(t *testing.T) {
 
 var _ = ginkgo.BeforeSuite(func(ctx ginkgo.SpecContext) {
 	framework.ExpectNoError(framework.Setup())
-	framework.WaitForClusterReady(ctx, 2)
+	framework.WaitForClusterReady(ctx, len(framework.Nodes))
 })

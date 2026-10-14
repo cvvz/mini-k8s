@@ -10,6 +10,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -80,13 +82,34 @@ func main() {
 	if !ok || len(os.Args) != 2 {
 		log.Fatalf("unknown component %q; %s", strings.Join(os.Args[1:], " "), usage())
 	}
-	token := os.Getenv("MINI_TOKEN")
-	if token == "" {
-		log.Fatal("MINI_TOKEN is required")
+	token, err := loadToken()
+	if err != nil {
+		log.Fatal(err)
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	run(ctx, client.New(env("MINI_API", "http://apiserver:8080"), token), token)
+}
+
+// loadToken returns the API token from MINI_TOKEN or, for static Pods that
+// mount it, from the file named by MINI_TOKEN_FILE.
+func loadToken() (string, error) {
+	if token := os.Getenv("MINI_TOKEN"); token != "" {
+		return token, nil
+	}
+	path := os.Getenv("MINI_TOKEN_FILE")
+	if path == "" {
+		return "", errors.New("MINI_TOKEN or MINI_TOKEN_FILE is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	return token, nil
 }
 
 // serve runs an HTTP server until ctx ends.

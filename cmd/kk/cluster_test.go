@@ -68,7 +68,7 @@ func TestClusterDownStopsNodesAndReconcilersFirst(t *testing.T) {
 			down = append(down, "--volumes")
 		}
 		want := [][]string{
-			{"docker", "compose", "stop", "worker-1", "worker-2", "controller", "scheduler"},
+			{"docker", "compose", "stop", "worker-1", "worker-2"},
 			down,
 		}
 		if !reflect.DeepEqual(calls, want) {
@@ -91,7 +91,7 @@ func TestLoadImagesPipesDockerSaveIntoEveryNodeAndRetries(t *testing.T) {
 			return "", nil
 		},
 	}
-	if err := c.loadImages(context.Background(), []string{"app:v1"}); err != nil {
+	if err := c.loadImages(context.Background(), []string{"app:v1"}, workerNames...); err != nil {
 		t.Fatal(err)
 	}
 	load := func(node string) []string {
@@ -147,22 +147,24 @@ func TestProjectRootRejectsUnrelatedComposeProject(t *testing.T) {
 	}
 }
 
-func TestReadinessRequiresAuthenticatedHealthAndBothFreshWorkers(t *testing.T) {
-	for _, scenario := range []string{"ready", "unauthorized", "stale", "one-worker", "wrong-worker"} {
+func TestReadinessRequiresAuthenticatedHealthAndAllFreshNodes(t *testing.T) {
+	for _, scenario := range []string{"ready", "unauthorized", "stale", "one-worker", "wrong-worker", "no-control-plane"} {
 		t.Run(scenario, func(t *testing.T) {
 			token := "secret"
 			if scenario == "unauthorized" {
 				token = "other"
 			}
 			server := fakeNodeServer(t, token, func() []corev1.Node {
-				nodes := []corev1.Node{readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
+				nodes := []corev1.Node{readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now()), readyNode("control-plane", time.Now())}
 				switch scenario {
 				case "stale":
 					nodes[1] = readyNode("worker-2", time.Now().Add(-time.Minute))
 				case "one-worker":
-					nodes = nodes[:1]
+					nodes = append(nodes[:1], nodes[2])
 				case "wrong-worker":
 					nodes[1].Name = "other"
+				case "no-control-plane":
+					nodes = nodes[:2]
 				}
 				return nodes
 			})

@@ -72,9 +72,9 @@ var _ = framework.SIGDescribe("network", "Pod network", func() {
 		f.Apply(ctx, framework.NewPod("egress", map[string]string{"app": "egress"}, framework.DemoContainer()))
 		pod := f.WaitForRunningPods(ctx, map[string]string{"app": "egress"}, 1)[0]
 
-		By("resolving the apiserver's Compose name and calling it without credentials")
+		By("resolving the control-plane node's name and calling the API without credentials")
 		Eventually(ctx, func() (string, error) {
-			out, err := framework.ExecInPod(ctx, pod, "/mini", "fetch", "http://apiserver:8080/healthz")
+			out, err := framework.ExecInPod(ctx, pod, "/mini", "fetch", "http://control-plane:8080/api")
 			return strings.SplitN(out, "\n", 2)[0], err
 		}).WithTimeout(30*time.Second).Should(Equal("401"), "the API answers 401 to anonymous requests")
 	})

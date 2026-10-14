@@ -26,3 +26,16 @@ func TestGetPodQOS(t *testing.T) {
 		}
 	}
 }
+
+func TestImagePullPolicyDefaults(t *testing.T) {
+	for image, want := range map[string]string{
+		"nginx": PullAlways, "nginx:latest": PullAlways, "nginx:1.27": PullIfNotPresent, "mini-k8s:local": PullIfNotPresent,
+		"registry:5000/team/app": PullAlways, "registry:5000/team/app:v2": PullIfNotPresent, "app@sha256:abc": PullIfNotPresent,
+	} {
+		spec := &PodSpec{Containers: []Container{{Name: "c", Image: image}}}
+		SetDefaultsPodSpec(spec)
+		if got := spec.Containers[0].ImagePullPolicy; got != want {
+			t.Errorf("%s: %s, want %s", image, got, want)
+		}
+	}
+}

@@ -286,7 +286,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M3a ✅ | Pod：多容器、init 容器、重启策略与终态、exec（非交互，CRI `ExecSync`）；logs `--previous` 已在 M2 完成（[计划](../plans/2026-10-15-m3a-multi-container.md)） |
 | M3b ✅ | 探针（liveness/readiness/startup；httpGet/tcpSocket/exec）、资源 requests/limits（cgroup、OOMKilled）、QoS、节点容量（[计划](../plans/2026-10-15-m3b-probes-resources.md)） |
 | M3c ✅ | Pod 与 kubelet：hostNetwork、emptyDir（磁盘与内存）/hostPath（[计划](../plans/2026-10-15-m3c-volumes-hostnetwork.md)） |
-| M4 | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system |
+| M4 ✅ | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system（落地记录见 §12.3） |
 | M5 | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout` |
 | M6 | 网络：ClusterIP、Endpoints、iptables kube-proxy、DNS、NodePort、Headless、Ingress |
 | M7 | 调度框架、节点租约与生命周期、污点驱逐、cordon/drain、worker 扩展 |
@@ -348,6 +348,22 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
 8. **验收**：`kk get pods -n kube-system` 可见四个控制面组件且 Running；`kk logs -n kube-system
    kube-apiserver-control-plane` 可用；杀死 apiserver 容器后由 kubelet 拉起；删除 mirror Pod 后被
    重建且控制面不中断；业务 Pod 不会调度到 control-plane；`cluster down/up` 保留全部状态。
+
+### 12.3 M4 落地记录
+
+按 §12.2 落地（[实施计划](../plans/2026-10-15-m4-self-hosted-control-plane.md)），e2e 68 个 spec 全部通过。与设计的差异与补充：
+
+- **清单与凭据**：static Pod 清单直接放在仓库 `build/manifests/control-plane/`，只读挂载进 control-plane
+  节点，不再由 `kk cluster up` 生成；token 以文件挂载（`/etc/mini-k8s/token`），组件经 `MINI_TOKEN_FILE`
+  读取，因此清单与 mirror Pod 中都不含 token。
+- **网关**：同样是 control-plane 节点上的 static Pod（hostNetwork，端口 8081），依靠该节点 kubelet 的
+  host-gw 路由访问各节点 Pod，不再需要单独的路由代理。
+- **镜像拉取策略**：新增 `imagePullPolicy`，static Pod 用 Never，镜像导入后下一轮同步即启动。
+- **健康检查**：`/healthz`、`/livez`、`/readyz` 允许匿名访问；`/livez` 不检查 etcd，避免 etcd 故障时
+  apiserver 被 liveness 反复重启。
+- **自举**：kubelet 的 static Pod 循环独立于 API informer（此前 kubelet 先等 informer 同步，会与“API Server
+  本身是 static Pod”形成死锁）。
+- **kk**：`kk delete` 按 UID 判断对象已删除（mirror Pod 会立即以同名重建）。
 
 ## 13. 非目标
 

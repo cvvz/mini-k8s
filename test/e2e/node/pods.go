@@ -43,7 +43,7 @@ var _ = framework.SIGDescribe("node", "Pods with several containers", func() {
 	It("should run init containers one after another before the containers", func(ctx SpecContext) {
 		f.Apply(ctx, newPod("ordered", framework.DemoContainer()).WithInitContainers(
 			framework.MiniContainer("wait", "sleep", "4s"),
-			framework.MiniContainer("check", "fetch", "http://apiserver:8080/healthz")))
+			framework.MiniContainer("check", "fetch", "http://control-plane:8080/api")))
 
 		By("observing the Pod while the first init container runs")
 		Eventually(ctx, func() (string, error) {

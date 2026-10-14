@@ -15,7 +15,7 @@ func deployment() *appsv1.Deployment {
 	return &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
 		Replicas: ptr.To[int32](1), Selector: &metav1.LabelSelector{MatchLabels: labels},
 		Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels},
-			Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyAlways, Containers: []corev1.Container{{Name: "web", Image: "img"}}}},
+			Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyAlways, Containers: []corev1.Container{{Name: "web", Image: "img", ImagePullPolicy: corev1.PullIfNotPresent}}}},
 	}}
 }
 

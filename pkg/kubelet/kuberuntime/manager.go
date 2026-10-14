@@ -31,6 +31,7 @@ const (
 	ReasonContainerCreating     = "ContainerCreating"
 	ReasonErrImagePull          = "ErrImagePull"
 	ReasonImagePullBackOff      = "ImagePullBackOff"
+	ReasonErrImageNeverPull     = "ErrImageNeverPull"
 	ReasonCrashLoopBackOff      = "CrashLoopBackOff"
 	ReasonRunContainerError     = "RunContainerError"
 	ReasonCreateContainerError  = "CreateContainerError"

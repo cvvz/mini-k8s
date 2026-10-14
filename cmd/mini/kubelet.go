@@ -56,6 +56,9 @@ func runKubelet(ctx context.Context, c *client.Client, token string) {
 		Token:        token,
 		SandboxImage: env("MINI_SANDBOX_IMAGE", nodeinit.DefaultSandboxImage),
 		CNIConfDir:   "/etc/cni/net.d",
+		// Only nodes that have the directory run static Pods (the control plane).
+		StaticPodPath: env("MINI_STATIC_PODS", kubelet.DefaultStaticPodPath),
+		Role:          os.Getenv("MINI_NODE_ROLE"),
 		Routes: &hostgw.Agent{Run: network.Exec, Self: node, Masquerade: true,
 			ClusterCIDR: env("MINI_CLUSTER_CIDR", nodeipam.DefaultClusterCIDR)},
 	})
