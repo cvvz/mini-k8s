@@ -1,7 +1,7 @@
 # mini-k8s e2e 测试
 
 仿照 Kubernetes `test/e2e` 的 Ginkgo v2 + Gomega 端到端测试套件。它对**正在运行的本项目集群**
-发起真实操作：通过 `kk` 和 API 创建资源，检查 API 状态、Docker 容器与 HTTP 流量。
+发起真实操作：通过 `kk` 和 API 创建资源，检查 API 状态、节点内的 CRI 容器（经 `crictl`）与 HTTP 流量。
 
 > 只在可重建的本项目实验集群上运行。Disruptive 用例会重启控制面并执行 `kk cluster down/up`。
 
@@ -35,7 +35,7 @@ test/e2e/
 │   ├── framework.go   # Framework（每个 spec 一个命名空间）、SIGDescribe、标签、失败诊断钩子
 │   ├── manifest.go    # 资源构造器、Apply/ApplyExpectError/KK（自动带 -n）
 │   ├── wait.go        # 等待 Pod/容器状态、Pod 消失、Events、HTTP 工具
-│   ├── exec.go        # kk 与 docker 命令执行
+│   ├── exec.go        # kk、docker 与节点内 crictl 命令执行
 │   └── debug.go       # 失败时输出资源、容器与组件日志
 ├── apimachinery/      # [sig-api-machinery] 并发控制、校验、认证
 ├── apps/              # [sig-apps] 工作负载控制器
@@ -56,7 +56,7 @@ test/e2e/
 4. 用 `f.Apply`/`f.KK` 操作资源，它们自动带上 `-n f.Namespace`；直接调用 API 时使用
    `client.Pods(f.Client, f.Namespace)` 等类型化客户端。
 5. 断言同时检查 API 与实际运行时（例如 `WaitForRunningPods` 要求 Pod Running 且 Ready，并且
-   恰好有一个运行中的容器；`WaitForPodGone` 同时检查 API 与 Docker），不要只相信 status 字段。
+   恰好有一个运行中的容器；`WaitForPodGone` 同时检查 API 与节点内的 CRI 容器），不要只相信 status 字段。
 6. 异步行为一律用 `Eventually`/`WaitFor*`，不要 `time.Sleep`；不要在被 `Eventually` 轮询的
    函数里再嵌套 `Eventually`。
 7. 会重启或停止组件的用例必须加 `framework.WithDisruptive()` 与 `Serial`；依赖集群级单例

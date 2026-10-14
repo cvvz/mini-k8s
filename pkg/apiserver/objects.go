@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"time"
 
-	"mini-k8s/pkg/storage/etcd3"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/scheme"
+	"mini-k8s/pkg/storage/etcd3"
 )
 
 func (s *Server) key(res scheme.ResourceInfo, namespace, name string) string {

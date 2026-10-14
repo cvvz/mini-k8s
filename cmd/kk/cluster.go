@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -19,11 +18,28 @@ import (
 	"mini-k8s/pkg/client"
 )
 
-// workerNames are the logical nodes Compose starts.
+// workerNames are the node containers Compose starts.
 var workerNames = []string{"worker-1", "worker-2"}
 
+// nodeContainer is the Compose container of a node, e.g. mini-k8s-worker-1-1.
+func nodeContainer(node string) string { return "mini-k8s-" + node + "-1" }
+
+// images are built from build/images/<dir>/Dockerfile by `kk cluster up`.
+var images = []struct{ tag, dir string }{
+	{"mini-k8s:local", "mini"},
+	{"mini-k8s-pause:local", "pause"},
+	{"mini-k8s-node:local", "node"},
+	{"mini-k8s-etcd:3.5.17", "etcd"},
+}
+
+// nodeImages are preloaded into every node's containerd: the sandbox (pause)
+// image and the image of the examples and e2e workloads.
+var nodeImages = []string{"mini-k8s:local", "mini-k8s-pause:local"}
+
 type cluster struct {
-	run     func(context.Context, string, ...string) (string, error)
+	run func(context.Context, string, ...string) (string, error)
+	// pipe runs `from | to` and returns the output of to.
+	pipe    func(ctx context.Context, from, to []string) (string, error)
 	client  *client.Client
 	out     io.Writer
 	cleanup func() error
@@ -163,6 +179,38 @@ func commandRunner(root string, env []string) func(context.Context, string, ...s
 	}
 }
 
+func commandPipe(root string, env []string) func(context.Context, []string, []string) (string, error) {
+	return func(ctx context.Context, from, to []string) (string, error) {
+		producer := exec.CommandContext(ctx, from[0], from[1:]...)
+		consumer := exec.CommandContext(ctx, to[0], to[1:]...)
+		for _, c := range []*exec.Cmd{producer, consumer} {
+			c.Dir, c.Env = root, env
+		}
+		var producerErr strings.Builder
+		producer.Stderr = &producerErr
+		stream, err := producer.StdoutPipe()
+		if err != nil {
+			return "", err
+		}
+		consumer.Stdin = stream
+		var output strings.Builder
+		consumer.Stdout, consumer.Stderr = &output, &output
+		if err := producer.Start(); err != nil {
+			return "", err
+		}
+		consumeErr := consumer.Run()
+		if consumeErr != nil {
+			_ = producer.Process.Kill()
+		}
+		produceErr := producer.Wait()
+		if consumeErr != nil || produceErr != nil {
+			return "", fmt.Errorf("%s | %s: %w\n%s%s", strings.Join(from, " "), strings.Join(to, " "),
+				errors.Join(produceErr, consumeErr), producerErr.String(), output.String())
+		}
+		return output.String(), nil
+	}
+}
+
 func withEnv(env []string, key, value string) []string {
 	result := make([]string, 0, len(env)+1)
 	for _, entry := range env {
@@ -192,17 +240,14 @@ func newCluster(ctx context.Context, root, token string, out io.Writer) (cluster
 		}
 		endpoint = strings.TrimSpace(value)
 	}
-	socket, err := localSocket(endpoint)
-	if err != nil {
+	// The cluster publishes its ports on 127.0.0.1, so only a local engine
+	// yields a usable cluster.
+	if _, err := localSocket(endpoint); err != nil {
 		return cluster{}, err
 	}
-	if runtime.GOOS == "darwin" {
-		// Docker Desktop bind mounts resolve inside its Linux VM.
-		socket = "/var/run/docker.sock"
-	}
 	env = withEnv(env, "MINI_TOKEN", token)
-	env = withEnv(env, "MINI_DOCKER_SOCKET", socket)
 	var cleanup func() error
+	var err error
 	switch os.Getenv("MINI_DOCKER_NO_CREDENTIALS") {
 	case "", "0":
 	case "1":
@@ -223,26 +268,22 @@ func newCluster(ctx context.Context, root, token string, out io.Writer) (cluster
 		}
 		return cluster{}, err
 	}
-	return cluster{run: run, client: client.New(apiURL(), token), out: out, cleanup: cleanup}, nil
+	return cluster{run: run, pipe: commandPipe(root, env), client: client.New(apiURL(), token), out: out, cleanup: cleanup}, nil
 }
 
 func (c cluster) up(ctx context.Context) error {
-	for _, command := range [][]string{
-		{"make", "build", "prepare-etcd"},
-		{"docker", "build", "-t", "mini-k8s:local", "."},
-		{"docker", "build", "-t", "mini-k8s-etcd:3.5.17", "-f", "Dockerfile.etcd", "."},
-		{"docker", "compose", "up", "-d", "--pull", "never"},
-	} {
-		if _, err := fmt.Fprintf(c.out, "Running %s\n", strings.Join(command, " ")); err != nil {
+	commands := [][]string{{"make", "build", "prepare-etcd"}}
+	for _, image := range images {
+		commands = append(commands, []string{"docker", "build", "-t", image.tag, "-f", "build/images/" + image.dir + "/Dockerfile", "."})
+	}
+	commands = append(commands, []string{"docker", "compose", "up", "-d", "--pull", "never", "--remove-orphans"})
+	for _, command := range commands {
+		if err := c.step(ctx, command); err != nil {
 			return err
 		}
-		output, err := c.run(ctx, command[0], command[1:]...)
-		if err != nil {
-			return err
-		}
-		if _, err := io.WriteString(c.out, output); err != nil {
-			return err
-		}
+	}
+	if err := c.loadImages(ctx, nodeImages); err != nil {
+		return err
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
@@ -251,6 +292,47 @@ func (c cluster) up(ctx context.Context) error {
 	}
 	_, err := fmt.Fprintln(c.out, "mini-k8s ready: API http://127.0.0.1:18000; workers worker-1, worker-2 Ready")
 	return err
+}
+
+func (c cluster) step(ctx context.Context, command []string) error {
+	if _, err := fmt.Fprintf(c.out, "Running %s\n", strings.Join(command, " ")); err != nil {
+		return err
+	}
+	output, err := c.run(ctx, command[0], command[1:]...)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(c.out, output)
+	return err
+}
+
+// loadImages copies local Docker images into the containerd of every node,
+// like `kind load docker-image`. A node's containerd may still be starting,
+// so each import is retried for a while.
+func (c cluster) loadImages(ctx context.Context, refs []string) error {
+	for _, node := range workerNames {
+		if _, err := fmt.Fprintf(c.out, "Loading %s into %s\n", strings.Join(refs, " "), node); err != nil {
+			return err
+		}
+		from := append([]string{"docker", "save"}, refs...)
+		to := []string{"docker", "exec", "-i", nodeContainer(node), "ctr", "-n", "k8s.io", "images", "import", "-"}
+		deadline := time.Now().Add(time.Minute)
+		for {
+			_, err := c.pipe(ctx, from, to)
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("load images into %s: %w", node, err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}
+	return nil
 }
 
 func (c cluster) waitReady(ctx context.Context) error {
@@ -289,27 +371,26 @@ func (c cluster) waitReady(ctx context.Context) error {
 	}
 }
 
-func (c cluster) down(ctx context.Context) error {
-	if _, err := c.run(ctx, "docker", "compose", "stop", "worker-1", "worker-2", "controller", "scheduler"); err != nil {
+// down stops the reconcilers and the nodes first, so nothing recreates Pods
+// while the rest is removed; Pods die with their node containers. With
+// volumes it also deletes the etcd data and the nodes' disks.
+func (c cluster) down(ctx context.Context, volumes bool) error {
+	stop := append(append([]string{"compose", "stop"}, workerNames...), "controller", "scheduler")
+	if _, err := c.run(ctx, "docker", stop...); err != nil {
 		return err
 	}
-	output, err := c.run(ctx, "docker", "ps", "-aq", "--filter", "label=mini.cluster=mini-k8s", "--filter", "label=mini.pod")
-	if err != nil {
-		return err
+	args := []string{"compose", "down", "--remove-orphans"}
+	if volumes {
+		args = append(args, "--volumes")
 	}
-	if ids := strings.Fields(output); len(ids) != 0 {
-		if _, err := c.run(ctx, "docker", append([]string{"rm", "-f"}, ids...)...); err != nil {
-			return err
-		}
-	}
-	_, err = c.run(ctx, "docker", "compose", "down")
+	_, err := c.run(ctx, "docker", args...)
 	return err
 }
 
 // runCluster implements `kk cluster up|status|down`.
 func runCluster(ctx context.Context, root string, a args) (result error) {
 	if len(a.positional) != 1 || (a.positional[0] != "up" && a.positional[0] != "status" && a.positional[0] != "down") {
-		return errors.New("usage: kk cluster up|status|down")
+		return errors.New("usage: kk cluster up|status|down [--volumes]")
 	}
 	sub := a.positional[0]
 	token, err := loadToken(root, sub == "up")
@@ -340,9 +421,37 @@ func runCluster(ctx context.Context, root string, a args) (result error) {
 	if sub == "up" {
 		return c.up(ctx)
 	}
-	if err := c.down(ctx); err != nil {
+	volumes := a.boolean("volumes", false)
+	if err := c.down(ctx, volumes); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(os.Stdout, "mini-k8s stopped; etcd volume and token preserved")
+	if volumes {
+		_, err = fmt.Fprintln(os.Stdout, "mini-k8s stopped; etcd data and node disks deleted, token preserved")
+	} else {
+		_, err = fmt.Fprintln(os.Stdout, "mini-k8s stopped; etcd data, node disks and token preserved")
+	}
 	return err
+}
+
+// runImage implements `kk image load IMAGE...`.
+func runImage(ctx context.Context, root string, a args) (result error) {
+	if len(a.positional) < 2 || a.positional[0] != "load" {
+		return errors.New("usage: kk image load IMAGE...")
+	}
+	token, err := loadToken(root, false)
+	if err != nil {
+		return err
+	}
+	c, err := newCluster(ctx, root, token, os.Stdout)
+	if err != nil {
+		return err
+	}
+	if c.cleanup != nil {
+		defer func() {
+			if err := c.cleanup(); err != nil {
+				result = errors.Join(result, fmt.Errorf("clean up temporary Docker config: %w", err))
+			}
+		}()
+	}
+	return c.loadImages(ctx, a.positional[1:])
 }

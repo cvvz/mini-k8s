@@ -1,0 +1,4 @@
+# Every image builds from the repository root; only the built binaries are needed.
+*
+!bin/mini-linux
+!bin/etcd

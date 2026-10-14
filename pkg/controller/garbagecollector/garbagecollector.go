@@ -7,9 +7,9 @@ import (
 	"log"
 	"time"
 
+	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/client/informers"
-	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/scheme"
 	"mini-k8s/pkg/util/deepcopy"
 )

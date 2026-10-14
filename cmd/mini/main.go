@@ -1,7 +1,11 @@
 // Command mini is a multi-call binary, like Kubernetes' former hyperkube:
 // its first argument selects the component to run.
 //
-//	mini kube-apiserver | kube-controller-manager | kube-scheduler | kubelet | gateway | demo
+//	mini kube-apiserver | kube-controller-manager | kube-scheduler | node-init | gateway
+//	mini demo | pause | fetch URL
+//
+// Invoked as mini-cni or loopback (through symlinks in /opt/cni/bin) it is
+// the CNI plugin.
 package main
 
 import (
@@ -10,12 +14,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"mini-k8s/pkg/client"
+	"mini-k8s/pkg/network/cni"
 )
 
 // component runs one role until ctx ends; token authenticates to the API.
@@ -25,12 +31,12 @@ var components = map[string]component{
 	"kube-apiserver":          runAPIServer,
 	"kube-controller-manager": runControllerManager,
 	"kube-scheduler":          runScheduler,
-	"kubelet":                 runKubelet,
+	"node-init":               runNodeInit,
 	"gateway":                 runGateway,
 }
 
 func usage() string {
-	names := []string{"demo"}
+	names := []string{"demo", "pause", "fetch URL"}
 	for name := range components {
 		names = append(names, name)
 	}
@@ -46,16 +52,25 @@ func env(key, fallback string) string {
 }
 
 func main() {
-	if len(os.Args) != 2 {
+	if name := filepath.Base(os.Args[0]); name == "mini-cni" || name == "loopback" {
+		os.Exit(cni.Main(os.Stdin, os.Stdout, os.Getenv))
+	}
+	if len(os.Args) < 2 {
 		log.Fatal(usage())
 	}
-	if os.Args[1] == "demo" {
+	switch os.Args[1] {
+	case "demo":
 		runDemo()
 		return
+	case "pause":
+		runPause()
+		return
+	case "fetch":
+		os.Exit(runFetch(os.Args[2:]))
 	}
 	run, ok := components[os.Args[1]]
-	if !ok {
-		log.Fatalf("unknown component %q; %s", os.Args[1], usage())
+	if !ok || len(os.Args) != 2 {
+		log.Fatalf("unknown component %q; %s", strings.Join(os.Args[1:], " "), usage())
 	}
 	token := os.Getenv("MINI_TOKEN")
 	if token == "" {

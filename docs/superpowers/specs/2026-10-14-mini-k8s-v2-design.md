@@ -282,7 +282,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M0 ✅ | 工程基线：LF 换行、etcd 压缩、kubelet 仅在变化时写状态、修正 v1 缺陷、Linux 文档 |
 | E2E ✅ | Ginkgo v2 e2e 框架，迁移全部 live 用例（22 个 spec） |
 | M1 ✅ | API 机制重构 + 所有组件迁移到 informer/workqueue；Namespace、Event、GC、优雅删除 |
-| M2 | kind 式节点：节点镜像与 `mini node-init`、节点内 containerd、kubelet 的 CRI 客户端、`mini-cni` + node IPAM + host-gw 路由、本地镜像导入与自建 pause；退役逻辑节点模式（设计见 §14） |
+| M2 ✅ | kind 式节点：节点镜像与 `mini node-init`、节点内 containerd、kubelet 的 CRI 客户端、`mini-cni` + node IPAM + host-gw 路由、本地镜像导入与自建 pause；退役逻辑节点模式（设计见 §14） |
 | M3 | Pod 与 kubelet：多容器、init 容器、重启策略、探针、资源限制、logs `--previous`、exec、hostNetwork、emptyDir/hostPath |
 | M4 | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system |
 | M5 | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout` |
@@ -299,7 +299,7 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
 
 | 过渡实现 | 替换里程碑 |
 | --- | --- |
-| 逻辑节点：kubelet 经 Docker API 直接管理宿主 Docker 上的容器，所有节点共享一个网桥 | M2 kind 式节点 |
+| 逻辑节点：kubelet 经 Docker API 直接管理宿主 Docker 上的容器，所有节点共享一个网桥 | M2 kind 式节点（已替换） |
 | Deployment 直接拥有 Pod（`pod-template-hash` 标签），模板变化按 Recreate 替换 | M5 ReplicaSet + RollingUpdate |
 | Pod 只允许单容器，kubelet 重启同一个容器 | M3 多容器与重启语义 |
 | 控制面组件与网关由 Compose 直接启动，不在 API 中可见 | M4 控制面自托管 |
@@ -408,6 +408,31 @@ kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
 - e2e：断言“Pod 有真实运行的容器”改为在节点内经 CRI 查询；新增跨节点 Pod 互通、Pod 源 IP
   保留、Pod 出网（TCP）、停止节点容器后其 Pod 不可达、`kk image load` 等用例。
 
+### 14.5 M2 落地记录
+
+M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)），e2e 42 个 spec 全部通过。
+实现中发现并处理的问题：
+
+- containerd 的 CRI 在为沙箱配置网络时总会额外调用名为 `loopback` 的 CNI 插件。没有引入
+  开源 CNI 插件包，而是让 `mini-cni` 同时实现 `loopback` 类型（`/opt/cni/bin/loopback`
+  同样是指向 `mini` 的符号链接，按 argv[0] 分发）。
+- 沙箱创建失败时，错误信息里带有每次不同的沙箱 ID，导致“状态变化 → watch 事件 → 再次同步”
+  的热循环。kuberuntime 为沙箱创建增加与容器重启相同的指数退避，退避期间原样返回上次错误，
+  状态不再变化。
+- CRI `RemoveImage` 会删除同一镜像 ID 的所有标签；e2e 清理用户导入的镜像时改用
+  `ctr images rm` 只删除单个引用，避免误删 `mini-k8s:local`。
+- 节点 DNS：Pod 网络命名空间访问不到节点容器内的 Docker 内置 DNS（127.0.0.11），因此
+  kubelet 在节点地址的 53 端口运行 UDP 转发器，并把它写入沙箱的 DNS 配置；集群 DNS 在 M6。
+- 网关仍是单 Service 的 HTTP 网关，改用节点镜像（需要 iproute2）并持有 NET_ADMIN，运行同一
+  host-gw 路由代理访问 Pod IP；M4 迁入 kube-system，M6 由 kube-proxy/Ingress 取代。
+- node IPAM 未单独写集成测试，由单元测试（分配算法）与 e2e（各节点网段互不重叠、Pod IP 落在
+  所在节点网段内）覆盖。
+- 代码审查发现并修复：containerd shim 退出后被过继给容器 PID 1，而 Go 写的 `node-init` 不回收
+  非自身启动的子进程，会累积僵尸进程——节点容器改用 Docker 的 init（tini）作 PID 1；
+  containerd 删除容器/沙箱时不删日志文件——kubelet 在删除 Pod、housekeeping 与容器重启时清理
+  `/var/log/pods` 下对应的目录与旧实例日志；`logs -f` 读到文件末尾后不再读取新内容——改为在同一
+  `bufio.Reader` 上轮询。三者均有单元测试与 e2e 覆盖。
+
 ## 15. 代码结构（2026-10-15 起）
 
 目录与包名对齐 Kubernetes，熟悉 k8s 源码的读者可以直接对照：
@@ -426,7 +451,9 @@ kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
 | `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器 | `pkg/controller` |
 | `pkg/scheduler` | 调度器 | `pkg/scheduler` |
-| `pkg/kubelet`、`pkg/kubelet/dockershim` | 节点代理；Docker 运行时适配（M2 由 CRI 客户端取代） | `pkg/kubelet`、已移除的 dockershim |
+| `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns}` | 节点代理；CRI 客户端（沙箱、容器、日志）；节点本地 DNS 转发 | `pkg/kubelet`、`pkg/kubelet/kuberuntime`；node-local-dns |
+| `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |
+| `pkg/nodeinit` | 节点容器入口：cgroup 委派、containerd 配置与启动 | kind 的节点入口脚本 |
 | `pkg/gateway` | 单 Service 的 HTTP 网关（M6 由 kube-proxy 与 Ingress 取代） | 无直接对应 |
 | `pkg/util/{ptr,deepcopy,validation}` | 通用小工具 | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation` |
 | `test/e2e` | Ginkgo 端到端测试 | `test/e2e` |

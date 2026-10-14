@@ -14,14 +14,14 @@ const DefaultDeploymentUniqueLabelKey = "pod-template-hash"
 type Deployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Spec       DeploymentSpec   `json:"spec"`
-	Status     DeploymentStatus `json:"status,omitzero"`
+	Spec              DeploymentSpec   `json:"spec"`
+	Status            DeploymentStatus `json:"status,omitzero"`
 }
 
 // DeploymentSpec is the desired state.
 type DeploymentSpec struct {
-	Replicas *int32          `json:"replicas,omitempty"`
-	Selector *metav1.LabelSelector `json:"selector"`
+	Replicas *int32                 `json:"replicas,omitempty"`
+	Selector *metav1.LabelSelector  `json:"selector"`
 	Template corev1.PodTemplateSpec `json:"template"`
 }
 

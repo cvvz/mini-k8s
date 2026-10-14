@@ -23,7 +23,7 @@ func runDemo() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	server := &http.Server{Addr: ":8080", ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("%s %s", r.Method, r.URL.RequestURI())
+		log.Printf("%s %s from %s", r.Method, r.URL.RequestURI(), r.RemoteAddr)
 		fmt.Fprintf(w, "hello from %s\n", host)
 	})}
 	go func() {

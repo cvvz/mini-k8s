@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"time"
 
-	"mini-k8s/pkg/storage/etcd3"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
-	"mini-k8s/pkg/labels"
 	"mini-k8s/pkg/fields"
-	"mini-k8s/pkg/watch"
+	"mini-k8s/pkg/labels"
 	"mini-k8s/pkg/scheme"
+	"mini-k8s/pkg/storage/etcd3"
+	"mini-k8s/pkg/watch"
 )
 
 type watchEvent struct {

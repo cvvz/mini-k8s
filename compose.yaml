@@ -5,9 +5,23 @@ x-common: &common
   environment: &env
     MINI_API: http://apiserver:8080
     MINI_TOKEN: ${MINI_TOKEN:?run kk cluster up}
-    MINI_CLUSTER: mini-k8s
-    MINI_NETWORK: mini-k8s
   networks: [cluster]
+# A node is a privileged container, like a kind node: it runs its own
+# containerd (Pods are containers inside it) and the kubelet. /var is a volume
+# because containerd's overlay snapshots cannot live on the container's own
+# overlay filesystem; /run and /tmp start empty on every boot. containerd
+# shims daemonize and are re-parented to PID 1 when they exit, so an init
+# process (Docker's tini) reaps them instead of `mini node-init`.
+x-node: &node
+  image: mini-k8s-node:local
+  restart: unless-stopped
+  init: true
+  privileged: true
+  cgroup: private
+  security_opt: [seccomp=unconfined, apparmor=unconfined]
+  tmpfs: [/run, /tmp]
+  networks: [cluster]
+  depends_on: [apiserver]
 services:
   etcd:
     image: mini-k8s-etcd:3.5.17
@@ -40,24 +54,26 @@ services:
     command: [kube-controller-manager]
     depends_on: [apiserver]
   worker-1:
-    <<: *common
-    command: [kubelet]
+    <<: *node
+    hostname: worker-1
     environment:
       <<: *env
       MINI_NODE: worker-1
-    volumes: ["${MINI_DOCKER_SOCKET:?run kk cluster up}:/var/run/docker.sock"]
-    depends_on: [apiserver]
+    volumes: [worker-1-var:/var]
   worker-2:
-    <<: *common
-    command: [kubelet]
+    <<: *node
+    hostname: worker-2
     environment:
       <<: *env
       MINI_NODE: worker-2
-    volumes: ["${MINI_DOCKER_SOCKET:?run kk cluster up}:/var/run/docker.sock"]
-    depends_on: [apiserver]
-  proxy:
+    volumes: [worker-2-var:/var]
+  # The gateway is not a node but needs routes to the Pod subnets, so it uses
+  # the node image (for iproute2) with NET_ADMIN.
+  gateway:
     <<: *common
-    command: [gateway]
+    image: mini-k8s-node:local
+    entrypoint: [/usr/local/bin/mini, gateway]
+    cap_add: [NET_ADMIN]
     ports: ["127.0.0.1:18080:8080"]
     depends_on: [apiserver]
 networks:
@@ -65,3 +81,5 @@ networks:
     name: mini-k8s
 volumes:
   etcd-data:
+  worker-1-var:
+  worker-2-var:

@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/client/informers"
-	"mini-k8s/test/integration/framework"
-	metav1 "mini-k8s/pkg/apis/meta/v1"
-	corev1 "mini-k8s/pkg/apis/core/v1"
 	"mini-k8s/pkg/labels"
+	"mini-k8s/test/integration/framework"
 )
 
 type recorder struct {

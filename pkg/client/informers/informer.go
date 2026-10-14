@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mini-k8s/pkg/client"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/labels"
 	"mini-k8s/pkg/watch"
 )

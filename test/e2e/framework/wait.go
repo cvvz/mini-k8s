@@ -32,16 +32,21 @@ func (f *Framework) Pods(ctx context.Context, podLabels map[string]string) ([]co
 	return pods, nil
 }
 
-// ContainerID strips the runtime prefix from a container status ID.
+// ContainerID strips the runtime prefix ("containerd://") from the first
+// container's status ID.
 func ContainerID(p corev1.Pod) string {
 	if len(p.Status.ContainerStatuses) == 0 {
 		return ""
 	}
-	return strings.TrimPrefix(p.Status.ContainerStatuses[0].ContainerID, "docker://")
+	id := p.Status.ContainerStatuses[0].ContainerID
+	if i := strings.Index(id, "://"); i >= 0 {
+		return id[i+3:]
+	}
+	return id
 }
 
 // WaitForRunningPods waits until exactly count live Pods match podLabels, all
-// are Running and Ready, and each has exactly one running Docker container.
+// are Running and Ready, and each has exactly one running container.
 func (f *Framework) WaitForRunningPods(ctx context.Context, podLabels map[string]string, count int) []corev1.Pod {
 	var pods []corev1.Pod
 	gomega.EventuallyWithOffset(1, ctx, func(g gomega.Gomega) {
@@ -73,7 +78,8 @@ func (f *Framework) WaitForPod(ctx context.Context, name, desc string, cond func
 	return pod
 }
 
-// WaitForPodGone waits until the Pod no longer exists and its containers are removed.
+// WaitForPodGone waits until the Pod no longer exists and its containers and
+// log directory are removed from the nodes.
 func (f *Framework) WaitForPodGone(ctx context.Context, pod *corev1.Pod, timeout time.Duration) {
 	gomega.EventuallyWithOffset(1, ctx, func(g gomega.Gomega) {
 		_, err := client.Pods(f.Client, f.Namespace).Get(ctx, pod.Name)
@@ -81,6 +87,9 @@ func (f *Framework) WaitForPodGone(ctx context.Context, pod *corev1.Pod, timeout
 		ids, err := PodContainers(ctx, pod.UID, false)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		g.Expect(ids).To(gomega.BeEmpty(), "containers of Pod %s still exist", pod.Name)
+		dirs, err := PodLogDirs(ctx, pod.UID)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(dirs).To(gomega.BeEmpty(), "log directories of Pod %s still exist", pod.Name)
 	}).WithTimeout(timeout).WithPolling(TestContext.Poll).Should(gomega.Succeed())
 }
 

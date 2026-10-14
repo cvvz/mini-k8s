@@ -1,7 +1,7 @@
 // Package framework provides the shared machinery for mini-k8s end-to-end
 // tests, modelled after Kubernetes' test/e2e/framework: a suite-wide test
 // context, a per-spec Framework that tracks and cleans up what a spec
-// creates, and wait/assert helpers that look at both the API and Docker.
+// creates, and wait/assert helpers that look at both the API and the nodes' containerd.
 package framework
 
 import (

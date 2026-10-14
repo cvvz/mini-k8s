@@ -12,8 +12,8 @@ import (
 type Namespace struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Spec       NamespaceSpec   `json:"spec,omitzero"`
-	Status     NamespaceStatus `json:"status,omitzero"`
+	Spec              NamespaceSpec   `json:"spec,omitzero"`
+	Status            NamespaceStatus `json:"status,omitzero"`
 }
 
 // NamespaceSpec is empty; namespace finalization uses metadata.finalizers.
@@ -44,13 +44,15 @@ const FinalizerKubernetes = "kubernetes"
 type Node struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Spec       NodeSpec   `json:"spec,omitzero"`
-	Status     NodeStatus `json:"status,omitzero"`
+	Spec              NodeSpec   `json:"spec,omitzero"`
+	Status            NodeStatus `json:"status,omitzero"`
 }
 
 // NodeSpec holds scheduling controls.
 type NodeSpec struct {
-	Unschedulable bool `json:"unschedulable,omitempty"`
+	// PodCIDR is the node's Pod address range, assigned once by the node IPAM controller.
+	PodCIDR       string `json:"podCIDR,omitempty"`
+	Unschedulable bool   `json:"unschedulable,omitempty"`
 }
 
 // NodeStatus is reported by the kubelet.
@@ -62,12 +64,12 @@ type NodeStatus struct {
 
 // NodeCondition is one aspect of node health.
 type NodeCondition struct {
-	Type               string `json:"type"`
-	Status             string `json:"status"`
-	LastHeartbeatTime  metav1.Time   `json:"lastHeartbeatTime,omitzero"`
-	LastTransitionTime metav1.Time   `json:"lastTransitionTime,omitzero"`
-	Reason             string `json:"reason,omitempty"`
-	Message            string `json:"message,omitempty"`
+	Type               string      `json:"type"`
+	Status             string      `json:"status"`
+	LastHeartbeatTime  metav1.Time `json:"lastHeartbeatTime,omitzero"`
+	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitzero"`
+	Reason             string      `json:"reason,omitempty"`
+	Message            string      `json:"message,omitempty"`
 }
 
 // NodeAddress is a reachable address of the node.
@@ -86,15 +88,15 @@ type NodeSystemInfo struct {
 
 // Condition types and statuses.
 const (
-	NodeReady         = "Ready"
-	NodeInternalIP    = "InternalIP"
-	NodeHostName      = "Hostname"
-	ConditionTrue     = "True"
-	ConditionFalse    = "False"
-	ConditionUnknown  = "Unknown"
-	LabelHostname     = "kubernetes.io/hostname"
-	LabelOSStable     = "kubernetes.io/os"
-	LabelArchStable   = "kubernetes.io/arch"
+	NodeReady        = "Ready"
+	NodeInternalIP   = "InternalIP"
+	NodeHostName     = "Hostname"
+	ConditionTrue    = "True"
+	ConditionFalse   = "False"
+	ConditionUnknown = "Unknown"
+	LabelHostname    = "kubernetes.io/hostname"
+	LabelOSStable    = "kubernetes.io/os"
+	LabelArchStable  = "kubernetes.io/arch"
 )
 
 // NodeCondition returns the condition of the given type, if present.
@@ -121,8 +123,8 @@ func (n *Node) InternalIP() string {
 type Pod struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Spec       PodSpec   `json:"spec"`
-	Status     PodStatus `json:"status,omitzero"`
+	Spec              PodSpec   `json:"spec"`
+	Status            PodStatus `json:"status,omitzero"`
 }
 
 // PodSpec is the desired state of a Pod.
@@ -163,7 +165,7 @@ type PodStatus struct {
 	Reason            string            `json:"reason,omitempty"`
 	HostIP            string            `json:"hostIP,omitempty"`
 	PodIP             string            `json:"podIP,omitempty"`
-	StartTime         *metav1.Time             `json:"startTime,omitempty"`
+	StartTime         *metav1.Time      `json:"startTime,omitempty"`
 	ContainerStatuses []ContainerStatus `json:"containerStatuses,omitempty"`
 }
 
@@ -185,11 +187,11 @@ const (
 
 // PodCondition is one aspect of Pod state.
 type PodCondition struct {
-	Type               string `json:"type"`
-	Status             string `json:"status"`
-	LastTransitionTime metav1.Time   `json:"lastTransitionTime,omitzero"`
-	Reason             string `json:"reason,omitempty"`
-	Message            string `json:"message,omitempty"`
+	Type               string      `json:"type"`
+	Status             string      `json:"status"`
+	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitzero"`
+	Reason             string      `json:"reason,omitempty"`
+	Message            string      `json:"message,omitempty"`
 }
 
 // ContainerStatus reports one container.
@@ -224,12 +226,12 @@ type ContainerStateRunning struct {
 
 // ContainerStateTerminated records how a container exited.
 type ContainerStateTerminated struct {
-	ExitCode    int32  `json:"exitCode"`
-	Reason      string `json:"reason,omitempty"`
-	Message     string `json:"message,omitempty"`
-	StartedAt   metav1.Time   `json:"startedAt,omitzero"`
-	FinishedAt  metav1.Time   `json:"finishedAt,omitzero"`
-	ContainerID string `json:"containerID,omitempty"`
+	ExitCode    int32       `json:"exitCode"`
+	Reason      string      `json:"reason,omitempty"`
+	Message     string      `json:"message,omitempty"`
+	StartedAt   metav1.Time `json:"startedAt,omitzero"`
+	FinishedAt  metav1.Time `json:"finishedAt,omitzero"`
+	ContainerID string      `json:"containerID,omitempty"`
 }
 
 // Condition returns the Pod condition of the given type, if present.
@@ -269,8 +271,8 @@ func IsPodReady(p *Pod) bool {
 type Service struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Spec       ServiceSpec   `json:"spec"`
-	Status     ServiceStatus `json:"status,omitzero"`
+	Spec              ServiceSpec   `json:"spec"`
+	Status            ServiceStatus `json:"status,omitzero"`
 }
 
 // ServiceSpec selects backends and ports.
@@ -292,16 +294,16 @@ type ServiceStatus struct{}
 
 // Event records something that happened to an object.
 type Event struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	InvolvedObject ObjectReference `json:"involvedObject"`
-	Reason         string          `json:"reason,omitempty"`
-	Message        string          `json:"message,omitempty"`
-	Source         EventSource     `json:"source,omitzero"`
-	FirstTimestamp metav1.Time            `json:"firstTimestamp,omitzero"`
-	LastTimestamp  metav1.Time            `json:"lastTimestamp,omitzero"`
-	Count          int32           `json:"count,omitempty"`
-	Type           string          `json:"type,omitempty"`
+	InvolvedObject    ObjectReference `json:"involvedObject"`
+	Reason            string          `json:"reason,omitempty"`
+	Message           string          `json:"message,omitempty"`
+	Source            EventSource     `json:"source,omitzero"`
+	FirstTimestamp    metav1.Time     `json:"firstTimestamp,omitzero"`
+	LastTimestamp     metav1.Time     `json:"lastTimestamp,omitzero"`
+	Count             int32           `json:"count,omitempty"`
+	Type              string          `json:"type,omitempty"`
 }
 
 // Event types.
@@ -329,7 +331,7 @@ type EventSource struct {
 type Binding struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Target     ObjectReference `json:"target"`
+	Target            ObjectReference `json:"target"`
 }
 
 // PodTemplateSpec describes Pods created by a controller.
@@ -337,7 +339,6 @@ type PodTemplateSpec struct {
 	metav1.ObjectMeta `json:"metadata"`
 	Spec              PodSpec `json:"spec"`
 }
-
 
 // NodeHeartbeatGrace is how stale a Ready heartbeat may be before the node is
 // treated as not ready by consumers that read Node status directly.
