@@ -2,84 +2,89 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A small, Kubernetes-inspired container orchestrator written in Go. It implements
-its own API server, scheduler, controller manager, kubelets, HTTP service proxy,
-and a command-line client called **`kk`**.
+mini-k8s is a compact Kubernetes written from scratch in Go. It implements its own
+API server, scheduler, controller manager, kubelet, HTTP gateway and a CLI called
+**`kk`**, reusing only etcd for storage and a local Docker Engine to run real
+containers.
 
-The goal is to make the desired-state reconciliation loop easy to understand:
-submit a Deployment, schedule its Pods, run real containers, and recover when a
-container exits or a managed Pod is deleted. This is not a wrapper around an
-existing Kubernetes distribution, a Kubernetes-compatible API, or a production
-cluster.
+The goal is "small but complete": the core Kubernetes mechanisms — declarative API,
+watch, control loops, scheduling, node agent and cascading deletion — implemented in
+as little code as possible, end to end and observable. It is not a wrapper around a
+Kubernetes distribution, it is not `kubectl`-compatible, and it is not for production.
 
 ## What it does
 
-- Persists resources in etcd, with UID-based identity and optimistic concurrency.
-- Schedules Pods across two logical workers using fresh heartbeats and assigned
-  Pod counts.
-- Maintains Deployment replicas and supports scaling from 0 to 20.
-- Runs real Docker containers, restarts exited containers, and retrieves logs.
-- Exposes one HTTP Service at `http://127.0.0.1:18080`.
-- Provides `kk` commands for cluster lifecycle and resource management.
+- **Kubernetes-style API**: `/api/v1/namespaces/{ns}/pods`, `/apis/apps/v1/...`, objects
+  with `metadata`/`spec`/`status`, errors as `Status` objects, discovery endpoints.
+- **API machinery**: namespaces; UIDs and `resourceVersion` optimistic concurrency;
+  `generation`/`observedGeneration`; `generateName`; strict decoding (unknown fields are
+  errors); JSON merge patch; `dryRun`; label and field selectors; **watch** (streamed
+  from etcd watches; objects leaving a selector are reported as DELETED).
+- **Deletion semantics**: finalizers; graceful Pod termination (SIGTERM, then SIGKILL
+  after the grace period); force deletion; ownerReferences and garbage collection with
+  Background / Foreground / Orphan propagation; deleting a Namespace deletes its contents.
+- **Control plane**: event-driven informers and work queues; a Deployment controller
+  (Recreate replacement on template changes, status reporting); garbage collector;
+  namespace controller; scheduler binding through the `binding` subresource and
+  reporting unschedulable Pods with conditions and events.
+- **kubelet**: node registration and heartbeats; one worker per Pod; real Docker
+  containers; CrashLoopBackOff; image pull errors (ErrImagePull/ImagePullBackOff);
+  per-container status; logs with follow/tail; orphan container cleanup.
+- **Observability**: Events (identical events aggregated with a count, expired after one
+  hour by an etcd lease); `kk describe` shows an object's events.
+- **kk**: `get` (`-o wide|json|yaml|name`, `-l`, `--field-selector`, `-A`, `-w`),
+  `describe`, `apply`/`create` (server-side dry run of the whole batch first), `delete`
+  (`--grace-period`, `--force`, `--cascade`), `logs -f`, `scale`, `api-resources`,
+  `version`, and cluster lifecycle commands.
 
 ```text
-kk --> API Server --> etcd
-           ^
-           | resource reads / writes
-           |
-   Scheduler + Controller Manager + kubelets
-                                      |
-                                  Docker Engine
-                                      |
-                                workload containers
-                                      ^
-                                      |
-localhost:18080 --> HTTP Service Proxy
+                         kk
+                          │ HTTP + bearer token (127.0.0.1:18000)
+                          ▼
+    etcd ◀──────── kube-apiserver ◀─────────── list / watch / write ────────────┐
+                          ▲                                                    │
+       ┌──────────────────┼───────────────────┬───────────────────┐            │
+   scheduler     controller-manager       kubelet × 2          gateway         │
+                 (deployment / gc /        │ docker.sock          │           │
+                  namespace)               ▼                      ▼           │
+                                     workload containers ◀── 127.0.0.1:18080 ──┘
 ```
 
-Control-plane components, two kubelets, and workload containers share one local
-Docker Engine and a dedicated Docker network. Workers are **logical nodes**, not
-independent machines or isolated container runtimes.
+Every component is a role of the single `mini` binary. Components and workloads share
+one local Docker Engine and a dedicated Docker network; workers are **logical nodes**,
+not separate machines.
 
 ## Prerequisites
 
 | Requirement | Notes |
 | --- | --- |
-| Go 1.25 or later | `go` must be available on your `PATH`. |
-| Docker Engine (Linux containers) | A local, rootful Docker Engine on Linux. The worker adapter requires the daemon to accept Docker API **v1.41**. |
+| Go 1.25 or later | `go` must be on your `PATH`. |
+| Docker Engine (Linux containers) | A local, rootful Docker Engine on Linux. Workers require the daemon to accept Docker API **v1.41**. |
 | Docker Compose v2 | `docker compose version` must work. |
-| `make`, `curl`, and `tar` | Used to build binaries and obtain etcd. |
-| Local Docker access | Your user must be able to use a local Unix socket. TCP, SSH, and remote Docker endpoints are rejected. |
-| Available host ports | `127.0.0.1:18000` for the API and `127.0.0.1:18080` for the demo service. |
+| `make`, `curl`, `tar` | Used to build binaries and obtain etcd. |
+| Local Docker access | A local Unix socket; TCP, SSH and remote Docker endpoints are rejected. |
+| Free host ports | `127.0.0.1:18000` (API) and `127.0.0.1:18080` (gateway). |
 
-Verified end to end on Ubuntu 24.04 (WSL2, x86_64) with Docker Engine 29.9,
-Compose v5.6, and Go 1.27. The original v1 was also exercised on macOS ARM64 with
-Docker Desktop 27.4. Rootless Docker is not a validated configuration.
+Verified end to end on Ubuntu 24.04 (WSL2, x86_64) with Docker Engine 29.9, Compose
+v5.6 and Go 1.27. Rootless Docker is not a validated configuration.
 
-Only one cluster per Docker Engine is supported: Compose project names, network
-names, and published ports are fixed. The host build architecture must match the
+One project cluster per Docker Engine. The host build architecture must match the
 Linux container architecture.
 
-> **Trusted local use only.** Kubelets mount the Docker socket, which grants
-> extensive control over the Docker host. The API uses a shared bearer token,
-> not TLS or RBAC. Do not expose it or run untrusted workloads.
+> **Trusted local use only.** Kubelets mount the Docker socket, which grants extensive
+> control over the Docker host. The API uses a shared bearer token, without TLS or RBAC.
+> Do not expose it or run untrusted workloads.
 
 ## Quick start
-
-Clone the project with Git, or download its source archive from
-[GitHub](https://github.com/cvvz/mini-k8s):
 
 ```sh
 git clone https://github.com/cvvz/mini-k8s.git
 cd mini-k8s
 ```
 
-Run the following commands from the project root, which contains `go.mod`,
-`Makefile`, and `compose.yaml`. There is no need to install `kk` globally.
+Run everything below from the project root.
 
 ### 1. Check your environment
-
-Start your local Docker Engine, then run:
 
 ```sh
 go version
@@ -87,10 +92,6 @@ docker version
 docker compose version
 docker ps
 ```
-
-These commands must complete successfully. If `docker ps` hangs, fix the Docker
-runtime first; a successful `docker info` alone does not establish that the
-container engine is responsive.
 
 ### 2. Build and start the cluster
 
@@ -100,201 +101,156 @@ make build
 ./bin/kk cluster status
 ```
 
-`cluster up` builds the components, prepares etcd, builds two local images, and
-starts the Compose services. It then waits up to 90 seconds for the authenticated
-API and fresh `Ready` heartbeats from both workers; the build/download time is
-separate from this readiness timeout.
-
-The first run needs access to Go modules and the official etcd binary download
-at `storage.googleapis.com`. It downloads etcd v3.5.17 using **host-side curl**.
-Both images are built `FROM scratch`, and the example reuses the local image, so
-the default demo does not require Docker Hub image pulls.
-
-Expected cluster status:
+`cluster up` builds the components, prepares etcd (on first use it downloads v3.5.17
+from `storage.googleapis.com` with host-side curl), builds two `FROM scratch` images and
+starts the Compose services. It then waits up to 90 seconds for a healthy API and fresh
+Ready heartbeats from both workers.
 
 ```text
 API healthy
-KIND  NAME      PHASE  NODE  REPLICAS
-Node  worker-1  Ready        -
-Node  worker-2  Ready        -
+NAME       STATUS   ROLES    AGE   VERSION
+worker-1   Ready    worker   5s    mini-kubelet/v2
+worker-2   Ready    worker   5s    mini-kubelet/v2
 ```
 
-### 3. Deploy and access the example
+### 3. Deploy the example
 
 ```sh
 ./bin/kk apply -f examples/demo.yaml
-./bin/kk get deployments
-./bin/kk get pods
-./bin/kk get services
-
-curl --fail --retry 20 --retry-delay 1 --retry-connrefused --max-time 5 \
-  http://127.0.0.1:18080/
+./bin/kk get deployments,pods,services -o wide
+curl --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/
 ```
 
-The [example](examples/demo.yaml) creates a two-replica Web Deployment and one
-Service. Pod creation is asynchronous: Pods may initially be `Pending`, and the
-gateway may return `503` until backends are available.
+The [example](examples/demo.yaml) creates a two-replica Deployment and a Service. The
+gateway round-robins across ready Pods; responses look like
+`hello from web-997d7b744-f8shs` (the Pod name is its hostname).
 
-Once running, the response looks like:
-
-```text
-hello from <container-hostname>
-```
-
-### 4. Scale and inspect
+### 4. Observe and operate
 
 ```sh
-./bin/kk scale deployment web --replicas 3
-./bin/kk get pods
-./bin/kk get deployments web -o json
+export PATH="$PWD/bin:$PATH"             # use kk directly from now on
+
+kk get pods -w                           # watch changes live (Ctrl-C to stop)
+kk describe deployment web               # details and related events
+kk get events
+kk logs -f POD_NAME                      # a name printed by kk get pods
+kk scale deployment web --replicas 3
+kk delete pod POD_NAME                   # graceful; the Deployment replaces it
+kk delete pod POD_NAME --force           # removed from the API immediately
+
+kk create namespace team
+kk apply -n team -f examples/demo.yaml   # namespaced copy (the gateway still serves one Service)
+kk delete namespace team                 # deletes everything inside
 ```
 
-Replace `POD_NAME` below with a name printed by `get pods`:
-
-```sh
-./bin/kk describe pod POD_NAME
-./bin/kk logs POD_NAME
-./bin/kk delete pod POD_NAME
-```
-
-Deleting a Deployment-managed Pod causes the controller to create a replacement.
-`describe` prints the stored resource, including its status and failure reason;
-`logs` returns a non-following snapshot of container stdout/stderr.
-
-Optionally add the local CLI to your current shell:
-
-```sh
-export PATH="$PWD/bin:$PATH"
-kk get pods
-```
-
-Keep the binary in the project's `bin/` directory; `kk` uses the source tree and
-project-local credentials for cluster operations.
-
-### 5. Stop or remove the example
-
-To stop the cluster **while keeping its desired state**:
+### 5. Stop the cluster
 
 ```sh
 ./bin/kk cluster down
 ```
 
-The command stops reconcilers, removes this cluster's workload containers, and
-stops Compose. It preserves the etcd volume and local token. A later
-`./bin/kk cluster up` restores the saved resources and recreates their workloads.
-
-To remove the example permanently, delete its resources **before** stopping:
-
-```sh
-./bin/kk delete -f examples/demo.yaml
-./bin/kk cluster down
-```
-
-etcd persistence preserves resource definitions, not application filesystem data.
-Persistent application volumes are not implemented.
+This stops reconcilers, removes this cluster's workload containers and stops Compose,
+**keeping the etcd volume and token**. A later `cluster up` restores saved resources.
+To remove the example for good, run `kk delete -f examples/demo.yaml` first.
 
 ## Supported subset
 
-| Resource | Supported behavior |
-| --- | --- |
-| Node | Worker registration and heartbeats; not created through user manifests. |
-| Pod | One container, with `name`, `image`, `command`, `args`, and string `env` values. |
-| Deployment | Explicit `replicas: 0..20`, label selector and Pod template; directly owns Pods without a ReplicaSet. |
-| Service | One HTTP gateway for the entire cluster; one `port: 80` and numeric `targetPort: 1..65535`. |
+| Resource | apiVersion | Supported fields and behaviour |
+| --- | --- | --- |
+| Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
+| Node | `v1` | Registered and heartbeated by kubelets; `spec.unschedulable` is honoured by the scheduler. |
+| Pod | `v1` | **One container**: `name`, `image`, `command`, `args`, `env`, `ports`; `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. |
+| Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template`. Template changes replace Pods (Recreate). |
+| Service | `v1` | One cluster-wide HTTP gateway Service: `selector`, one `port: 80`, `targetPort`. |
+| Event | `v1` | Recorded by components, queryable, expire after one hour. |
 
-Only the `default` namespace is supported. Unknown fields and unsupported
-operations are errors, not ignored input. Existing specs and labels are immutable,
-except for Deployment replicas. Changing an image or Service selector requires
-deletion and recreation; there is no rolling update.
+`kk apply` uses JSON merge patch: fields in the manifest overwrite server values, but
+**fields removed from a manifest are not removed from the server** (there is no
+last-applied three-way merge). Every document of a batch is validated with a
+server-side dry run first, so one bad document changes nothing; applying the batch is
+still not a cross-resource transaction.
 
-`apply -f` accepts multi-document YAML and validates every document before making
-API calls. Applying the batch is **not transactional**: an API failure can leave
-earlier documents applied. Updates and deletes detect version conflicts rather
-than forcefully overwriting concurrent changes.
+## Current limitations (addressed by upcoming milestones)
 
-There is no `kubectl` compatibility, Watch API, DNS, ClusterIP, NodePort, CNI,
-Ingress, health probes, resource-aware scheduling, node-failure migration,
-ConfigMap/Secret, application volumes, RBAC, HPA, or control-plane HA. Stopping a
-logical kubelet does not stop the containers it previously created.
+- Pods have one container and no probes, resource limits, ConfigMaps/Secrets or volumes.
+- Deployments manage Pods directly: no ReplicaSets, rolling updates or rollbacks.
+- One HTTP gateway Service; no ClusterIP, DNS, NodePort or Ingress.
+- Lost nodes are not marked NotReady and their Pods are not evicted; no resource-aware
+  scheduling, taints or affinity.
+- No DaemonSets, Jobs, CronJobs, StatefulSets, HPA, RBAC or control-plane HA.
 
 ## Development
 
 ```sh
 make vet
-make test
+make test                # unit and component tests (a throwaway etcd from bin/etcd)
 go test -race ./...
 ```
 
-End-to-end tests are a Ginkgo v2 suite modelled after Kubernetes' `test/e2e`
-(see [test/e2e/README.md](test/e2e/README.md)). They need a running cluster and
-`docker` on `PATH`:
+Component tests run the real API server in-process against a temporary etcd started
+from `bin/etcd` (prepared by `make prepare-etcd`); they are skipped when it is missing.
+
+End-to-end tests are a Ginkgo v2 suite modelled after Kubernetes' `test/e2e` (see
+[test/e2e/README.md](test/e2e/README.md)). Each spec runs in its own namespace, which is
+deleted afterwards:
 
 ```sh
-make e2e                          # every spec, including disruptive ones
+make e2e                          # every spec, including Disruptive ones
 make e2e-quick                    # skip specs labelled Disruptive
 make e2e E2E_FOCUS='sig-apps'     # run a subset by name
 ```
 
-**Run them only against a disposable project cluster.** Specs create uniquely
-named resources and clean them up, and check API state, real Docker containers,
-HTTP traffic, logs, self-healing, version conflicts, and validation. Disruptive
-specs restart the control plane and run `cluster down/up`. Every new feature
-ships with e2e specs.
+**Run them only against a disposable project cluster.** Disruptive specs restart the
+control plane and run `cluster down/up`. Gateway specs require that no other Service
+exists and are skipped otherwise. Every new feature ships with e2e specs.
 
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
-| `go`, `docker`, or `make` not found | Install the prerequisites and add their installation directories to your own `PATH`. |
-| Docker commands hang | Check the actual engine, not just API metadata (for example `systemctl status docker`). Restart only after considering other workloads. |
-| etcd download fails | Check host network/proxy access to `storage.googleapis.com`, or provide a matching Linux etcd v3.5.17 binary at `bin/etcd`. |
-| Pod fails to pull an image | Use `describe pod` to inspect the error. The worker can use cached images or pull public images; private images must be pre-pulled into the same Engine. |
-| Gateway returns `503` | Wait for running Pods; check Service labels, target port, and worker heartbeats. `Running` is not an application health probe. |
-| Unsupported field or immutable-spec error | Use the documented subset. Only replicas can be updated in place. |
-| Port or project-name conflict | Free the required ports or stop the conflicting project; changing `MINI_API` alone does not change Compose port mappings. |
-| Docker API version rejected | The worker uses v1.41. Changing the Docker CLI's `DOCKER_API_VERSION` does not change that worker protocol. |
+| `go`, `docker` or `make` not found | Install the prerequisites and add them to your `PATH`. |
+| Docker commands hang | Check the engine itself (for example `systemctl status docker`) before restarting it. |
+| etcd download fails | Check access to `storage.googleapis.com`, or provide a Linux etcd v3.5.17 binary at `bin/etcd`. |
+| Pod shows `ErrImagePull`/`ImagePullBackOff` | `kk describe pod NAME` shows the events. Private images must be pre-pulled into the same Engine. |
+| Pod shows `CrashLoopBackOff` | `kk logs NAME` shows the application output; restarts back off from 1s up to 30s. |
+| Gateway returns `503` | Wait for ready Pods; check the Service selector, targetPort and node heartbeats. |
+| `Error from server (Invalid)` | Fix the field named in the message; unknown fields are rejected too. |
+| Port or project-name conflict | Free the ports or stop the conflicting project; `MINI_API` alone does not change Compose ports. |
 
-`bin/etcd` is reused without version/architecture verification. Replace it when
-changing architecture. This cache is not a portable prebuilt release.
-
-The first startup creates `.mini-k8s/token` with mode `0600`. Keep it private and
-do not delete it while the cluster is running. `MINI_API` overrides the CLI's API
-address only; the normal quick start uses its default.
-
-For Compose diagnostics, set the same variables that `kk` normally provides
-automatically. Do not enable shell tracing or print the token:
+The first start creates `.mini-k8s/token` with mode `0600`; keep it private and do not
+delete it while the cluster runs. For manual Compose diagnostics, export the variables
+`kk` normally provides (never print the token):
 
 ```sh
 export MINI_TOKEN="$(cat .mini-k8s/token)"
 export MINI_DOCKER_SOCKET=/var/run/docker.sock
 docker compose ps
-docker compose logs --tail=100
+docker compose logs --tail=100 controller
 unset MINI_TOKEN MINI_DOCKER_SOCKET
 ```
 
-Substitute the actual local Engine socket path if it differs.
-
-For a specifically diagnosed credential-helper hang, optional
-`MINI_DOCKER_NO_CREDENTIALS=1 ./bin/kk cluster up` uses a temporary anonymous Docker
-configuration without modifying your existing one. It does not repair an
-unresponsive daemon and does not carry private-registry credentials or your
-existing proxy/builder configuration.
+Only for a diagnosed credential-helper hang, `MINI_DOCKER_NO_CREDENTIALS=1 ./bin/kk cluster up`
+uses a temporary anonymous Docker configuration without modifying yours.
 
 ## Roadmap
 
-mini-k8s is evolving toward a compact but complete Kubernetes: Kubernetes-style
-REST and Watch, namespaces, ReplicaSets and rolling updates, multi-container Pods
-with probes, ClusterIP Services with DNS, node lifecycle, ConfigMaps/Secrets,
-volumes, and more workload types. See the
-[v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)
-for the architecture and milestone status.
+| Milestone | Scope | Status |
+| --- | --- | --- |
+| M0 | Engineering baseline, Linux docs | ✅ |
+| E2E | Ginkgo e2e framework | ✅ |
+| M1 | API machinery: Kubernetes-style REST, namespaces, watch, informers/work queues, GC, graceful deletion, events | ✅ |
+| M2 | Pods and kubelet: pause sandbox, multiple and init containers, probes, resource limits, exec | planned |
+| M3 | ReplicaSets, rolling updates and rollbacks | planned |
+| M4 | ClusterIP, Endpoints, kube-proxy, DNS, NodePort, Ingress | planned |
+| M5 | Scheduling framework, node leases and eviction, taints, cordon/drain | planned |
+| M6 | ConfigMaps, Secrets, volumes, PVCs | planned |
+| M7 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
 
 ## Design documentation
 
-- [Design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-design.md):
-  goals, decisions, resource contracts, architecture, limitations, and acceptance.
-- [Implementation plan (Chinese)](docs/superpowers/plans/2026-10-14-mini-k8s-plan.md):
-  retrospective task breakdown, interfaces, dependencies, and verification.
-- [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md):
-  the "compact but complete" architecture and milestones.
-- [M0 baseline plan (Chinese)](docs/superpowers/plans/2026-10-14-m0-baseline.md).
+- [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M1 API machinery plan (Chinese)](docs/superpowers/plans/2026-10-14-m1-api-machinery.md)
+- [M0 baseline plan (Chinese)](docs/superpowers/plans/2026-10-14-m0-baseline.md)
+- [v1 design specification](docs/superpowers/specs/2026-10-14-mini-k8s-design.md) and
+  [v1 implementation plan](docs/superpowers/plans/2026-10-14-mini-k8s-plan.md) (Chinese):
+  records of the original 30-minute version.

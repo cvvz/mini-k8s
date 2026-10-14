@@ -3,27 +3,24 @@ package framework
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"gopkg.in/yaml.v3"
-
-	"mini-k8s/internal/mini"
 )
 
 // Object is a manifest document in the same shape users write for kk.
 type Object map[string]any
 
-// Container describes the single container used by test Pods.
+// Container describes the container used by test Pods.
 type Container struct {
 	Name    string
 	Image   string
 	Command []string
 	Args    []string
+	Env     map[string]string
 }
 
 // DemoImage is the locally built image; using it avoids registry pulls.
@@ -47,10 +44,17 @@ func (c Container) object() map[string]any {
 	if len(c.Args) > 0 {
 		o["args"] = c.Args
 	}
+	var env []any
+	for k, v := range c.Env {
+		env = append(env, map[string]any{"name": k, "value": v})
+	}
+	if env != nil {
+		o["env"] = env
+	}
 	return o
 }
 
-// NewPod builds a standalone Pod manifest.
+// NewPod builds a Pod manifest.
 func NewPod(name string, labels map[string]string, c Container) Object {
 	return Object{
 		"apiVersion": "v1", "kind": "Pod",
@@ -87,31 +91,20 @@ func NewService(name string, selector map[string]string, targetPort int) Object 
 	}
 }
 
-// Kind returns the manifest kind.
-func (o Object) Kind() string { s, _ := o["kind"].(string); return s }
+// Spec returns the object's spec map for in-place edits.
+func (o Object) Spec() map[string]any { s, _ := o["spec"].(map[string]any); return s }
 
-// Name returns metadata.name.
-func (o Object) Name() string {
-	m, _ := o["metadata"].(map[string]any)
-	s, _ := m["name"].(string)
-	return s
-}
+// Meta returns the object's metadata map for in-place edits.
+func (o Object) Meta() map[string]any { m, _ := o["metadata"].(map[string]any); return m }
 
-// PodLabels returns the labels Pods created from this object carry.
-func (o Object) PodLabels() map[string]string {
-	switch o.Kind() {
-	case "Pod":
-		m, _ := o["metadata"].(map[string]any)
-		l, _ := m["labels"].(map[string]string)
-		return l
-	case "Deployment":
-		spec, _ := o["spec"].(map[string]any)
-		tpl, _ := spec["template"].(map[string]any)
-		m, _ := tpl["metadata"].(map[string]any)
-		l, _ := m["labels"].(map[string]string)
-		return l
+// PodSpec returns the Pod spec of a Pod or of a Deployment template.
+func (o Object) PodSpec() map[string]any {
+	if o["kind"] == "Pod" {
+		return o.Spec()
 	}
-	return nil
+	tpl, _ := o.Spec()["template"].(map[string]any)
+	s, _ := tpl["spec"].(map[string]any)
+	return s
 }
 
 // WriteManifest renders objects as a multi-document YAML file in a temp dir.
@@ -127,66 +120,20 @@ func WriteManifest(objs ...Object) string {
 	return path
 }
 
-// Apply runs `kk apply -f` and registers cleanup that deletes the objects and
-// waits until their Pods and containers are gone.
-func (f *Framework) Apply(ctx context.Context, objs ...Object) {
-	ginkgo.DeferCleanup(f.DeleteAndWait, objs)
-	KK(ctx, "apply", "-f", WriteManifest(objs...))
+// Apply runs `kk apply -f` in the spec namespace. The namespace's deletion
+// cleans everything up.
+func (f *Framework) Apply(ctx context.Context, objs ...Object) string {
+	return KK(ctx, "apply", "-n", f.Namespace, "-f", WriteManifest(objs...))
 }
 
 // ApplyExpectError runs `kk apply -f`, expects failure and returns the output.
-// Anything that was created before the failure is still cleaned up.
 func (f *Framework) ApplyExpectError(ctx context.Context, objs ...Object) string {
-	ginkgo.DeferCleanup(f.DeleteAndWait, objs)
-	out, err := RunKK(ctx, "apply", "-f", WriteManifest(objs...))
+	out, err := RunKK(ctx, "apply", "-n", f.Namespace, "-f", WriteManifest(objs...))
 	gomega.ExpectWithOffset(1, err).To(gomega.HaveOccurred(), "kk apply unexpectedly succeeded:\n%s", out)
 	return out
 }
 
-// DeleteAndWait deletes objects (ignoring NotFound) and waits for their Pods
-// to disappear from the API and for their containers to be removed.
-func (f *Framework) DeleteAndWait(ctx context.Context, objs []Object) {
-	var uids []string
-	for _, o := range objs {
-		if labels := o.PodLabels(); len(labels) > 0 {
-			pods, err := f.Pods(ctx, labels)
-			ExpectNoError(err)
-			for _, p := range pods {
-				uids = append(uids, p.Metadata.UID)
-			}
-		}
-	}
-	for i := len(objs) - 1; i >= 0; i-- {
-		f.deleteIgnoringNotFound(ctx, objs[i].Kind(), objs[i].Name())
-	}
-	gomega.Eventually(ctx, func(g gomega.Gomega) {
-		pods, err := f.Client.List(ctx, "Pod")
-		g.Expect(err).NotTo(gomega.HaveOccurred())
-		remaining := map[string]bool{}
-		for _, p := range pods {
-			remaining[p.Metadata.UID] = true
-		}
-		for _, uid := range uids {
-			g.Expect(remaining[uid]).To(gomega.BeFalse(), "Pod %s still exists", uid)
-			ids, err := PodContainers(ctx, uid, false)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			g.Expect(ids).To(gomega.BeEmpty(), "containers of Pod %s still exist", uid)
-		}
-	}).WithTimeout(TestContext.PodStartTimeout).WithPolling(TestContext.Poll).Should(gomega.Succeed())
-}
-
-func (f *Framework) deleteIgnoringNotFound(ctx context.Context, kind, name string) {
-	gomega.Eventually(ctx, func() error {
-		r, err := f.Client.Get(ctx, kind, name)
-		if errors.Is(err, mini.ErrNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if err := f.Client.Delete(ctx, r); err != nil && !errors.Is(err, mini.ErrNotFound) {
-			return err
-		}
-		return nil
-	}).WithTimeout(30 * time.Second).WithPolling(TestContext.Poll).Should(gomega.Succeed())
+// KK runs kk in the spec namespace and fails the spec on error.
+func (f *Framework) KK(ctx context.Context, args ...string) string {
+	return KK(ctx, append(args, "-n", f.Namespace)...)
 }

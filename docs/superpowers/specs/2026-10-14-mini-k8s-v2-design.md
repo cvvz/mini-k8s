@@ -222,7 +222,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | --- | --- |
 | M0 ✅ | 工程基线：LF 换行、etcd 压缩、kubelet 仅在变化时写状态、修正 v1 缺陷、Linux 文档 |
 | E2E ✅ | Ginkgo v2 e2e 框架，迁移全部 live 用例（22 个 spec） |
-| M1 | API 机制重构 + 所有组件迁移到 informer/workqueue；Namespace、Event、GC、优雅删除 |
+| M1 ✅ | API 机制重构 + 所有组件迁移到 informer/workqueue；Namespace、Event、GC、优雅删除 |
 | M2 | Pod 与 kubelet：沙箱、多容器、init、重启策略、探针、资源、logs/exec |
 | M3 | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout` |
 | M4 | 网络：ClusterIP、Endpoints、kube-proxy、DNS、NodePort、Headless、Ingress |
@@ -230,6 +230,29 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M6 | ConfigMap、Secret、卷、PVC/PV |
 | M7 | DaemonSet、Job、CronJob、StatefulSet |
 | M8+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
+
+### 12.1 M1 落地记录与过渡态
+
+M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/workqueue。以下是有意保留、
+由后续里程碑替换的过渡实现：
+
+| 过渡实现 | 替换里程碑 |
+| --- | --- |
+| Deployment 直接拥有 Pod（`pod-template-hash` 标签），模板变化按 Recreate 替换 | M3 ReplicaSet + RollingUpdate |
+| Pod 只允许单容器，kubelet 重启同一个容器 | M2 沙箱与多容器 |
+| Service 仍是全局唯一的 HTTP 网关（准入保证），无 ClusterIP | M4 |
+| 节点通过 Node status 的 Ready 条件每 5 秒心跳，消费者按 20 秒新鲜度判断就绪；无 Lease、无驱逐 | M5 |
+| 调度器只按 Pod 数选最少者，遵守 `spec.unschedulable` | M5 调度框架 |
+
+实现中确认的细节：
+
+- etcd key 为 `/registry/{resource}/{ns}/{name}`；Event 共享按分钟申请的 lease（TTL 1h+1m）。
+- 未调度或已结束的 Pod 删除时宽限期为 0；kubelet 完成终止后以 `gracePeriodSeconds=0` 加
+  UID 前置条件完成删除。
+- 主资源更新与 PATCH 在“存储形态不变”时不写 etcd，`kk apply` 据此输出 `unchanged`。
+- `kk apply` 先对整批文档做服务端 dry-run（同批新建的命名空间中的对象除外），再逐个写入。
+- 控制器以 expectations 防止 informer 滞后导致的重复创建/删除；缩容优先删除未调度、
+  Pending、未就绪、较新的 Pod。
 
 ## 13. 非目标
 
