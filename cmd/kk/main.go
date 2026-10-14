@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"mini-k8s/internal/client"
+	"mini-k8s/pkg/client"
 )
 
 func apiURL() string {

@@ -8,14 +8,19 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/client"
+	"mini-k8s/pkg/util/deepcopy"
+	"mini-k8s/pkg/util/ptr"
+	"mini-k8s/pkg/watch"
 	"mini-k8s/test/e2e/framework"
 )
 
-func pod(name string, labels map[string]string) *api.Pod {
-	return &api.Pod{ObjectMeta: api.ObjectMeta{Name: name, Labels: labels},
-		Spec: api.PodSpec{Containers: []api.Container{{Name: "web", Image: framework.DemoImage, Command: []string{"/mini"}, Args: []string{"demo"}}}}}
+func pod(name string, labels map[string]string) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: framework.DemoImage, Command: []string{"/mini"}, Args: []string{"demo"}}}}}
 }
 
 var _ = framework.SIGDescribe("api-machinery", "API server", func() {
@@ -25,22 +30,22 @@ var _ = framework.SIGDescribe("api-machinery", "API server", func() {
 		f.Apply(ctx, framework.NewDeployment("rv", 0, map[string]string{"app": "rv"}, framework.DemoContainer()))
 		deps := client.Deployments(f.Client, f.Namespace)
 		// Wait for the controller's status write so only this spec changes the object.
-		var stale *api.Deployment
+		var stale *appsv1.Deployment
 		Eventually(ctx, func(g Gomega) {
 			d, err := deps.Get(ctx, "rv")
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(d.Status.ObservedGeneration).To(Equal(d.Generation))
 			stale = d
 		}).Should(Succeed())
-		fresh := api.DeepCopy(stale)
-		fresh.Spec.Replicas = api.Int32(1)
+		fresh := deepcopy.Copy(stale)
+		fresh.Spec.Replicas = ptr.To[int32](1)
 		_, err := deps.Update(ctx, fresh)
 		framework.ExpectNoError(err)
 
 		_, err = deps.Update(ctx, stale)
 		Expect(client.IsConflict(err)).To(BeTrue(), "expected a conflict, got %v", err)
 		rv := stale.ResourceVersion
-		err = deps.Delete(ctx, "rv", &api.DeleteOptions{Preconditions: &api.Preconditions{ResourceVersion: &rv}})
+		err = deps.Delete(ctx, "rv", &metav1.DeleteOptions{Preconditions: &metav1.Preconditions{ResourceVersion: &rv}})
 		Expect(client.IsConflict(err)).To(BeTrue(), "stale delete should conflict, got %v", err)
 	})
 
@@ -73,7 +78,7 @@ var _ = framework.SIGDescribe("api-machinery", "API server", func() {
 		framework.ExpectNoError(err)
 		defer w.Stop()
 		// waitFor consumes events until one of the wanted type arrives.
-		waitFor := func(typ string) *api.Pod {
+		waitFor := func(typ string) *corev1.Pod {
 			timeout := time.After(30 * time.Second)
 			for {
 				select {
@@ -89,12 +94,12 @@ var _ = framework.SIGDescribe("api-machinery", "API server", func() {
 		}
 		_, err = pods.Create(ctx, pod("watched", map[string]string{"watched": "yes"}))
 		framework.ExpectNoError(err)
-		Expect(waitFor(api.EventAdded).Name).To(Equal("watched"))
-		Expect(waitFor(api.EventModified).Spec.NodeName).NotTo(BeEmpty(), "the scheduler binds the Pod")
+		Expect(waitFor(watch.Added).Name).To(Equal("watched"))
+		Expect(waitFor(watch.Modified).Spec.NodeName).NotTo(BeEmpty(), "the scheduler binds the Pod")
 		_, err = pods.Patch(ctx, "watched", map[string]any{"metadata": map[string]any{"labels": map[string]any{"watched": "no"}}})
 		framework.ExpectNoError(err)
 		// Leaving the label selection is reported as DELETED.
-		Expect(waitFor(api.EventDeleted).Labels["watched"]).To(Equal("no"))
+		Expect(waitFor(watch.Deleted).Labels["watched"]).To(Equal("no"))
 	})
 
 	It("should filter lists by label and field selectors", func(ctx SpecContext) {
@@ -138,7 +143,7 @@ var _ = framework.SIGDescribe("api-machinery", "API server", func() {
 		framework.KK(ctx, "delete", "namespace", ns, "--wait=false")
 		got, err := client.Namespaces(f.Client).Get(ctx, ns)
 		if err == nil {
-			Expect(got.Status.Phase).To(Equal(api.NamespaceTerminating))
+			Expect(got.Status.Phase).To(Equal(corev1.NamespaceTerminating))
 			_, err = client.Pods(f.Client, ns).Create(ctx, pod("late", nil))
 			Expect(client.IsForbidden(err)).To(BeTrue(), "creates in a terminating namespace must be refused: %v", err)
 		}
@@ -168,7 +173,7 @@ var _ = framework.SIGDescribe("api-machinery", "API server", func() {
 		_, err := client.Pods(f.Client, f.Namespace).Create(ctx, p)
 		framework.ExpectNoError(err)
 		f.KK(ctx, "delete", "pod", "held", "--wait=false")
-		held := f.WaitForPod(ctx, "held", "is marked for deletion", func(p *api.Pod) bool { return p.DeletionTimestamp != nil })
+		held := f.WaitForPod(ctx, "held", "is marked for deletion", func(p *corev1.Pod) bool { return p.DeletionTimestamp != nil })
 		Consistently(ctx, func() error {
 			_, err := client.Pods(f.Client, f.Namespace).Get(ctx, "held")
 			return err

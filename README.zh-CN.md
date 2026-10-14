@@ -83,6 +83,28 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 `k8s.io/cri-api`（仅为 CRI 协议定义，不含实现）；测试使用 Ginkgo/Gomega。项目不依赖
 client-go 或任何 Kubernetes 组件的实现代码。
 
+## 代码结构
+
+目录与包名对齐 Kubernetes 源码，可以直接对照阅读（完整对照表见
+[v2 设计规格 §15](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)）：
+
+```text
+cmd/mini/                    多合一二进制：mini kube-apiserver | kube-controller-manager | kube-scheduler | kubelet | gateway | demo
+cmd/kk/                      命令行客户端（相当于 kubectl + 集群生命周期）
+pkg/apis/{meta,core,apps}/v1 资源类型（metav1、corev1、appsv1）及 validation
+pkg/labels, fields, watch    选择器与 watch 事件类型（对应 apimachinery）
+pkg/scheme                   资源注册表
+pkg/apiserver                通用 API 服务（对应 k8s.io/apiserver）
+pkg/registry/<group>/<res>   各资源的 Strategy：默认值、校验、可变性、字段选择器
+pkg/storage/etcd3            etcd 存储
+pkg/client/...               客户端、informers、workqueue、record（对应 client-go）
+pkg/controller/<name>        deployment、garbagecollector、namespace 控制器
+pkg/scheduler                调度器
+pkg/kubelet[/dockershim]     节点代理与 Docker 运行时适配
+pkg/gateway                  HTTP 网关
+test/e2e, test/integration   端到端测试与集成测试
+```
+
 ## 环境要求
 
 | 依赖 | 要求 |
@@ -232,8 +254,9 @@ make test                # 单元测试 + 组件测试（使用 bin/etcd 启动�
 go test -race ./...
 ```
 
-组件测试会在进程内启动真实的 API Server，后端是临时 etcd。etcd 二进制取自
-`bin/etcd`（`make prepare-etcd` 准备）；缺失时这些测试自动跳过。
+集成测试（`test/integration`，以及各包中使用 `test/integration/framework` 的测试）会在进程内
+启动真实的 API Server，后端是临时 etcd。etcd 二进制取自 `bin/etcd`（`make prepare-etcd` 准备）；
+缺失时这些测试自动跳过。
 
 端到端测试是仿照 Kubernetes `test/e2e` 的 Ginkgo v2 套件（见
 [test/e2e/README.md](test/e2e/README.md)），每个用例在独立命名空间中运行，结束后删除：

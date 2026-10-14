@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
-	"mini-k8s/internal/testenv"
+	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/client"
+	"mini-k8s/test/integration/framework"
 )
 
 const webManifest = `apiVersion: apps/v1
@@ -102,7 +104,7 @@ func TestParseTargets(t *testing.T) {
 }
 
 func TestApplyCreateConfigureUnchanged(t *testing.T) {
-	c := testenv.New(t)
+	c := framework.StartTestServer(t)
 	path := writeFile(t, webManifest)
 	out, err := kk(t, c, "", "apply", "-f", path)
 	if err != nil || out != "deployment.apps/web created\n" {
@@ -131,7 +133,7 @@ func TestApplyCreateConfigureUnchanged(t *testing.T) {
 }
 
 func TestApplyValidatesWholeBatchFirst(t *testing.T) {
-	c := testenv.New(t)
+	c := framework.StartTestServer(t)
 	bad := webManifest + "---\n" + strings.Replace(strings.Replace(webManifest, "name: web\n", "name: broken\n", 1), "replicas: 2", "replicas: -1", 1)
 	_, err := kk(t, c, "", "apply", "-f", writeFile(t, bad))
 	if err == nil || !strings.Contains(err.Error(), "no objects were changed") || !strings.Contains(err.Error(), "spec.replicas") {
@@ -161,7 +163,7 @@ func TestApplyValidatesWholeBatchFirst(t *testing.T) {
 }
 
 func TestGetOutputs(t *testing.T) {
-	c := testenv.New(t)
+	c := framework.StartTestServer(t)
 	if out, err := kk(t, c, "", "get", "pods"); err != nil || out != "No resources found in default namespace.\n" {
 		t.Fatalf("%q %v", out, err)
 	}
@@ -176,7 +178,7 @@ func TestGetOutputs(t *testing.T) {
 		t.Fatalf("name output: %q", out)
 	}
 	out, _ = kk(t, c, "", "get", "deployment", "web", "-o", "json")
-	var d api.Deployment
+	var d appsv1.Deployment
 	if err := json.Unmarshal([]byte(out), &d); err != nil || d.Name != "web" || d.Kind != "Deployment" {
 		t.Fatalf("json output: %v %s", err, out)
 	}
@@ -198,7 +200,7 @@ func TestGetOutputs(t *testing.T) {
 }
 
 func TestDeleteScaleCreateNamespaceDescribe(t *testing.T) {
-	c := testenv.New(t)
+	c := framework.StartTestServer(t)
 	ctx := context.Background()
 	if out, err := kk(t, c, "", "create", "namespace", "team"); err != nil || out != "namespace/team created\n" {
 		t.Fatalf("%q %v", out, err)
@@ -215,13 +217,13 @@ func TestDeleteScaleCreateNamespaceDescribe(t *testing.T) {
 	if _, err := kk(t, c, "", "scale", "deploy", "web", "--replicas", "-1", "-n", "team"); err == nil {
 		t.Fatal("negative replicas accepted")
 	}
-	pod := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "p1", Labels: map[string]string{"tier": "x"}}, Spec: api.PodSpec{Containers: []api.Container{{Name: "c", Image: "i"}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p1", Labels: map[string]string{"tier": "x"}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}}}
 	created, err := client.Pods(c, "team").Create(ctx, pod)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = client.Events(c, "team").Create(ctx, &api.Event{ObjectMeta: api.ObjectMeta{Name: "p1.1"}, Reason: "Testing", Message: "hello event",
-		InvolvedObject: api.ObjectReference{Kind: "Pod", Name: "p1", Namespace: "team", UID: created.UID}})
+	_, _ = client.Events(c, "team").Create(ctx, &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "p1.1"}, Reason: "Testing", Message: "hello event",
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "p1", Namespace: "team", UID: created.UID}})
 	out, err := kk(t, c, "", "describe", "pod", "p1", "-n", "team")
 	if err != nil || !strings.Contains(out, "Name:") || !strings.Contains(out, "tier=x") || !strings.Contains(out, "hello event") || !strings.Contains(out, "Spec:") {
 		t.Fatalf("describe: %s %v", out, err)
@@ -244,16 +246,16 @@ func TestDeleteScaleCreateNamespaceDescribe(t *testing.T) {
 }
 
 func TestPodStatusReasonAndAges(t *testing.T) {
-	p := &api.Pod{Spec: api.PodSpec{Containers: []api.Container{{Name: "c"}}}}
+	p := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}
 	if PodStatusReason(p) != "Pending" {
 		t.Fatal(PodStatusReason(p))
 	}
-	p.Status.Phase = api.PodRunning
-	p.Status.ContainerStatuses = []api.ContainerStatus{{Name: "c", State: api.ContainerState{Waiting: &api.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}, RestartCount: 4}}
+	p.Status.Phase = corev1.PodRunning
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}, RestartCount: 4}}
 	if PodStatusReason(p) != "CrashLoopBackOff" || podRestarts(p) != "4" || podReadyCount(p) != "0/1" {
 		t.Fatal(PodStatusReason(p), podRestarts(p), podReadyCount(p))
 	}
-	now := api.Now()
+	now := metav1.Now()
 	p.DeletionTimestamp = &now
 	if PodStatusReason(p) != "Terminating" {
 		t.Fatal(PodStatusReason(p))
@@ -268,7 +270,7 @@ func TestPodStatusReasonAndAges(t *testing.T) {
 // TestExamplesFollowTheREADME replays the README walkthrough: the demo in the
 // default namespace, then the Service-less example in a second namespace.
 func TestExamplesFollowTheREADME(t *testing.T) {
-	c := testenv.New(t)
+	c := framework.StartTestServer(t)
 	example := func(name string) string { return filepath.Join("..", "..", "examples", name) }
 	out, err := kk(t, c, "", "apply", "-f", example("demo.yaml"))
 	if err != nil || !strings.Contains(out, "deployment.apps/web created") || !strings.Contains(out, "service/web created") {
@@ -293,7 +295,7 @@ func TestYAMLUsesTwoSpaceIndent(t *testing.T) {
 }
 
 func TestApplyBundleWithExistingNamespaceStaysAllOrNothing(t *testing.T) {
-	c := testenv.New(t)
+	c := framework.StartTestServer(t)
 	ns := "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: team\n"
 	if _, err := kk(t, c, "", "apply", "-f", writeFile(t, ns)); err != nil {
 		t.Fatal(err)
@@ -310,11 +312,11 @@ func TestApplyBundleWithExistingNamespaceStaysAllOrNothing(t *testing.T) {
 }
 
 func TestGetWatchByNameOnlyReportsThatObject(t *testing.T) {
-	c := testenv.New(t)
+	c := framework.StartTestServer(t)
 	pods := client.Pods(c, "default")
 	for _, name := range []string{"watched", "other"} {
-		if _, err := pods.Create(context.Background(), &api.Pod{ObjectMeta: api.ObjectMeta{Name: name},
-			Spec: api.PodSpec{Containers: []api.Container{{Name: "c", Image: "i"}}}}); err != nil {
+		if _, err := pods.Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}}}); err != nil {
 			t.Fatal(err)
 		}
 	}

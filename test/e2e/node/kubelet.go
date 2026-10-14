@@ -8,8 +8,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	"mini-k8s/pkg/client"
 	"mini-k8s/test/e2e/framework"
 )
 
@@ -22,10 +22,10 @@ var _ = framework.SIGDescribe("node", "Nodes", func() {
 		names := map[string]bool{}
 		for i := range nodes.Items {
 			n := &nodes.Items[i]
-			Expect(api.IsNodeReady(n, time.Now())).To(BeTrue(), "node %s: %+v", n.Name, n.Status)
+			Expect(corev1.IsNodeReady(n, time.Now())).To(BeTrue(), "node %s: %+v", n.Name, n.Status)
 			Expect(n.InternalIP()).NotTo(BeEmpty())
 			Expect(n.Status.NodeInfo.ContainerRuntimeVersion).To(HavePrefix("docker://"))
-			Expect(n.Labels).To(HaveKeyWithValue(api.LabelHostname, n.Name))
+			Expect(n.Labels).To(HaveKeyWithValue(corev1.LabelHostname, n.Name))
 			names[n.Name] = true
 		}
 		Expect(names).To(HaveKey("worker-1"))
@@ -47,8 +47,8 @@ var _ = framework.SIGDescribe("node", "Kubelet", func() {
 		_, err := framework.Docker(ctx, "kill", framework.ContainerID(pod))
 		framework.ExpectNoError(err)
 
-		restarted := f.WaitForPod(ctx, "restart", "is Running again with an increased restart count", func(p *api.Pod) bool {
-			return api.IsPodReady(p) && p.Status.ContainerStatuses[0].RestartCount > pod.Status.ContainerStatuses[0].RestartCount
+		restarted := f.WaitForPod(ctx, "restart", "is Running again with an increased restart count", func(p *corev1.Pod) bool {
+			return corev1.IsPodReady(p) && p.Status.ContainerStatuses[0].RestartCount > pod.Status.ContainerStatuses[0].RestartCount
 		})
 		Expect(restarted.Status.ContainerStatuses[0].LastTerminationState.Terminated).NotTo(BeNil())
 		Expect(f.KK(ctx, "get", "pod", "restart")).To(MatchRegexp(`restart\s+1/1\s+Running\s+1`))
@@ -70,14 +70,14 @@ var _ = framework.SIGDescribe("node", "Kubelet", func() {
 		c.Image = "mini-k8s-e2e/image-that-does-not-exist:0.0.0"
 		f.Apply(ctx, framework.NewPod("badimage", map[string]string{"app": "badimage"}, c))
 
-		pod := f.WaitForPod(ctx, "badimage", "reports an image pull error", func(p *api.Pod) bool {
+		pod := f.WaitForPod(ctx, "badimage", "reports an image pull error", func(p *corev1.Pod) bool {
 			if len(p.Status.ContainerStatuses) == 0 || p.Status.ContainerStatuses[0].State.Waiting == nil {
 				return false
 			}
 			r := p.Status.ContainerStatuses[0].State.Waiting.Reason
 			return r == "ErrImagePull" || r == "ImagePullBackOff"
 		})
-		Expect(pod.Status.Phase).To(Equal(api.PodPending))
+		Expect(pod.Status.Phase).To(Equal(corev1.PodPending))
 		Expect(f.KK(ctx, "get", "pods")).To(MatchRegexp(`badimage\s+0/1\s+(ErrImagePull|ImagePullBackOff)`))
 		f.WaitForEvent(ctx, "badimage", "Failed")
 	})
@@ -85,14 +85,14 @@ var _ = framework.SIGDescribe("node", "Kubelet", func() {
 	It("should back off a crash-looping container instead of restarting it hot", func(ctx SpecContext) {
 		f.Apply(ctx, framework.NewPod("crashloop", map[string]string{"app": "crashloop"}, framework.CrashingContainer()))
 
-		pod := f.WaitForPod(ctx, "crashloop", "enters CrashLoopBackOff after restarting", func(p *api.Pod) bool {
+		pod := f.WaitForPod(ctx, "crashloop", "enters CrashLoopBackOff after restarting", func(p *corev1.Pod) bool {
 			if len(p.Status.ContainerStatuses) == 0 {
 				return false
 			}
 			cs := p.Status.ContainerStatuses[0]
 			return cs.RestartCount >= 2 && cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff"
 		})
-		Expect(api.IsPodReady(pod)).To(BeFalse())
+		Expect(corev1.IsPodReady(pod)).To(BeFalse())
 		Expect(pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.ExitCode).NotTo(BeZero())
 		f.WaitForEvent(ctx, "crashloop", "BackOff")
 	})
@@ -105,7 +105,7 @@ var _ = framework.SIGDescribe("node", "Kubelet", func() {
 
 		f.KK(ctx, "delete", "pod", "graceful", "--wait=false")
 		By("observing the Pod as Terminating while the app drains")
-		terminating := f.WaitForPod(ctx, "graceful", "is Terminating", func(p *api.Pod) bool { return p.DeletionTimestamp != nil })
+		terminating := f.WaitForPod(ctx, "graceful", "is Terminating", func(p *corev1.Pod) bool { return p.DeletionTimestamp != nil })
 		Expect(*terminating.DeletionGracePeriodSeconds).To(BeEquivalentTo(30))
 		Expect(f.KK(ctx, "get", "pod", "graceful")).To(ContainSubstring("Terminating"))
 		Expect(framework.PodContainers(ctx, pod.UID, true)).To(HaveLen(1), "the container keeps running during its grace period")

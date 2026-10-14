@@ -12,8 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/client"
+	"mini-k8s/pkg/scheme"
+	"mini-k8s/pkg/util/ptr"
+	"mini-k8s/pkg/watch"
 )
 
 // Version is the kk client version.
@@ -32,7 +36,7 @@ type app struct {
 func newApp(c *client.Client, out io.Writer, in io.Reader, a args) *app {
 	return &app{
 		client: c, out: out, in: in,
-		namespace: a.value("namespace", api.NamespaceDefault), explicitNS: len(a.values["namespace"]) > 0,
+		namespace: a.value("namespace", corev1.NamespaceDefault), explicitNS: len(a.values["namespace"]) > 0,
 		allNamespaces: a.boolean("all-namespaces", false), now: time.Now,
 	}
 }
@@ -66,12 +70,12 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 
 // target is a resource type with optional names.
 type target struct {
-	res   api.ResourceInfo
+	res   scheme.ResourceInfo
 	names []string
 }
 
-func lookupResource(name string) (api.ResourceInfo, error) {
-	res, ok := api.Lookup(name)
+func lookupResource(name string) (scheme.ResourceInfo, error) {
+	res, ok := scheme.Lookup(name)
 	if !ok {
 		return res, fmt.Errorf("the server doesn't have a resource type %q", name)
 	}
@@ -114,28 +118,28 @@ func parseTargets(pos []string) ([]target, error) {
 }
 
 // ns returns the namespace for requests on res ("" = cluster-scoped or all).
-func (a *app) ns(res api.ResourceInfo, forList bool) string {
+func (a *app) ns(res scheme.ResourceInfo, forList bool) string {
 	if !res.Namespaced || (forList && a.allNamespaces) {
 		return ""
 	}
 	return a.namespace
 }
 
-func (a *app) getObject(ctx context.Context, res api.ResourceInfo, ns, name string) (api.Object, error) {
+func (a *app) getObject(ctx context.Context, res scheme.ResourceInfo, ns, name string) (metav1.Object, error) {
 	obj := res.New()
 	err := a.client.Do(ctx, http.MethodGet, res.Path(ns, name), nil, "", nil, obj)
 	return obj, err
 }
 
-func (a *app) listObjects(ctx context.Context, res api.ResourceInfo, ns string, opts client.ListOptions) ([]api.Object, string, error) {
+func (a *app) listObjects(ctx context.Context, res scheme.ResourceInfo, ns string, opts client.ListOptions) ([]metav1.Object, string, error) {
 	var raw struct {
-		Metadata api.ListMeta      `json:"metadata"`
+		Metadata metav1.ListMeta   `json:"metadata"`
 		Items    []json.RawMessage `json:"items"`
 	}
 	if err := a.client.Do(ctx, http.MethodGet, res.Path(ns, ""), opts.Query(), "", nil, &raw); err != nil {
 		return nil, "", err
 	}
-	objs := make([]api.Object, 0, len(raw.Items))
+	objs := make([]metav1.Object, 0, len(raw.Items))
 	for _, item := range raw.Items {
 		obj := res.New()
 		if err := json.Unmarshal(item, obj); err != nil {
@@ -168,9 +172,9 @@ func (a *app) get(ctx context.Context, p args) error {
 	if p.boolean("watch", false) {
 		return a.getAndWatch(ctx, targets, opts, output)
 	}
-	var all []api.Object
+	var all []metav1.Object
 	for i, t := range targets {
-		var objs []api.Object
+		var objs []metav1.Object
 		if len(t.names) > 0 {
 			for _, name := range t.names {
 				obj, err := a.getObject(ctx, t.res, a.ns(t.res, false), name)
@@ -207,7 +211,7 @@ func (a *app) get(ctx context.Context, p args) error {
 	return nil
 }
 
-func (a *app) printObjects(res api.ResourceInfo, objs []api.Object, output string) error {
+func (a *app) printObjects(res scheme.ResourceInfo, objs []metav1.Object, output string) error {
 	if output == "name" {
 		for _, obj := range objs {
 			fmt.Fprintln(a.out, qualifiedName(res)+"/"+obj.GetObjectMeta().Name)
@@ -259,7 +263,7 @@ func (a *app) getAndWatch(ctx context.Context, targets []target, opts client.Lis
 	return a.watch(ctx, t.res, len(t.names) == 0, opts, rv, output)
 }
 
-func writeWatchObject(w io.Writer, obj api.Object, output string) error {
+func writeWatchObject(w io.Writer, obj metav1.Object, output string) error {
 	if output == "yaml" {
 		if _, err := fmt.Fprintln(w, "---"); err != nil {
 			return err
@@ -268,7 +272,7 @@ func writeWatchObject(w io.Writer, obj api.Object, output string) error {
 	return writeStructured(w, obj, output)
 }
 
-func (a *app) watch(ctx context.Context, res api.ResourceInfo, forList bool, opts client.ListOptions, rv, output string) error {
+func (a *app) watch(ctx context.Context, res scheme.ResourceInfo, forList bool, opts client.ListOptions, rv, output string) error {
 	for {
 		q := opts
 		q.ResourceVersion = rv
@@ -280,7 +284,7 @@ func (a *app) watch(ctx context.Context, res api.ResourceInfo, forList bool, opt
 		}
 		dec := json.NewDecoder(resp.Body)
 		for {
-			var ev api.WatchEvent
+			var ev metav1.WatchEvent
 			if err := dec.Decode(&ev); err != nil {
 				resp.Body.Close()
 				if ctx.Err() != nil {
@@ -288,7 +292,7 @@ func (a *app) watch(ctx context.Context, res api.ResourceInfo, forList bool, opt
 				}
 				break // server timeout: re-establish from the last resourceVersion
 			}
-			if ev.Type == api.EventError {
+			if ev.Type == watch.Error {
 				resp.Body.Close()
 				return fmt.Errorf("watch: %s", ev.Object)
 			}
@@ -309,7 +313,7 @@ func (a *app) watch(ctx context.Context, res api.ResourceInfo, forList bool, opt
 				}
 				continue
 			}
-			if err := printTable(a.out, res, []api.Object{obj}, tableOptions{wide: output == "wide", withNamespace: a.allNamespaces && res.Namespaced, now: a.now(), eventType: ev.Type}); err != nil {
+			if err := printTable(a.out, res, []metav1.Object{obj}, tableOptions{wide: output == "wide", withNamespace: a.allNamespaces && res.Namespaced, now: a.now(), eventType: ev.Type}); err != nil {
 				resp.Body.Close()
 				return err
 			}
@@ -318,7 +322,7 @@ func (a *app) watch(ctx context.Context, res api.ResourceInfo, forList bool, opt
 }
 
 // qualifiedName returns "pod" or "deployment.apps", as kubectl prints.
-func qualifiedName(res api.ResourceInfo) string {
+func qualifiedName(res scheme.ResourceInfo) string {
 	if res.Group == "" {
 		return res.Singular
 	}
@@ -332,7 +336,7 @@ func (a *app) describe(ctx context.Context, p args) error {
 	}
 	first := true
 	for _, t := range targets {
-		var objs []api.Object
+		var objs []metav1.Object
 		if len(t.names) == 0 {
 			if objs, _, err = a.listObjects(ctx, t.res, a.ns(t.res, true), client.ListOptions{}); err != nil {
 				return err
@@ -362,7 +366,7 @@ func (a *app) createNamespace(ctx context.Context, p args) error {
 	if len(p.positional) != 2 {
 		return errors.New("usage: kk create namespace NAME")
 	}
-	ns := &api.Namespace{ObjectMeta: api.ObjectMeta{Name: p.positional[1]}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: p.positional[1]}}
 	if _, err := client.Namespaces(a.client).Create(ctx, ns); err != nil {
 		return err
 	}
@@ -371,7 +375,7 @@ func (a *app) createNamespace(ctx context.Context, p args) error {
 }
 
 func (a *app) delete(ctx context.Context, p args) error {
-	opts := &api.DeleteOptions{}
+	opts := &metav1.DeleteOptions{}
 	if g := p.value("grace-period", ""); g != "" {
 		n, err := strconv.ParseInt(g, 10, 64)
 		if err != nil {
@@ -382,23 +386,23 @@ func (a *app) delete(ctx context.Context, p args) error {
 		}
 	}
 	if p.boolean("force", false) {
-		opts.GracePeriodSeconds = api.Int64(0)
+		opts.GracePeriodSeconds = ptr.To[int64](0)
 	}
 	switch c := strings.ToLower(p.value("cascade", "background")); c {
 	case "background", "true":
-		policy := api.DeletePropagationBackground
+		policy := metav1.DeletePropagationBackground
 		opts.PropagationPolicy = &policy
 	case "foreground":
-		policy := api.DeletePropagationForeground
+		policy := metav1.DeletePropagationForeground
 		opts.PropagationPolicy = &policy
 	case "orphan", "false":
-		policy := api.DeletePropagationOrphan
+		policy := metav1.DeletePropagationOrphan
 		opts.PropagationPolicy = &policy
 	default:
 		return fmt.Errorf("invalid --cascade %q (use background, foreground or orphan)", c)
 	}
 	type victim struct {
-		res       api.ResourceInfo
+		res       scheme.ResourceInfo
 		namespace string
 		name      string
 	}
@@ -438,7 +442,7 @@ func (a *app) delete(ctx context.Context, p args) error {
 	ignoreNotFound := p.boolean("ignore-not-found", false)
 	var deleted []victim
 	for _, v := range victims {
-		if v.res.Resource == api.Nodes.Resource {
+		if v.res.Resource == scheme.Nodes.Resource {
 			return errors.New("nodes are registered by their kubelets and cannot be deleted with kk")
 		}
 		err := a.client.Do(ctx, http.MethodDelete, v.res.Path(v.namespace, v.name), nil, "", opts, nil)
@@ -510,7 +514,7 @@ func (a *app) scale(ctx context.Context, p args) error {
 	if err != nil {
 		return err
 	}
-	if res.Resource != api.Deployments.Resource {
+	if res.Resource != scheme.Deployments.Resource {
 		return fmt.Errorf("scale is not supported for %s", res.Resource)
 	}
 	replicas, err := strconv.Atoi(p.value("replicas", ""))

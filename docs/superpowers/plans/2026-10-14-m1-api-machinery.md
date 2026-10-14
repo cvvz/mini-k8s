@@ -1,5 +1,7 @@
 # M1 API 机制重构 Implementation Plan
 
+> **注：** 2026-10-15 代码目录已按 Kubernetes 的结构重构（`internal/` → `pkg/` 等），本文中的路径为当时的历史路径；当前结构见 [v2 设计规格 §15](../specs/2026-10-14-mini-k8s-v2-design.md)。
+
 > **状态：** 已完成并合入 main（2026-10-15）。
 >
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

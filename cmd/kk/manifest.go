@@ -15,14 +15,14 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	"mini-k8s/pkg/client"
+	"mini-k8s/pkg/scheme"
 )
 
 // document is one resource read from a manifest.
 type document struct {
 	source    string
-	res       api.ResourceInfo
+	res       scheme.ResourceInfo
 	namespace string
 	name      string
 	body      map[string]any
@@ -119,11 +119,11 @@ func (a *app) document(body map[string]any) (document, error) {
 	if apiVersion == "" || kind == "" {
 		return document{}, errors.New("apiVersion and kind are required")
 	}
-	res, ok := api.ForKind(apiVersion, kind)
+	res, ok := scheme.ForKind(apiVersion, kind)
 	if !ok {
 		return document{}, fmt.Errorf("no matches for kind %q in version %q", kind, apiVersion)
 	}
-	if res.Resource == api.Nodes.Resource {
+	if res.Resource == scheme.Nodes.Resource {
 		return document{}, errors.New("nodes are registered by their kubelets and cannot be applied")
 	}
 	if _, ok := body["status"]; ok {
@@ -216,7 +216,7 @@ func (a *app) applyFiles(ctx context.Context, p args, createOnly bool) error {
 		if err != nil {
 			return fmt.Errorf("%s (%s): %w; no objects were changed", d.ref(), d.source, err)
 		}
-		if d.res.Resource == api.Namespaces.Resource && action == "created" {
+		if d.res.Resource == scheme.Namespaces.Resource && action == "created" {
 			pendingNS[d.name] = true
 		}
 	}

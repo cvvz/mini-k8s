@@ -10,18 +10,19 @@ import (
 
 	"github.com/onsi/gomega"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	"mini-k8s/pkg/client"
+	"mini-k8s/pkg/labels"
 )
 
 // Pods returns the live (not terminating) Pods in the spec namespace whose
-// labels contain labels, sorted by name.
-func (f *Framework) Pods(ctx context.Context, labels map[string]string) ([]api.Pod, error) {
-	list, err := client.Pods(f.Client, f.Namespace).List(ctx, client.ListOptions{LabelSelector: api.SelectorFromSet(labels).String()})
+// labels contain podLabels, sorted by name.
+func (f *Framework) Pods(ctx context.Context, podLabels map[string]string) ([]corev1.Pod, error) {
+	list, err := client.Pods(f.Client, f.Namespace).List(ctx, client.ListOptions{LabelSelector: labels.SelectorFromSet(podLabels).String()})
 	if err != nil {
 		return nil, err
 	}
-	var pods []api.Pod
+	var pods []corev1.Pod
 	for _, p := range list.Items {
 		if p.DeletionTimestamp == nil {
 			pods = append(pods, p)
@@ -32,24 +33,24 @@ func (f *Framework) Pods(ctx context.Context, labels map[string]string) ([]api.P
 }
 
 // ContainerID strips the runtime prefix from a container status ID.
-func ContainerID(p api.Pod) string {
+func ContainerID(p corev1.Pod) string {
 	if len(p.Status.ContainerStatuses) == 0 {
 		return ""
 	}
 	return strings.TrimPrefix(p.Status.ContainerStatuses[0].ContainerID, "docker://")
 }
 
-// WaitForRunningPods waits until exactly count live Pods match labels, all
+// WaitForRunningPods waits until exactly count live Pods match podLabels, all
 // are Running and Ready, and each has exactly one running Docker container.
-func (f *Framework) WaitForRunningPods(ctx context.Context, labels map[string]string, count int) []api.Pod {
-	var pods []api.Pod
+func (f *Framework) WaitForRunningPods(ctx context.Context, podLabels map[string]string, count int) []corev1.Pod {
+	var pods []corev1.Pod
 	gomega.EventuallyWithOffset(1, ctx, func(g gomega.Gomega) {
-		ps, err := f.Pods(ctx, labels)
+		ps, err := f.Pods(ctx, podLabels)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
-		g.Expect(ps).To(gomega.HaveLen(count), "Pods matching %v", labels)
+		g.Expect(ps).To(gomega.HaveLen(count), "Pods matching %v", podLabels)
 		for _, p := range ps {
-			g.Expect(p.Status.Phase).To(gomega.Equal(api.PodRunning), "Pod %s: %+v", p.Name, p.Status.ContainerStatuses)
-			g.Expect(api.IsPodReady(&p)).To(gomega.BeTrue(), "Pod %s not Ready", p.Name)
+			g.Expect(p.Status.Phase).To(gomega.Equal(corev1.PodRunning), "Pod %s: %+v", p.Name, p.Status.ContainerStatuses)
+			g.Expect(corev1.IsPodReady(&p)).To(gomega.BeTrue(), "Pod %s not Ready", p.Name)
 			ids, err := PodContainers(ctx, p.UID, true)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(ids).To(gomega.HaveLen(1), "running containers of Pod %s", p.Name)
@@ -60,8 +61,8 @@ func (f *Framework) WaitForRunningPods(ctx context.Context, labels map[string]st
 }
 
 // WaitForPod waits until the named Pod satisfies cond and returns it.
-func (f *Framework) WaitForPod(ctx context.Context, name, desc string, cond func(*api.Pod) bool) *api.Pod {
-	var pod *api.Pod
+func (f *Framework) WaitForPod(ctx context.Context, name, desc string, cond func(*corev1.Pod) bool) *corev1.Pod {
+	var pod *corev1.Pod
 	gomega.EventuallyWithOffset(1, ctx, func(g gomega.Gomega) {
 		p, err := client.Pods(f.Client, f.Namespace).Get(ctx, name)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
@@ -73,7 +74,7 @@ func (f *Framework) WaitForPod(ctx context.Context, name, desc string, cond func
 }
 
 // WaitForPodGone waits until the Pod no longer exists and its containers are removed.
-func (f *Framework) WaitForPodGone(ctx context.Context, pod *api.Pod, timeout time.Duration) {
+func (f *Framework) WaitForPodGone(ctx context.Context, pod *corev1.Pod, timeout time.Duration) {
 	gomega.EventuallyWithOffset(1, ctx, func(g gomega.Gomega) {
 		_, err := client.Pods(f.Client, f.Namespace).Get(ctx, pod.Name)
 		g.Expect(client.IsNotFound(err)).To(gomega.BeTrue(), "Pod %s still exists (%v)", pod.Name, err)
@@ -84,15 +85,15 @@ func (f *Framework) WaitForPodGone(ctx context.Context, pod *api.Pod, timeout ti
 }
 
 // Events returns Events in the spec namespace about the named object.
-func (f *Framework) Events(ctx context.Context, name string) []api.Event {
+func (f *Framework) Events(ctx context.Context, name string) []corev1.Event {
 	list, err := client.Events(f.Client, f.Namespace).List(ctx, client.ListOptions{FieldSelector: "involvedObject.name=" + name})
 	ExpectNoError(err)
 	return list.Items
 }
 
 // WaitForEvent waits until an Event with reason is recorded for the object.
-func (f *Framework) WaitForEvent(ctx context.Context, name, reason string) api.Event {
-	var found api.Event
+func (f *Framework) WaitForEvent(ctx context.Context, name, reason string) corev1.Event {
+	var found corev1.Event
 	gomega.EventuallyWithOffset(1, ctx, func(g gomega.Gomega) {
 		var reasons []string
 		for _, e := range f.Events(ctx, name) {

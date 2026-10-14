@@ -7,7 +7,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"mini-k8s/internal/client"
+	"mini-k8s/pkg/client"
 	"mini-k8s/test/e2e/framework"
 )
 

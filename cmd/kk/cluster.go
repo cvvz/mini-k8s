@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	"mini-k8s/pkg/client"
 )
 
 // workerNames are the logical nodes Compose starts.
@@ -265,7 +265,7 @@ func (c cluster) waitReady(ctx context.Context) error {
 			if err == nil {
 				ready := map[string]bool{}
 				for i := range nodes.Items {
-					if api.IsNodeReady(&nodes.Items[i], time.Now()) {
+					if corev1.IsNodeReady(&nodes.Items[i], time.Now()) {
 						ready[nodes.Items[i].Name] = true
 					}
 				}

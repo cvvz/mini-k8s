@@ -5,8 +5,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/client"
 	"mini-k8s/test/e2e/framework"
 )
 
@@ -22,10 +24,10 @@ var _ = framework.SIGDescribe("apps", "Deployment", func() {
 		d, err := client.Deployments(f.Client, f.Namespace).Get(ctx, "spread")
 		framework.ExpectNoError(err)
 		for _, p := range pods {
-			ref := api.ControllerOf(&p.ObjectMeta)
+			ref := metav1.ControllerOf(&p.ObjectMeta)
 			Expect(ref).NotTo(BeNil())
 			Expect(ref.UID).To(Equal(d.UID))
-			Expect(p.Labels).To(HaveKey(api.LabelTemplateHash))
+			Expect(p.Labels).To(HaveKey(appsv1.DefaultDeploymentUniqueLabelKey))
 			Expect(p.Status.PodIP).NotTo(BeEmpty())
 		}
 		Eventually(ctx, func(g Gomega) {
@@ -83,8 +85,8 @@ var _ = framework.SIGDescribe("apps", "Deployment", func() {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(pods).To(HaveLen(2))
 			for _, p := range pods {
-				g.Expect(p.Labels[api.LabelTemplateHash]).NotTo(Equal(before[0].Labels[api.LabelTemplateHash]))
-				g.Expect(p.Spec.Containers[0].Env).To(ContainElement(api.EnvVar{Name: "VERSION", Value: "2"}))
+				g.Expect(p.Labels[appsv1.DefaultDeploymentUniqueLabelKey]).NotTo(Equal(before[0].Labels[appsv1.DefaultDeploymentUniqueLabelKey]))
+				g.Expect(p.Spec.Containers[0].Env).To(ContainElement(corev1.EnvVar{Name: "VERSION", Value: "2"}))
 			}
 		}).WithTimeout(framework.TestContext.PodStartTimeout).Should(Succeed())
 		f.WaitForRunningPods(ctx, labels, 2)
@@ -132,7 +134,7 @@ var _ = framework.SIGDescribe("apps", "Deployment", func() {
 		d, err := client.Deployments(f.Client, f.Namespace).Get(ctx, "fg")
 		if err == nil {
 			Expect(d.DeletionTimestamp).NotTo(BeNil())
-			Expect(d.Finalizers).To(ContainElement(api.FinalizerForeground))
+			Expect(d.Finalizers).To(ContainElement(metav1.FinalizerDeleteDependents))
 		}
 		f.WaitForPodGone(ctx, &pod, framework.TestContext.PodStartTimeout)
 		Eventually(ctx, func() bool {
