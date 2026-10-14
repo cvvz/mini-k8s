@@ -3,6 +3,7 @@ package network
 
 import (
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -77,5 +78,39 @@ var _ = framework.SIGDescribe("network", "Service gateway", Serial, func() {
 		f.Apply(ctx, framework.NewService("first", map[string]string{"app": "first"}, 8080))
 		out := f.ApplyExpectError(ctx, framework.NewService("second", map[string]string{"app": "x"}, 8080))
 		Expect(out).To(ContainSubstring("only one Service is supported"))
+	})
+
+	It("should route only to Pods whose readiness probe passes", func(ctx SpecContext) {
+		labels := map[string]string{"app": "gated"}
+		c := framework.DemoContainer()
+		c.Fields = map[string]any{"readinessProbe": map[string]any{
+			"httpGet": map[string]any{"path": "/ready", "port": 8080}, "periodSeconds": 1, "failureThreshold": 1}}
+		f.Apply(ctx, framework.NewDeployment("gated", 1, labels, c), framework.NewService("gated", labels, 8080))
+		pod := f.WaitForRunningPods(ctx, labels, 1)[0]
+		gateway := func() (int, error) {
+			code, _, err := framework.HTTPGet(ctx, framework.TestContext.GatewayURL+"/")
+			return code, err
+		}
+		inPod := func(path string) {
+			_, err := framework.RunKK(ctx, "exec", "-n", f.Namespace, pod.Name, "--", "/mini", "fetch", "http://127.0.0.1:8080"+path)
+			framework.ExpectNoError(err)
+		}
+		Eventually(ctx, gateway).WithTimeout(20 * time.Second).Should(Equal(200))
+
+		By("failing the readiness probe")
+		inPod("/fail-ready")
+		Eventually(ctx, gateway).WithTimeout(20 * time.Second).Should(Equal(503))
+		Expect(f.KK(ctx, "get", "pod", pod.Name)).To(MatchRegexp(pod.Name + `\s+0/1\s+Running\s+0`))
+		var unhealthy []string
+		for _, e := range f.Events(ctx, pod.Name) {
+			if e.Reason == "Unhealthy" {
+				unhealthy = append(unhealthy, e.Message)
+			}
+		}
+		Expect(unhealthy).To(ContainElement("Readiness probe failed: HTTP probe failed with statuscode: 503"))
+
+		By("recovering")
+		inPod("/recover")
+		Eventually(ctx, gateway).WithTimeout(20 * time.Second).Should(Equal(200))
 	})
 })

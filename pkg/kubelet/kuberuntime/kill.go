@@ -74,6 +74,16 @@ func (m *Manager) forget(uid string) {
 	}
 }
 
+// StopContainer stops one container instance (given as its status ID,
+// "containerd://...") within grace seconds, as after a failed liveness probe.
+func (m *Manager) StopContainer(ctx context.Context, containerID string, grace int64) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(grace)*time.Second+30*time.Second)
+	defer cancel()
+	_, err := m.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{
+		ContainerId: strings.TrimPrefix(containerID, "containerd://"), Timeout: grace})
+	return err
+}
+
 // Cleanup removes sandboxes and log directories of Pods that are not in keep
 // (by UID). Sandboxes without Pod metadata (not created by a kubelet) are left
 // alone.

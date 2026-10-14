@@ -284,7 +284,8 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M1 ✅ | API 机制重构 + 所有组件迁移到 informer/workqueue；Namespace、Event、GC、优雅删除 |
 | M2 ✅ | kind 式节点：节点镜像与 `mini node-init`、节点内 containerd、kubelet 的 CRI 客户端、`mini-cni` + node IPAM + host-gw 路由、本地镜像导入与自建 pause；退役逻辑节点模式（设计见 §14） |
 | M3a ✅ | Pod：多容器、init 容器、重启策略与终态、exec（非交互，CRI `ExecSync`）；logs `--previous` 已在 M2 完成（[计划](../plans/2026-10-15-m3a-multi-container.md)） |
-| M3b | Pod 与 kubelet：探针、资源限制、hostNetwork、emptyDir/hostPath |
+| M3b ✅ | 探针（liveness/readiness/startup；httpGet/tcpSocket/exec）、资源 requests/limits（cgroup、OOMKilled）、QoS、节点容量（[计划](../plans/2026-10-15-m3b-probes-resources.md)） |
+| M3c | Pod 与 kubelet：hostNetwork、emptyDir/hostPath |
 | M4 | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system |
 | M5 | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout` |
 | M6 | 网络：ClusterIP、Endpoints、iptables kube-proxy、DNS、NodePort、Headless、Ingress |

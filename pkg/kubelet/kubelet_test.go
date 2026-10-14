@@ -58,3 +58,18 @@ func TestWriteCNIConfigIsStableAndAtomic(t *testing.T) {
 		t.Fatal("temporary file left behind")
 	}
 }
+
+func TestNodeCapacityReadsMeminfo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meminfo")
+	if err := os.WriteFile(path, []byte("MemTotal:       16314824 kB\nMemFree:         1000 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := NodeCapacity(path)
+	mem, pods, cpu := c["memory"], c["pods"], c["cpu"]
+	if mem.Value() != 16314824*1024 || pods.Value() != 110 || cpu.Value() < 1 {
+		t.Fatalf("capacity: %v", c)
+	}
+	if _, ok := NodeCapacity(filepath.Join(t.TempDir(), "missing"))["memory"]; ok {
+		t.Fatal("memory reported without meminfo")
+	}
+}

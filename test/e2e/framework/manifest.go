@@ -21,6 +21,8 @@ type Container struct {
 	Command []string
 	Args    []string
 	Env     map[string]string
+	// Fields are further container fields, such as probes and resources.
+	Fields map[string]any
 }
 
 // DemoImage is the locally built image; using it avoids registry pulls.
@@ -82,6 +84,9 @@ func (c Container) object() map[string]any {
 	}
 	if env != nil {
 		o["env"] = env
+	}
+	for k, v := range c.Fields {
+		o[k] = v
 	}
 	return o
 }

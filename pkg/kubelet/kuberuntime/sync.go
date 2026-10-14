@@ -49,9 +49,13 @@ func (m *Manager) SyncPod(ctx context.Context, pod *corev1.Pod) corev1.PodStatus
 	if s.initialized || r.runInitContainers(s) {
 		s.initialized = true
 		for i, c := range pod.Spec.Containers {
-			if r.step(c, &s.containers[i], restartContainer(restartPolicy(pod))) == outcomeRunning {
-				s.containers[i].Ready = true
-			}
+			cs := &s.containers[i]
+			running := r.step(c, cs, restartContainer(restartPolicy(pod))) == outcomeRunning
+			// A container is started once its startup probe passed and ready
+			// once its readiness probe passed; without probes, when running.
+			started := running && (c.StartupProbe == nil || (m.Probes != nil && m.Probes.Started(pod.UID, c.Name, cs.ContainerID)))
+			cs.Started = &started
+			cs.Ready = started && (c.ReadinessProbe == nil || (m.Probes != nil && m.Probes.Ready(pod.UID, c.Name, cs.ContainerID)))
 		}
 	}
 	return s.status()

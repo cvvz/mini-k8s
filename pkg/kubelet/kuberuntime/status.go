@@ -106,7 +106,7 @@ func (s *podState) waitAll(reason, message string) {
 // conditions, keeping transition times of unchanged conditions.
 func (s *podState) status() corev1.PodStatus {
 	pod := s.pod
-	st := corev1.PodStatus{StartTime: pod.Status.StartTime, PodIP: s.ip,
+	st := corev1.PodStatus{StartTime: pod.Status.StartTime, PodIP: s.ip, QOSClass: pod.Status.QOSClass,
 		InitContainerStatuses: s.initContainers, ContainerStatuses: s.containers}
 	if len(st.InitContainerStatuses) == 0 {
 		st.InitContainerStatuses = nil

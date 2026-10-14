@@ -21,12 +21,14 @@ import (
 	"sync"
 	"time"
 
+	"mini-k8s/pkg/api/resource"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/client/informers"
 	"mini-k8s/pkg/client/record"
 	"mini-k8s/pkg/kubelet/kuberuntime"
+	"mini-k8s/pkg/kubelet/prober"
 	"mini-k8s/pkg/network/hostgw"
 	"mini-k8s/pkg/util/deepcopy"
 	"mini-k8s/pkg/util/ptr"
@@ -43,6 +45,7 @@ type Runtime interface {
 	Cleanup(ctx context.Context, keep map[string]bool) error
 	Logs(ctx context.Context, pod *corev1.Pod, container string, o kuberuntime.LogOptions, w io.Writer) error
 	Exec(ctx context.Context, pod *corev1.Pod, container string, cmd []string, timeout time.Duration) (*corev1.PodExecResult, error)
+	StopContainer(ctx context.Context, containerID string, grace int64) error
 	Version(ctx context.Context) (string, error)
 	Status(ctx context.Context, sandboxImage string) kuberuntime.Readiness
 }
@@ -71,6 +74,7 @@ type Kubelet struct {
 	pods     *informers.Informer[corev1.Pod, *corev1.Pod]
 	nodes    *informers.Informer[corev1.Node, *corev1.Node]
 	network  chan struct{}
+	probes   *prober.Manager
 
 	mu      sync.Mutex
 	workers map[string]chan struct{} // by Pod UID
@@ -81,6 +85,9 @@ type Kubelet struct {
 func New(c *client.Client, rt Runtime, recorder *record.Recorder, cfg Config) *Kubelet {
 	k := &Kubelet{cfg: cfg, client: c, runtime: rt, recorder: recorder, network: make(chan struct{}, 1),
 		workers: map[string]chan struct{}{}, killing: map[string]bool{}}
+	k.probes = prober.NewManager(rt.Exec, recorder)
+	k.probes.Changed = k.dispatch
+	k.probes.Failed = k.restartContainer
 	k.pods = informers.New(client.Pods(c, ""), client.ListOptions{FieldSelector: "spec.nodeName=" + cfg.NodeName}, 0)
 	k.pods.AddHandler(informers.Handler[*corev1.Pod]{
 		OnAdd:    func(p *corev1.Pod) { k.dispatch(p) },
@@ -98,6 +105,25 @@ func New(c *client.Client, rt Runtime, recorder *record.Recorder, cfg Config) *K
 		OnAdd: func(*corev1.Node) { poke() }, OnUpdate: func(_, _ *corev1.Node) { poke() }, OnDelete: func(*corev1.Node) { poke() },
 	})
 	return k
+}
+
+// Probes returns the kubelet's probe results, for the runtime.
+func (k *Kubelet) Probes() *prober.Manager { return k.probes }
+
+// restartContainer stops a container whose liveness or startup probe failed;
+// the Pod's worker then restarts it according to the restart policy.
+func (k *Kubelet) restartContainer(pod *corev1.Pod, containerID, message string) {
+	k.recorder.Eventf(pod, corev1.EventTypeNormal, "Killing", "%s", message)
+	grace := int64(30)
+	if pod.Spec.TerminationGracePeriodSeconds != nil {
+		grace = *pod.Spec.TerminationGracePeriodSeconds
+	}
+	go func() {
+		if err := k.runtime.StopContainer(context.Background(), containerID, grace); err != nil {
+			log.Printf("kubelet: stop %s of %s/%s: %v", containerID, pod.Namespace, pod.Name, err)
+		}
+		k.dispatch(pod)
+	}()
 }
 
 // Run registers the node and reconciles Pods until ctx ends.
@@ -208,6 +234,7 @@ func (k *Kubelet) worker(key, uid string, wake chan struct{}) {
 	for range wake {
 		pod, ok := k.pods.Get(ns, name)
 		if !ok || pod.UID != uid {
+			k.probes.Remove(uid)
 			k.mu.Lock()
 			delete(k.workers, uid)
 			delete(k.killing, uid)
@@ -226,6 +253,7 @@ func (k *Kubelet) syncPod(ctx context.Context, pod *corev1.Pod) {
 		return
 	}
 	status := k.runtime.SyncPod(ctx, pod)
+	k.probes.Sync(pod, status)
 	status.HostIP = k.cfg.Address
 	if status.StartTime == nil {
 		now := metav1.Now()
@@ -279,6 +307,7 @@ func (k *Kubelet) terminate(ctx context.Context, pod *corev1.Pod) {
 	if pod.DeletionGracePeriodSeconds != nil {
 		grace = *pod.DeletionGracePeriodSeconds
 	}
+	k.probes.Remove(pod.UID)
 	k.mu.Lock()
 	first := !k.killing[pod.UID]
 	k.killing[pod.UID] = true
@@ -349,7 +378,9 @@ func (k *Kubelet) heartbeat(ctx context.Context) error {
 		ready.LastTransitionTime = prev.LastTransitionTime
 	}
 	runtimeVersion, _ := k.runtime.Version(ctx)
+	capacity := NodeCapacity("/proc/meminfo")
 	node.Status = corev1.NodeStatus{
+		Capacity: capacity, Allocatable: capacity,
 		Conditions: []corev1.NodeCondition{ready},
 		Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: k.cfg.Address}, {Type: corev1.NodeHostName, Address: k.cfg.NodeName}},
 		NodeInfo: corev1.NodeSystemInfo{KubeletVersion: Version, ContainerRuntimeVersion: runtimeVersion,
@@ -364,6 +395,32 @@ const (
 	DefaultExecTimeout = time.Minute
 	MaxExecTimeout     = time.Hour
 )
+
+// MaxPods is the number of Pods a node reports it can hold.
+const MaxPods = 110
+
+// NodeCapacity reports the node's CPUs, memory (MemTotal of meminfo) and
+// Pod capacity. Nothing is reserved for the system, so allocatable equals
+// capacity.
+func NodeCapacity(meminfo string) corev1.ResourceList {
+	capacity := corev1.ResourceList{
+		corev1.ResourceCPU:  resource.NewQuantity(int64(runtime.NumCPU())),
+		corev1.ResourcePods: resource.NewQuantity(MaxPods),
+	}
+	data, err := os.ReadFile(meminfo)
+	if err != nil {
+		return capacity
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "MemTotal:" && fields[2] == "kB" {
+			if q, err := resource.ParseQuantity(fields[1] + "Ki"); err == nil {
+				capacity[corev1.ResourceMemory] = q
+			}
+		}
+	}
+	return capacity
+}
 
 // Handler serves the kubelet API:
 //

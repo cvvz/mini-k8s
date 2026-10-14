@@ -342,3 +342,33 @@ func TestCrashLoopBackOffStatusIsStableWhileWaiting(t *testing.T) {
 		t.Fatalf("backoff message must not change while waiting: %+v then %+v", first, second)
 	}
 }
+
+// fakeProbes reports scripted probe results.
+type fakeProbes struct{ ready, started bool }
+
+func (p *fakeProbes) Ready(_, _, _ string) bool   { return p.ready }
+func (p *fakeProbes) Started(_, _, _ string) bool { return p.started }
+
+func TestProbesGateReadyAndStarted(t *testing.T) {
+	_, m, _ := newTestManager(t)
+	probes := &fakeProbes{}
+	m.Probes = probes
+	pod := testPod()
+	check := &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}}
+	pod.Spec.Containers[0].StartupProbe, pod.Spec.Containers[0].ReadinessProbe = check, check
+	syncOnce(m, pod)
+	cs := pod.Status.ContainerStatuses[0]
+	if cs.State.Running == nil || cs.Ready || cs.Started == nil || *cs.Started || corev1.IsPodReady(pod) {
+		t.Fatalf("running but neither started nor ready: %+v", cs)
+	}
+	probes.started = true
+	syncOnce(m, pod)
+	if cs := pod.Status.ContainerStatuses[0]; !*cs.Started || cs.Ready {
+		t.Fatalf("started, not yet ready: %+v", cs)
+	}
+	probes.ready = true
+	syncOnce(m, pod)
+	if cs := pod.Status.ContainerStatuses[0]; !cs.Ready || !corev1.IsPodReady(pod) {
+		t.Fatalf("ready: %+v", pod.Status)
+	}
+}

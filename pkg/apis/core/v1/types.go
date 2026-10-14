@@ -5,7 +5,9 @@ package v1
 import (
 	"time"
 
+	"mini-k8s/pkg/api/resource"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/util/intstr"
 )
 
 // Namespace groups namespaced objects; deleting it deletes its contents.
@@ -57,9 +59,12 @@ type NodeSpec struct {
 
 // NodeStatus is reported by the kubelet.
 type NodeStatus struct {
-	Conditions []NodeCondition `json:"conditions,omitempty"`
-	Addresses  []NodeAddress   `json:"addresses,omitempty"`
-	NodeInfo   NodeSystemInfo  `json:"nodeInfo,omitzero"`
+	// Capacity is what the node has; Allocatable what Pods may use.
+	Capacity    ResourceList    `json:"capacity,omitempty"`
+	Allocatable ResourceList    `json:"allocatable,omitempty"`
+	Conditions  []NodeCondition `json:"conditions,omitempty"`
+	Addresses   []NodeAddress   `json:"addresses,omitempty"`
+	NodeInfo    NodeSystemInfo  `json:"nodeInfo,omitzero"`
 }
 
 // NodeCondition is one aspect of node health.
@@ -148,12 +153,81 @@ const (
 
 // Container is one process image in a Pod.
 type Container struct {
-	Name    string          `json:"name"`
-	Image   string          `json:"image"`
-	Command []string        `json:"command,omitempty"`
-	Args    []string        `json:"args,omitempty"`
-	Env     []EnvVar        `json:"env,omitempty"`
-	Ports   []ContainerPort `json:"ports,omitempty"`
+	Name      string               `json:"name"`
+	Image     string               `json:"image"`
+	Command   []string             `json:"command,omitempty"`
+	Args      []string             `json:"args,omitempty"`
+	Env       []EnvVar             `json:"env,omitempty"`
+	Ports     []ContainerPort      `json:"ports,omitempty"`
+	Resources ResourceRequirements `json:"resources,omitzero"`
+	// LivenessProbe failures restart the container.
+	LivenessProbe *Probe `json:"livenessProbe,omitempty"`
+	// ReadinessProbe failures take the container (and Pod) out of service.
+	ReadinessProbe *Probe `json:"readinessProbe,omitempty"`
+	// StartupProbe holds off the other probes until it succeeds once.
+	StartupProbe *Probe `json:"startupProbe,omitempty"`
+}
+
+// Resource names.
+const (
+	ResourceCPU    = "cpu"
+	ResourceMemory = "memory"
+	ResourcePods   = "pods"
+)
+
+// ResourceList maps resource names to quantities.
+type ResourceList map[string]resource.Quantity
+
+// ResourceRequirements are a container's requested (guaranteed, used for
+// CPU shares) and limited (enforced by cgroups) resources.
+type ResourceRequirements struct {
+	Limits   ResourceList `json:"limits,omitempty"`
+	Requests ResourceList `json:"requests,omitempty"`
+}
+
+// Probe checks a container periodically.
+type Probe struct {
+	ProbeHandler        `json:",inline"`
+	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
+	TimeoutSeconds      int32 `json:"timeoutSeconds,omitempty"`
+	PeriodSeconds       int32 `json:"periodSeconds,omitempty"`
+	SuccessThreshold    int32 `json:"successThreshold,omitempty"`
+	FailureThreshold    int32 `json:"failureThreshold,omitempty"`
+}
+
+// ProbeHandler is the check a probe runs; exactly one member is set.
+type ProbeHandler struct {
+	Exec      *ExecAction      `json:"exec,omitempty"`
+	HTTPGet   *HTTPGetAction   `json:"httpGet,omitempty"`
+	TCPSocket *TCPSocketAction `json:"tcpSocket,omitempty"`
+}
+
+// ExecAction runs a command in the container; exit code 0 is success.
+type ExecAction struct {
+	Command []string `json:"command,omitempty"`
+}
+
+// HTTPGetAction sends a GET; status codes 200-399 are success.
+type HTTPGetAction struct {
+	Path string `json:"path,omitempty"`
+	// Port is a number or the name of a container port.
+	Port intstr.IntOrString `json:"port"`
+	// Host defaults to the Pod IP.
+	Host        string       `json:"host,omitempty"`
+	Scheme      string       `json:"scheme,omitempty"`
+	HTTPHeaders []HTTPHeader `json:"httpHeaders,omitempty"`
+}
+
+// HTTPHeader is a header sent by an HTTP probe.
+type HTTPHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// TCPSocketAction opens a TCP connection; connecting is success.
+type TCPSocketAction struct {
+	Port intstr.IntOrString `json:"port"`
+	Host string             `json:"host,omitempty"`
 }
 
 // EnvVar is a literal environment variable.
@@ -180,7 +254,16 @@ type PodStatus struct {
 	StartTime             *metav1.Time      `json:"startTime,omitempty"`
 	InitContainerStatuses []ContainerStatus `json:"initContainerStatuses,omitempty"`
 	ContainerStatuses     []ContainerStatus `json:"containerStatuses,omitempty"`
+	// QOSClass is set when the Pod is created: Guaranteed, Burstable or BestEffort.
+	QOSClass string `json:"qosClass,omitempty"`
 }
+
+// QoS classes.
+const (
+	PodQOSGuaranteed = "Guaranteed"
+	PodQOSBurstable  = "Burstable"
+	PodQOSBestEffort = "BestEffort"
+)
 
 // Pod phases.
 const (
@@ -214,9 +297,12 @@ type ContainerStatus struct {
 	LastTerminationState ContainerState `json:"lastState,omitzero"`
 	Ready                bool           `json:"ready"`
 	RestartCount         int32          `json:"restartCount"`
-	Image                string         `json:"image"`
-	ImageID              string         `json:"imageID,omitempty"`
-	ContainerID          string         `json:"containerID,omitempty"`
+	// Started reports whether the container passed its startup probe (true
+	// once running when it has none).
+	Started     *bool  `json:"started,omitempty"`
+	Image       string `json:"image"`
+	ImageID     string `json:"imageID,omitempty"`
+	ContainerID string `json:"containerID,omitempty"`
 }
 
 // ContainerState holds exactly one of its members.

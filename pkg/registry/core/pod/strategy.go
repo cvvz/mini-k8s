@@ -10,12 +10,15 @@ import (
 	"mini-k8s/pkg/apiserver"
 )
 
-// Strategy defaults and validates Pods; new Pods start Pending and the spec
-// is immutable (nodeName is set through the binding subresource).
+// Strategy defaults and validates Pods; new Pods start Pending with their QoS
+// class and the spec is immutable (nodeName is set through the binding subresource).
 var Strategy = apiserver.Strategy{
-	Defaults:         func(obj metav1.Object) { corev1.SetDefaultsPodSpec(&obj.(*corev1.Pod).Spec) },
-	PrepareForCreate: func(obj metav1.Object) { obj.(*corev1.Pod).Status.Phase = corev1.PodPending },
-	Validate:         func(obj metav1.Object) []string { return validation.ValidatePodSpec("spec", &obj.(*corev1.Pod).Spec) },
+	Defaults: func(obj metav1.Object) { corev1.SetDefaultsPodSpec(&obj.(*corev1.Pod).Spec) },
+	PrepareForCreate: func(obj metav1.Object) {
+		pod := obj.(*corev1.Pod)
+		pod.Status = corev1.PodStatus{Phase: corev1.PodPending, QOSClass: corev1.GetPodQOS(&pod.Spec)}
+	},
+	Validate: func(obj metav1.Object) []string { return validation.ValidatePodSpec("spec", &obj.(*corev1.Pod).Spec) },
 	ValidateUpdate: func(obj, old metav1.Object) []string {
 		if !reflect.DeepEqual(obj.(*corev1.Pod).Spec, old.(*corev1.Pod).Spec) {
 			return []string{"spec: Forbidden: pod spec is immutable after creation"}

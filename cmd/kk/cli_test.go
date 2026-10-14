@@ -282,6 +282,9 @@ func TestExamplesFollowTheREADME(t *testing.T) {
 	if out, err = kk(t, c, "", "apply", "-n", "team", "-f", example("hello.yaml")); err != nil || out != "deployment.apps/hello created\n" {
 		t.Fatalf("hello.yaml in a second namespace: %q %v", out, err)
 	}
+	if out, err = kk(t, c, "", "apply", "-n", "team", "-f", example("init-and-sidecar.yaml")); err != nil || !strings.Contains(out, "pod/web-with-sidecar created") {
+		t.Fatalf("init-and-sidecar.yaml: %q %v", out, err)
+	}
 }
 
 func TestYAMLUsesTwoSpaceIndent(t *testing.T) {
