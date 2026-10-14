@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -287,12 +288,26 @@ func writeStructured(w io.Writer, v any, format string) error {
 	if err := json.Unmarshal(data, &generic); err != nil {
 		return err
 	}
-	out, err := yaml.Marshal(generic)
+	out, err := marshalYAML(generic)
 	if err != nil {
 		return err
 	}
 	_, err = w.Write(out)
 	return err
+}
+
+// marshalYAML renders v with two-space indentation, as kubectl does.
+func marshalYAML(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func indentYAML(v any, prefix string) string {
@@ -302,7 +317,7 @@ func indentYAML(v any, prefix string) string {
 	if m, ok := generic.(map[string]any); ok && len(m) == 0 {
 		return prefix + "<none>\n"
 	}
-	out, _ := yaml.Marshal(generic)
+	out, _ := marshalYAML(generic)
 	var b strings.Builder
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 		b.WriteString(prefix + line + "\n")

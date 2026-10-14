@@ -102,11 +102,25 @@ implementation.
 | Local Docker access | A local Unix socket; TCP, SSH and remote Docker endpoints are rejected. |
 | Free host ports | `127.0.0.1:18000` (API) and `127.0.0.1:18080` (gateway). |
 
-Verified end to end on Ubuntu 24.04 (WSL2, x86_64) with Docker Engine 29.9, Compose
-v5.6 and Go 1.27. Rootless Docker is not a validated configuration.
+| Environment | Status |
+| --- | --- |
+| Ubuntu 24.04 (WSL2, x86_64) with Docker Engine 29.9 installed inside WSL, Compose v5.6, Go 1.27 | ✅ verified end to end, including a fresh clone following this README |
+| Other Linux distributions (x86_64/arm64), rootful Docker | expected to work, not individually verified. SELinux-enforcing systems (e.g. Fedora, RHEL) may deny containers access to the mounted Docker socket |
+| WSL2 with Docker Desktop's WSL integration | not verified |
+| macOS with Docker Desktop | verified for v1, not yet re-verified for v2; component tests need `bin/etcd`, a Linux binary, so they are skipped on macOS |
+| Rootless Docker, native Windows | not supported |
 
-One project cluster per Docker Engine. The host build architecture must match the
-Linux container architecture.
+On WSL, clone the repository into the WSL Linux filesystem (for example `~/`), not into a
+mounted Windows drive, where builds are much slower and file permissions behave differently.
+
+The first run needs network access to Go modules (`proxy.golang.org`; set `GOPROXY` to use
+a mirror) and to the etcd download (`storage.googleapis.com`). The example reuses the
+locally built image, so no registry pulls are needed.
+
+One project cluster per Docker Engine: the Compose project, network, volume names and
+published ports are fixed. A clone in another directory takes over the same cluster and the
+same etcd data (see step 5 to reset). The host build architecture must match the Linux
+container architecture.
 
 > **Trusted local use only.** Kubelets mount the Docker socket, which grants extensive
 > control over the Docker host. The API uses a shared bearer token, without TLS or RBAC.
@@ -155,12 +169,13 @@ worker-2   Ready    worker   5s    mini-kubelet/v2
 ```sh
 ./bin/kk apply -f examples/demo.yaml
 ./bin/kk get deployments,pods,services -o wide
-curl --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/
+curl -sS --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/
 ```
 
 The [example](examples/demo.yaml) creates a two-replica Deployment and a Service. The
 gateway round-robins across ready Pods; responses look like
-`hello from web-997d7b744-f8shs` (the Pod name is its hostname).
+`hello from web-997d7b744-f8shs` (the Pod name is its hostname). The gateway may answer
+`503` while the Pods start; the curl command above retries.
 
 ### 4. Observe and operate
 
@@ -176,7 +191,8 @@ kk delete pod POD_NAME                   # graceful; the Deployment replaces it
 kk delete pod POD_NAME --force           # removed from the API immediately
 
 kk create namespace team
-kk apply -n team -f examples/demo.yaml   # namespaced copy (the gateway still serves one Service)
+kk apply -n team -f examples/hello.yaml  # deploy into another namespace (no Service)
+kk get pods -A                           # list across namespaces
 kk delete namespace team                 # deletes everything inside
 ```
 
@@ -189,6 +205,15 @@ kk delete namespace team                 # deletes everything inside
 This stops reconcilers, removes this cluster's workload containers and stops Compose,
 **keeping the etcd volume and token**. A later `cluster up` restores saved resources.
 To remove the example for good, run `kk delete -f examples/demo.yaml` first.
+
+To **start from scratch** (dropping every resource in the cluster), remove the etcd volume
+after stopping:
+
+```sh
+./bin/kk cluster down
+docker volume rm mini-k8s_etcd-data
+./bin/kk cluster up
+```
 
 ## Supported subset
 
@@ -238,8 +263,16 @@ make e2e E2E_FOCUS='sig-apps'     # run a subset by name
 ```
 
 **Run them only against a disposable project cluster.** Disruptive specs restart the
-control plane and run `cluster down/up`. Gateway specs require that no other Service
-exists and are skipped otherwise. Every new feature ships with e2e specs.
+control plane and run `cluster down/up`. The gateway serves a single Service for now, so
+gateway specs require that no other Service exists and are skipped otherwise. If you
+deployed the quick-start example, delete it before running the full suite:
+
+```sh
+./bin/kk delete -f examples/demo.yaml
+make e2e
+```
+
+Every new feature ships with e2e specs.
 
 ## Troubleshooting
 
@@ -253,6 +286,9 @@ exists and are skipped otherwise. Every new feature ships with e2e specs.
 | Gateway returns `503` | Wait for ready Pods; check the Service selector, targetPort and node heartbeats. |
 | `Error from server (Invalid)` | Fix the field named in the message; unknown fields are rejected too. |
 | Port or project-name conflict | Free the ports or stop the conflicting project; `MINI_API` alone does not change Compose ports. |
+| `only one Service is supported` | The gateway serves a single Service for now; in other namespaces use Service-less manifests such as `examples/hello.yaml`. |
+| A fresh clone shows old resources | One Docker Engine hosts one cluster and one etcd volume; remove `mini-k8s_etcd-data` as in step 5 to reset. |
+| Worker logs show access to `/var/run/docker.sock` denied | Make sure your user can use Docker; SELinux-enforcing systems may block containers from the mounted socket. |
 
 The first start creates `.mini-k8s/token` with mode `0600`; keep it private and do not
 delete it while the cluster runs. For manual Compose diagnostics, export the variables

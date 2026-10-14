@@ -1,0 +1,21 @@
+# A Deployment without a Service. Use it in extra namespaces: the HTTP gateway
+# currently serves a single Service cluster-wide (lifted in milestone M6).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello
+  template:
+    metadata:
+      labels:
+        app: hello
+    spec:
+      containers:
+        - name: hello
+          image: mini-k8s:local
+          command: ["/mini"]
+          args: ["demo"]
