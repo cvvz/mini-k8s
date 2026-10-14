@@ -17,6 +17,27 @@ spec:
           image: mini-k8s:local
           command: ["/mini"]
           args: ["demo"]
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:            # becomes the container's cgroup limits
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:       # only ready Pods receive gateway traffic
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 1
+            failureThreshold: 2
+          livenessProbe:        # a failing container is restarted
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
 ---
 apiVersion: v1
 kind: Service

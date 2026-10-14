@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"mini-k8s/pkg/api/resource"
 	corev1 "mini-k8s/pkg/apis/core/v1"
+	"mini-k8s/pkg/util/intstr"
 )
 
 func podSpec() *corev1.PodSpec {
@@ -49,5 +51,61 @@ func TestValidatePodSpecRejectsInvalidSpecs(t *testing.T) {
 		if !strings.Contains(errs, tc.want) {
 			t.Errorf("%s: want %q in %q", name, tc.want, errs)
 		}
+	}
+}
+
+func TestValidateProbesAndResources(t *testing.T) {
+	probe := func() *corev1.Probe {
+		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Port: intstr.FromInt(8080)}}}
+	}
+	for name, tc := range map[string]struct {
+		mutate func(*corev1.PodSpec)
+		want   string
+	}{
+		"probe on init container": {func(s *corev1.PodSpec) { s.InitContainers[0].ReadinessProbe = probe() }, "spec.initContainers[0].readinessProbe: Forbidden"},
+		"two handlers": {func(s *corev1.PodSpec) {
+			p := probe()
+			p.TCPSocket = &corev1.TCPSocketAction{Port: intstr.FromInt(80)}
+			s.Containers[0].LivenessProbe = p
+		}, "spec.containers[0].livenessProbe: Required value: must specify exactly one of exec, httpGet, tcpSocket"},
+		"bad port": {func(s *corev1.PodSpec) {
+			p := probe()
+			p.HTTPGet.Port = intstr.FromInt(70000)
+			s.Containers[0].ReadinessProbe = p
+		}, "spec.containers[0].readinessProbe.httpGet.port: Invalid value: 70000"},
+		"liveness success threshold": {func(s *corev1.PodSpec) {
+			p := probe()
+			p.SuccessThreshold = 2
+			s.Containers[0].LivenessProbe = p
+		}, "spec.containers[0].livenessProbe.successThreshold: Invalid value: 2: must be 1"},
+		"unknown resource": {func(s *corev1.PodSpec) {
+			s.Containers[0].Resources.Limits = corev1.ResourceList{"gpu": resource.MustParse("1")}
+		}, `spec.containers[0].resources.limits[gpu]: Unsupported value: "gpu"`},
+		"request above limit": {func(s *corev1.PodSpec) {
+			s.Containers[0].Resources = corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{"cpu": resource.MustParse("1")}, Requests: corev1.ResourceList{"cpu": resource.MustParse("2")}}
+		}, `spec.containers[0].resources.requests: Invalid value: "2": must be less than or equal to cpu limit of 1`},
+	} {
+		spec := podSpec()
+		tc.mutate(spec)
+		corev1.SetDefaultsPodSpec(spec)
+		errs := strings.Join(ValidatePodSpec("spec", spec), "\n")
+		if !strings.Contains(errs, tc.want) {
+			t.Errorf("%s: want %q in %q", name, tc.want, errs)
+		}
+	}
+	spec := podSpec()
+	spec.Containers[0].ReadinessProbe = probe()
+	spec.Containers[0].Resources.Limits = corev1.ResourceList{"cpu": resource.MustParse("500m"), "memory": resource.MustParse("64Mi")}
+	corev1.SetDefaultsPodSpec(spec)
+	if errs := ValidatePodSpec("spec", spec); len(errs) != 0 {
+		t.Fatalf("valid spec rejected: %v", errs)
+	}
+	p := spec.Containers[0].ReadinessProbe
+	if p.PeriodSeconds != 10 || p.TimeoutSeconds != 1 || p.FailureThreshold != 3 || p.SuccessThreshold != 1 || p.HTTPGet.Path != "/" {
+		t.Fatalf("probe defaults: %+v", p)
+	}
+	if q := spec.Containers[0].Resources.Requests["cpu"]; q.String() != "500m" {
+		t.Fatalf("requests default to limits: %+v", spec.Containers[0].Resources)
 	}
 }

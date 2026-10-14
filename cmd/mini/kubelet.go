@@ -59,6 +59,7 @@ func runKubelet(ctx context.Context, c *client.Client, token string) {
 		Routes: &hostgw.Agent{Run: network.Exec, Self: node, Masquerade: true,
 			ClusterCIDR: env("MINI_CLUSTER_CIDR", nodeipam.DefaultClusterCIDR)},
 	})
+	rt.Probes = k.Probes()
 	go rec.Run(ctx)
 	go k.Run(ctx)
 	serve(ctx, ":10250", k.Handler())

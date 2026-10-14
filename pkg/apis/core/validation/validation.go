@@ -22,8 +22,8 @@ func ValidatePodSpec(path string, spec *corev1.PodSpec) []string {
 		errs = append(errs, fmt.Sprintf(`%s.restartPolicy: Unsupported value: %q: supported values: "Always", "OnFailure", "Never"`, path, spec.RestartPolicy))
 	}
 	names := map[string]bool{}
-	errs = append(errs, validateContainers(path+".initContainers", spec.InitContainers, names)...)
-	errs = append(errs, validateContainers(path+".containers", spec.Containers, names)...)
+	errs = append(errs, validateContainers(path+".initContainers", spec.InitContainers, names, true)...)
+	errs = append(errs, validateContainers(path+".containers", spec.Containers, names, false)...)
 	if g := spec.TerminationGracePeriodSeconds; g != nil && *g < 0 {
 		errs = append(errs, path+".terminationGracePeriodSeconds: Invalid value: must be >= 0")
 	}
@@ -35,7 +35,8 @@ func ValidatePodSpec(path string, spec *corev1.PodSpec) []string {
 
 // validateContainers validates a container list; names must be unique
 // across init and regular containers, so seen is shared between the calls.
-func validateContainers(path string, containers []corev1.Container, seen map[string]bool) []string {
+// Init containers run to completion and may not have probes.
+func validateContainers(path string, containers []corev1.Container, seen map[string]bool, init bool) []string {
 	var errs []string
 	for i, c := range containers {
 		p := fmt.Sprintf("%s[%d]", path, i)
@@ -61,8 +62,98 @@ func validateContainers(path string, containers []corev1.Container, seen map[str
 				errs = append(errs, p+".ports: Unsupported value: only TCP is supported")
 			}
 		}
+		errs = append(errs, validateResources(p+".resources", c.Resources)...)
+		for _, probe := range []struct {
+			name  string
+			probe *corev1.Probe
+		}{{"livenessProbe", c.LivenessProbe}, {"readinessProbe", c.ReadinessProbe}, {"startupProbe", c.StartupProbe}} {
+			if probe.probe == nil {
+				continue
+			}
+			pp := p + "." + probe.name
+			if init {
+				errs = append(errs, pp+": Forbidden: may not be set for init containers")
+				continue
+			}
+			errs = append(errs, validateProbe(pp, probe.probe, probe.name != "readinessProbe")...)
+		}
 	}
 	return errs
+}
+
+// validateResources allows cpu and memory, with requests at most the limits.
+func validateResources(path string, r corev1.ResourceRequirements) []string {
+	var errs []string
+	for _, list := range []struct {
+		name string
+		rl   corev1.ResourceList
+	}{{"limits", r.Limits}, {"requests", r.Requests}} {
+		for name := range list.rl {
+			if name != corev1.ResourceCPU && name != corev1.ResourceMemory {
+				errs = append(errs, fmt.Sprintf(`%s.%s[%s]: Unsupported value: %q: supported values: "cpu", "memory"`, path, list.name, name, name))
+			}
+		}
+	}
+	for name, request := range r.Requests {
+		if limit, ok := r.Limits[name]; ok && request.Cmp(limit) > 0 {
+			errs = append(errs, fmt.Sprintf("%s.requests: Invalid value: %q: must be less than or equal to %s limit of %s", path, request.String(), name, limit.String()))
+		}
+	}
+	return errs
+}
+
+// validateProbe requires exactly one handler and sane timing; liveness and
+// startup probes must succeed once to count as healthy.
+func validateProbe(path string, p *corev1.Probe, successMustBeOne bool) []string {
+	var errs []string
+	handlers := 0
+	if p.Exec != nil {
+		handlers++
+		if len(p.Exec.Command) == 0 {
+			errs = append(errs, path+".exec.command: Required value")
+		}
+	}
+	if p.HTTPGet != nil {
+		handlers++
+		errs = append(errs, validatePort(path+".httpGet.port", p.HTTPGet.Port.IsString, p.HTTPGet.Port.IntVal, p.HTTPGet.Port.StrVal)...)
+		if p.HTTPGet.Scheme != "HTTP" {
+			errs = append(errs, fmt.Sprintf(`%s.httpGet.scheme: Unsupported value: %q: supported values: "HTTP"`, path, p.HTTPGet.Scheme))
+		}
+	}
+	if p.TCPSocket != nil {
+		handlers++
+		errs = append(errs, validatePort(path+".tcpSocket.port", p.TCPSocket.Port.IsString, p.TCPSocket.Port.IntVal, p.TCPSocket.Port.StrVal)...)
+	}
+	if handlers != 1 {
+		errs = append(errs, path+": Required value: must specify exactly one of exec, httpGet, tcpSocket")
+	}
+	for _, f := range []struct {
+		name string
+		v    int32
+		min  int32
+	}{{"initialDelaySeconds", p.InitialDelaySeconds, 0}, {"timeoutSeconds", p.TimeoutSeconds, 1}, {"periodSeconds", p.PeriodSeconds, 1},
+		{"successThreshold", p.SuccessThreshold, 1}, {"failureThreshold", p.FailureThreshold, 1}} {
+		if f.v < f.min {
+			errs = append(errs, fmt.Sprintf("%s.%s: Invalid value: %d: must be greater than or equal to %d", path, f.name, f.v, f.min))
+		}
+	}
+	if successMustBeOne && p.SuccessThreshold != 1 {
+		errs = append(errs, fmt.Sprintf("%s.successThreshold: Invalid value: %d: must be 1", path, p.SuccessThreshold))
+	}
+	return errs
+}
+
+func validatePort(path string, named bool, number int32, name string) []string {
+	if named {
+		if !validation.IsDNS1123Label(name) || len(name) > 15 {
+			return []string{fmt.Sprintf("%s: Invalid value: %q: must be a port name of at most 15 lowercase letters, digits and '-'", path, name)}
+		}
+		return nil
+	}
+	if number < 1 || number > 65535 {
+		return []string{fmt.Sprintf("%s: Invalid value: %d: must be between 1 and 65535, inclusive", path, number)}
+	}
+	return nil
 }
 
 // ValidateServiceSpec validates a Service spec.

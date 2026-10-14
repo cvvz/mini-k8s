@@ -48,7 +48,10 @@ type Manager struct {
 	DNS *runtimeapi.DNSConfig
 	// PodLogsDir is the root of Pod log directories.
 	PodLogsDir string
-	now        func() time.Time
+	// Probes reports probe results; containers with readiness or startup
+	// probes are not ready (or started) until it says so.
+	Probes ProbeResults
+	now    func() time.Time
 
 	mu          sync.Mutex
 	restarts    map[string]backoff // by pod UID + container name
@@ -61,6 +64,12 @@ type backoff struct {
 	delay    time.Duration
 	next     time.Time
 	err      error
+}
+
+// ProbeResults reports the outcome of a container instance's probes.
+type ProbeResults interface {
+	Ready(podUID, container, containerID string) bool
+	Started(podUID, container, containerID string) bool
 }
 
 // Dial connects to a CRI socket such as /run/containerd/containerd.sock.
@@ -149,12 +158,33 @@ func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32) *runti
 		Args:     c.Args,
 		Labels:   labels,
 		LogPath:  fmt.Sprintf("%s/%d.log", c.Name, attempt),
-		Linux:    &runtimeapi.LinuxContainerConfig{},
+		Linux:    &runtimeapi.LinuxContainerConfig{Resources: linuxResources(c.Resources)},
 	}
 	for _, e := range c.Env {
 		cfg.Envs = append(cfg.Envs, &runtimeapi.KeyValue{Key: e.Name, Value: []byte(e.Value)})
 	}
 	return cfg
+}
+
+// cpuPeriod is the CFS period CPU limits are expressed in (100ms).
+const cpuPeriod = 100000
+
+// linuxResources maps requests and limits to cgroup settings the way the
+// kubelet does: CPU requests become relative shares (at least 2, also for
+// containers without requests), CPU limits a CFS quota per period, and the
+// memory limit a hard limit without swap.
+func linuxResources(r corev1.ResourceRequirements) *runtimeapi.LinuxContainerResources {
+	res := &runtimeapi.LinuxContainerResources{CpuShares: 2}
+	if q, ok := r.Requests[corev1.ResourceCPU]; ok {
+		res.CpuShares = max(q.MilliValue()*1024/1000, 2)
+	}
+	if q, ok := r.Limits[corev1.ResourceCPU]; ok && !q.IsZero() {
+		res.CpuPeriod, res.CpuQuota = cpuPeriod, max(q.MilliValue()*cpuPeriod/1000, 1000)
+	}
+	if q, ok := r.Limits[corev1.ResourceMemory]; ok && !q.IsZero() {
+		res.MemoryLimitInBytes, res.MemorySwapLimitInBytes = q.Value(), q.Value()
+	}
+	return res
 }
 
 // podHostname derives a valid hostname (at most 63 characters, not ending in

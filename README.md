@@ -33,7 +33,9 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **Pods**: several containers sharing one network namespace; init containers that run
   one after another to completion; `restartPolicy` Always/OnFailure/Never with the
   Succeeded/Failed phases and the Initialized/ContainersReady/Ready conditions computed
-  like the Kubernetes kubelet; `kk exec` runs commands in containers.
+  like the Kubernetes kubelet; liveness, readiness and startup probes (httpGet,
+  tcpSocket, exec); CPU and memory requests/limits enforced through cgroups (`OOMKilled`)
+  and QoS classes; `kk exec` runs commands in containers.
 - **kubelet**: node registration and heartbeats; one worker per Pod; restarts with
   backoff (CrashLoopBackOff); image pull errors (ErrImagePull/ImagePullBackOff); sandbox
   recreation after a node restart; logs with follow/tail/`--previous`; orphan cleanup.
@@ -120,6 +122,7 @@ cmd/mini/                    multi-call binary: mini kube-apiserver | kube-contr
 cmd/kk/                      CLI (kubectl plus cluster lifecycle)
 build/images/<name>/         Dockerfiles: mini (components, demo), node, pause, etcd
 pkg/apis/{meta,core,apps}/v1 resource types (metav1, corev1, appsv1) and validation
+pkg/api/resource, util/intstr quantities ("500m", "64Mi") and int-or-string values
 pkg/labels, fields, watch    selectors and watch event types (as in apimachinery)
 pkg/scheme                   resource registry
 pkg/apiserver                generic API server (as k8s.io/apiserver)
@@ -128,7 +131,7 @@ pkg/storage/etcd3            etcd storage
 pkg/client/...               client, informers, workqueue, record (as client-go)
 pkg/controller/<name>        deployment, garbagecollector, namespace, nodeipam controllers
 pkg/scheduler                scheduler
-pkg/kubelet                  node agent; kuberuntime (CRI client), dns (node-local forwarder)
+pkg/kubelet                  node agent; kuberuntime (CRI client), prober, dns (node-local forwarder)
 pkg/network/{cni,hostgw}     CNI plugin and host-gw route agent
 pkg/nodeinit                 node container entrypoint
 pkg/gateway                  HTTP gateway
@@ -222,8 +225,9 @@ worker-2   Ready    worker   5s    mini-kubelet/v2
 curl -sS --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/
 ```
 
-The [example](examples/demo.yaml) creates a two-replica Deployment and a Service. The
-Pods get addresses from their nodes' Pod CIDRs (`10.244.x.y`, see `-o wide`); the gateway
+The [example](examples/demo.yaml) creates a two-replica Deployment and a Service; its
+container has CPU/memory requests and limits and readiness/liveness probes. The Pods get
+addresses from their nodes' Pod CIDRs (`10.244.x.y`, see `-o wide`); the gateway
 round-robins across ready Pods; responses look like `hello from web-997d7b744-f8shs` (the
 Pod name is its hostname). The gateway may answer `503` while the Pods start; the curl
 command above retries.
@@ -239,6 +243,10 @@ kk get events
 kk logs -f POD_NAME                      # a name printed by kk get pods
 kk logs -p POD_NAME                      # the previous instance after a restart
 kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/   # run a command in the Pod
+kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/fail-ready  # its readiness probe now fails:
+kk get pods                              # 0/1 after ~2s; the gateway only uses the other Pod
+kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/recover
+kk exec POD_NAME -- /mini cat /sys/fs/cgroup/memory.max          # the 64Mi limit: 67108864
 kk scale deployment web --replicas 3
 kk delete pod POD_NAME                   # graceful; the Deployment replaces it
 kk delete pod POD_NAME --force           # removed from the API immediately
@@ -287,8 +295,8 @@ into the nodes), also delete the volumes:
 | Resource | apiVersion | Supported fields and behaviour |
 | --- | --- | --- |
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
-| Node | `v1` | Registered and heartbeated by kubelets; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` is honoured by the scheduler. |
-| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`; `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Subresources `log` and `exec`. |
+| Node | `v1` | Registered and heartbeated by kubelets with `capacity`/`allocatable` (cpu, memory, pods); `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` is honoured by the scheduler. |
+| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Subresources `log` and `exec`. |
 | Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always). Template changes replace Pods (Recreate). |
 | Service | `v1` | One cluster-wide HTTP gateway Service: `selector`, one `port: 80`, `targetPort`. |
 | Event | `v1` | Recorded by components, queryable, expire after one hour. |
@@ -301,7 +309,8 @@ still not a cross-resource transaction.
 
 ## Current limitations (addressed by upcoming milestones)
 
-- Pods have no probes, resource limits, ConfigMaps/Secrets or volumes. `kk exec` runs a
+- Pods have no volumes, ConfigMaps or Secrets yet; the scheduler ignores resource requests
+  (resource-aware scheduling is M7). `kk exec` runs a
   command to completion and returns its output; there is no interactive session (stdin/tty),
   unlike Kubernetes' streaming exec.
 - Deployments manage Pods directly: no ReplicaSets, rolling updates or rollbacks.
@@ -388,7 +397,8 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M1 | API machinery: Kubernetes-style REST, namespaces, watch, informers/work queues, GC, graceful deletion, events | ✅ |
 | M2 | kind-style nodes: containerd inside each node, kubelet managing Pods over CRI, home-grown CNI (host-gw routing) | ✅ |
 | M3a | Pods: multiple and init containers, restart policies and terminal phases, `kk exec` | ✅ |
-| M3b | Pods: probes, resource limits, volumes (emptyDir, hostPath), hostNetwork | planned |
+| M3b | Pods: liveness/readiness/startup probes, resource requests and limits, QoS, node capacity | ✅ |
+| M3c | Pods: volumes (emptyDir, hostPath), hostNetwork | planned |
 | M4 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system | planned |
 | M5 | ReplicaSets, rolling updates and rollbacks | planned |
 | M6 | ClusterIP, Endpoints, iptables kube-proxy, DNS, NodePort, Ingress | planned |
@@ -399,6 +409,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M3b probes and resources plan (Chinese)](docs/superpowers/plans/2026-10-15-m3b-probes-resources.md)
 - [M3a multi-container Pods plan (Chinese)](docs/superpowers/plans/2026-10-15-m3a-multi-container.md)
 - [M2 kind-style nodes plan (Chinese)](docs/superpowers/plans/2026-10-15-m2-kind-nodes.md)
 - [M1 API machinery plan (Chinese)](docs/superpowers/plans/2026-10-14-m1-api-machinery.md)

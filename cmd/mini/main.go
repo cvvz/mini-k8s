@@ -2,7 +2,7 @@
 // its first argument selects the component to run.
 //
 //	mini kube-apiserver | kube-controller-manager | kube-scheduler | node-init | gateway
-//	mini demo | pause | fetch URL | sleep DURATION
+//	mini demo | pause | fetch URL | sleep DURATION | cat FILE... | alloc SIZE
 //
 // Invoked as mini-cni or loopback (through symlinks in /opt/cni/bin) it is
 // the CNI plugin.
@@ -36,7 +36,7 @@ var components = map[string]component{
 }
 
 func usage() string {
-	names := []string{"demo", "pause", "fetch URL", "sleep DURATION"}
+	names := []string{"demo", "pause", "fetch URL", "sleep DURATION", "cat FILE...", "alloc SIZE"}
 	for name := range components {
 		names = append(names, name)
 	}
@@ -69,6 +69,10 @@ func main() {
 		os.Exit(runFetch(os.Args[2:]))
 	case "sleep":
 		os.Exit(runSleep(os.Args[2:]))
+	case "cat":
+		os.Exit(runCat(os.Args[2:]))
+	case "alloc":
+		os.Exit(runAlloc(os.Args[2:]))
 	}
 	run, ok := components[os.Args[1]]
 	if !ok || len(os.Args) != 2 {
