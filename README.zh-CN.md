@@ -224,12 +224,14 @@ unset MINI_TOKEN MINI_DOCKER_SOCKET
 | M0 | 工程基线、Linux 文档 | ✅ |
 | E2E | Ginkgo e2e 框架 | ✅ |
 | M1 | API 机制：K8s 风格 REST、Namespace、Watch、Informer/WorkQueue、GC、优雅删除、Events | ✅ |
-| M2 | Pod 与 kubelet：pause 沙箱、多容器、init 容器、探针、资源限制、exec | 计划中 |
-| M3 | ReplicaSet、滚动更新与回滚 | 计划中 |
-| M4 | ClusterIP、Endpoints、kube-proxy、DNS、NodePort、Ingress | 计划中 |
-| M5 | 调度框架、节点租约与驱逐、污点、cordon/drain | 计划中 |
-| M6 | ConfigMap、Secret、卷、PVC | 计划中 |
-| M7 | DaemonSet、Job、CronJob、StatefulSet | 计划中 |
+| M2 | Pod 与 kubelet：CRI 形状的运行时接口、pause 沙箱、多容器、init 容器、探针、资源限制、exec | 计划中 |
+| M3 | 控制面自托管：control-plane 节点、static/mirror Pod，etcd 与控制面组件运行在 kube-system | 计划中 |
+| M4 | ReplicaSet、滚动更新与回滚 | 计划中 |
+| M5 | ClusterIP、Endpoints、kube-proxy、DNS、NodePort、Ingress | 计划中 |
+| M6 | 调度框架、节点租约与驱逐、污点、cordon/drain | 计划中 |
+| M7 | ConfigMap、Secret、卷、PVC | 计划中 |
+| M8 | DaemonSet、Job、CronJob、StatefulSet | 计划中 |
+| 可选 | kind 式节点：节点内 containerd + CRI + 自研 host-gw CNI | 未排期 |
 
 ## 设计文档
 

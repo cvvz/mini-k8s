@@ -239,12 +239,14 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M0 | Engineering baseline, Linux docs | ✅ |
 | E2E | Ginkgo e2e framework | ✅ |
 | M1 | API machinery: Kubernetes-style REST, namespaces, watch, informers/work queues, GC, graceful deletion, events | ✅ |
-| M2 | Pods and kubelet: pause sandbox, multiple and init containers, probes, resource limits, exec | planned |
-| M3 | ReplicaSets, rolling updates and rollbacks | planned |
-| M4 | ClusterIP, Endpoints, kube-proxy, DNS, NodePort, Ingress | planned |
-| M5 | Scheduling framework, node leases and eviction, taints, cordon/drain | planned |
-| M6 | ConfigMaps, Secrets, volumes, PVCs | planned |
-| M7 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
+| M2 | Pods and kubelet: CRI-shaped runtime interface, pause sandbox, multiple and init containers, probes, resource limits, exec | planned |
+| M3 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system | planned |
+| M4 | ReplicaSets, rolling updates and rollbacks | planned |
+| M5 | ClusterIP, Endpoints, kube-proxy, DNS, NodePort, Ingress | planned |
+| M6 | Scheduling framework, node leases and eviction, taints, cordon/drain | planned |
+| M7 | ConfigMaps, Secrets, volumes, PVCs | planned |
+| M8 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
+| optional | kind-style nodes: containerd + CRI inside each node, home-grown host-gw CNI | not scheduled |
 
 ## Design documentation
 
