@@ -35,7 +35,8 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   Succeeded/Failed phases and the Initialized/ContainersReady/Ready conditions computed
   like the Kubernetes kubelet; liveness, readiness and startup probes (httpGet,
   tcpSocket, exec); CPU and memory requests/limits enforced through cgroups (`OOMKilled`)
-  and QoS classes; `kk exec` runs commands in containers.
+  and QoS classes; `emptyDir` (disk or memory) and `hostPath` volumes; `hostNetwork`;
+  `kk exec` runs commands in containers.
 - **kubelet**: node registration and heartbeats; one worker per Pod; restarts with
   backoff (CrashLoopBackOff); image pull errors (ErrImagePull/ImagePullBackOff); sandbox
   recreation after a node restart; logs with follow/tail/`--previous`; orphan cleanup.
@@ -256,9 +257,11 @@ kk apply -n team -f examples/hello.yaml  # deploy into another namespace (no Ser
 kk get pods -A                           # list across namespaces
 kk delete namespace team                 # deletes everything inside
 
-kk apply -f examples/init-and-sidecar.yaml   # init container + two containers sharing a network
+kk apply -f examples/init-and-sidecar.yaml   # init container + two containers sharing a network and a volume
 kk get pod web-with-sidecar              # Init:0/1, then 2/2 Running
 kk exec web-with-sidecar -c sidecar -- /mini fetch http://127.0.0.1:8080/
+kk exec web-with-sidecar -c sidecar -- /mini write /shared/note "written by the sidecar"
+kk exec web-with-sidecar -c web -- /mini cat /shared/note
 
 docker exec mini-k8s-worker-1-1 crictl ps    # look inside a node, like on a real machine
 ```
@@ -296,7 +299,7 @@ into the nodes), also delete the volumes:
 | --- | --- | --- |
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
 | Node | `v1` | Registered and heartbeated by kubelets with `capacity`/`allocatable` (cpu, memory, pods); `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` is honoured by the scheduler. |
-| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Subresources `log` and `exec`. |
+| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`); `hostNetwork`; `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Subresources `log` and `exec`. |
 | Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always). Template changes replace Pods (Recreate). |
 | Service | `v1` | One cluster-wide HTTP gateway Service: `selector`, one `port: 80`, `targetPort`. |
 | Event | `v1` | Recorded by components, queryable, expire after one hour. |
@@ -309,8 +312,8 @@ still not a cross-resource transaction.
 
 ## Current limitations (addressed by upcoming milestones)
 
-- Pods have no volumes, ConfigMaps or Secrets yet; the scheduler ignores resource requests
-  (resource-aware scheduling is M7). `kk exec` runs a
+- No ConfigMaps, Secrets or persistent volumes yet (M8); no `subPath` or `hostPort`; the
+  scheduler ignores resource requests (resource-aware scheduling is M7). `kk exec` runs a
   command to completion and returns its output; there is no interactive session (stdin/tty),
   unlike Kubernetes' streaming exec.
 - Deployments manage Pods directly: no ReplicaSets, rolling updates or rollbacks.
@@ -398,7 +401,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M2 | kind-style nodes: containerd inside each node, kubelet managing Pods over CRI, home-grown CNI (host-gw routing) | ✅ |
 | M3a | Pods: multiple and init containers, restart policies and terminal phases, `kk exec` | ✅ |
 | M3b | Pods: liveness/readiness/startup probes, resource requests and limits, QoS, node capacity | ✅ |
-| M3c | Pods: volumes (emptyDir, hostPath), hostNetwork | planned |
+| M3c | Pods: volumes (emptyDir, hostPath), hostNetwork | ✅ |
 | M4 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system | planned |
 | M5 | ReplicaSets, rolling updates and rollbacks | planned |
 | M6 | ClusterIP, Endpoints, iptables kube-proxy, DNS, NodePort, Ingress | planned |
@@ -409,6 +412,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M3c volumes and host network plan (Chinese)](docs/superpowers/plans/2026-10-15-m3c-volumes-hostnetwork.md)
 - [M3b probes and resources plan (Chinese)](docs/superpowers/plans/2026-10-15-m3b-probes-resources.md)
 - [M3a multi-container Pods plan (Chinese)](docs/superpowers/plans/2026-10-15-m3a-multi-container.md)
 - [M2 kind-style nodes plan (Chinese)](docs/superpowers/plans/2026-10-15-m2-kind-nodes.md)

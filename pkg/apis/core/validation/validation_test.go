@@ -109,3 +109,42 @@ func TestValidateProbesAndResources(t *testing.T) {
 		t.Fatalf("requests default to limits: %+v", spec.Containers[0].Resources)
 	}
 }
+
+func TestValidateVolumesAndMounts(t *testing.T) {
+	dirType := "Directory"
+	badType := "Socket"
+	for name, tc := range map[string]struct {
+		mutate func(*corev1.PodSpec)
+		want   string
+	}{
+		"no source":      {func(s *corev1.PodSpec) { s.Volumes[0].EmptyDir = nil }, "spec.volumes[0]: Required value: must specify exactly one of emptyDir, hostPath"},
+		"two sources":    {func(s *corev1.PodSpec) { s.Volumes[0].HostPath = &corev1.HostPathVolumeSource{Path: "/x"} }, "must specify exactly one of emptyDir, hostPath"},
+		"duplicate name": {func(s *corev1.PodSpec) { s.Volumes = append(s.Volumes, s.Volumes[0]) }, `spec.volumes[1].name: Duplicate value: "data"`},
+		"bad medium":     {func(s *corev1.PodSpec) { s.Volumes[0].EmptyDir.Medium = "Disk" }, `spec.volumes[0].emptyDir.medium: Unsupported value: "Disk"`},
+		"relative host path": {func(s *corev1.PodSpec) {
+			s.Volumes[0] = corev1.Volume{Name: "data", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "var/x", Type: &dirType}}}
+		}, `spec.volumes[0].hostPath.path: Invalid value: "var/x": must be an absolute path`},
+		"bad host path type": {func(s *corev1.PodSpec) {
+			s.Volumes[0] = corev1.Volume{Name: "data", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/x", Type: &badType}}}
+		}, `spec.volumes[0].hostPath.type: Unsupported value: "Socket"`},
+		"unknown volume": {func(s *corev1.PodSpec) { s.Containers[0].VolumeMounts[0].Name = "other" }, `spec.containers[0].volumeMounts[0].name: Not found: "other"`},
+		"relative mount": {func(s *corev1.PodSpec) { s.Containers[0].VolumeMounts[0].MountPath = "data" }, `spec.containers[0].volumeMounts[0].mountPath: Invalid value: "data": must be an absolute path`},
+		"duplicate mount path": {func(s *corev1.PodSpec) {
+			s.Containers[0].VolumeMounts = append(s.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "data", MountPath: "/data/"})
+		}, `spec.containers[0].volumeMounts[1].mountPath: Invalid value: "/data/": must be unique`},
+	} {
+		spec := podSpec()
+		spec.Volumes = []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+		spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/data"}}
+		if name == "no source" || name == "two sources" {
+			if errs := ValidatePodSpec("spec", spec); len(errs) != 0 {
+				t.Fatalf("valid volumes rejected: %v", errs)
+			}
+		}
+		tc.mutate(spec)
+		errs := strings.Join(ValidatePodSpec("spec", spec), "\n")
+		if !strings.Contains(errs, tc.want) {
+			t.Errorf("%s: want %q in %q", name, tc.want, errs)
+		}
+	}
+}

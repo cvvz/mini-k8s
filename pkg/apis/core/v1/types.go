@@ -138,10 +138,59 @@ type PodSpec struct {
 	// before the containers start.
 	InitContainers []Container `json:"initContainers,omitempty"`
 	Containers     []Container `json:"containers"`
+	// Volumes can be mounted by the Pod's containers.
+	Volumes []Volume `json:"volumes,omitempty"`
 	// RestartPolicy is Always (default), OnFailure or Never.
 	RestartPolicy                 string `json:"restartPolicy,omitempty"`
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 	NodeName                      string `json:"nodeName,omitempty"`
+	// HostNetwork runs the Pod in the node's network namespace.
+	HostNetwork bool `json:"hostNetwork,omitempty"`
+}
+
+// Volume is a named directory available to the Pod's containers; exactly
+// one source is set.
+type Volume struct {
+	Name         string `json:"name"`
+	VolumeSource `json:",inline"`
+}
+
+// VolumeSource is where a volume's data lives.
+type VolumeSource struct {
+	EmptyDir *EmptyDirVolumeSource `json:"emptyDir,omitempty"`
+	HostPath *HostPathVolumeSource `json:"hostPath,omitempty"`
+}
+
+// EmptyDirVolumeSource is a directory that lives as long as the Pod on its node.
+type EmptyDirVolumeSource struct {
+	// Medium is "" (the node's disk) or "Memory" (tmpfs).
+	Medium string `json:"medium,omitempty"`
+	// SizeLimit sizes a Memory volume.
+	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
+}
+
+// HostPathVolumeSource is a file or directory of the node.
+type HostPathVolumeSource struct {
+	Path string `json:"path"`
+	// Type is checked before mounting: "" (no check), DirectoryOrCreate,
+	// Directory, FileOrCreate or File.
+	Type *string `json:"type,omitempty"`
+}
+
+// Storage media and hostPath types.
+const (
+	StorageMediumMemory       = "Memory"
+	HostPathDirectoryOrCreate = "DirectoryOrCreate"
+	HostPathDirectory         = "Directory"
+	HostPathFileOrCreate      = "FileOrCreate"
+	HostPathFile              = "File"
+)
+
+// VolumeMount mounts a Pod volume into a container.
+type VolumeMount struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
 // Restart policies.
@@ -153,13 +202,14 @@ const (
 
 // Container is one process image in a Pod.
 type Container struct {
-	Name      string               `json:"name"`
-	Image     string               `json:"image"`
-	Command   []string             `json:"command,omitempty"`
-	Args      []string             `json:"args,omitempty"`
-	Env       []EnvVar             `json:"env,omitempty"`
-	Ports     []ContainerPort      `json:"ports,omitempty"`
-	Resources ResourceRequirements `json:"resources,omitzero"`
+	Name         string               `json:"name"`
+	Image        string               `json:"image"`
+	Command      []string             `json:"command,omitempty"`
+	Args         []string             `json:"args,omitempty"`
+	Env          []EnvVar             `json:"env,omitempty"`
+	Ports        []ContainerPort      `json:"ports,omitempty"`
+	Resources    ResourceRequirements `json:"resources,omitzero"`
+	VolumeMounts []VolumeMount        `json:"volumeMounts,omitempty"`
 	// LivenessProbe failures restart the container.
 	LivenessProbe *Probe `json:"livenessProbe,omitempty"`
 	// ReadinessProbe failures take the container (and Pod) out of service.

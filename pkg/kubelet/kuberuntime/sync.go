@@ -40,6 +40,9 @@ func (m *Manager) SyncPod(ctx context.Context, pod *corev1.Pod) corev1.PodStatus
 	}
 	s.ip = ip
 	r := &podRun{m: m, ctx: ctx, pod: pod, sandboxID: sandboxID, sandbox: sandbox}
+	// Volumes are prepared before containers start; a failure only keeps new
+	// containers from starting.
+	r.volumes, r.volumeErr = m.setupVolumes(pod)
 	if r.containersStarted() {
 		// Init containers finished before any container was created in this
 		// sandbox; never re-run them (a transient runtime error must not send
@@ -68,6 +71,8 @@ type podRun struct {
 	pod       *corev1.Pod
 	sandboxID string
 	sandbox   *runtimeapi.PodSandboxConfig
+	volumes   map[string]string // node paths by volume name
+	volumeErr error
 }
 
 // outcome is a container's situation after one sync step.
@@ -282,6 +287,10 @@ func (r *podRun) currentStatus(name string) *runtimeapi.ContainerStatus {
 // start pulls the image if needed and starts instance `attempt` of c.
 func (r *podRun) start(c corev1.Container, cs *corev1.ContainerStatus, attempt uint32, key string) outcome {
 	m, ctx := r.m, r.ctx
+	if r.volumeErr != nil {
+		cs.State = waitingState(ReasonCreateContainerConfigError, r.volumeErr.Error())
+		return outcomeWaiting
+	}
 	if inBackoff, err := m.ensureImage(ctx, c.Image, r.sandbox); err != nil {
 		reason := ReasonErrImagePull
 		if inBackoff {
@@ -291,7 +300,7 @@ func (r *podRun) start(c corev1.Container, cs *corev1.ContainerStatus, attempt u
 		return outcomeWaiting
 	}
 	created, err := m.runtime.CreateContainer(ctx, &runtimeapi.CreateContainerRequest{
-		PodSandboxId: r.sandboxID, Config: containerConfig(r.pod, c, attempt), SandboxConfig: r.sandbox})
+		PodSandboxId: r.sandboxID, Config: containerConfig(r.pod, c, attempt, r.volumes), SandboxConfig: r.sandbox})
 	if err != nil {
 		cs.State = waitingState(ReasonCreateContainerError, err.Error())
 		return outcomeWaiting

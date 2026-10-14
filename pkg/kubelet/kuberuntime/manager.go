@@ -35,6 +35,9 @@ const (
 	ReasonRunContainerError     = "RunContainerError"
 	ReasonCreateContainerError  = "CreateContainerError"
 	ReasonCreatePodSandboxError = "CreatePodSandboxError"
+	// ReasonCreateContainerConfigError: the container's configuration (such
+	// as a volume) could not be prepared.
+	ReasonCreateContainerConfigError = "CreateContainerConfigError"
 )
 
 // DefaultPodLogsDir is where container logs are written (by containerd).
@@ -48,6 +51,10 @@ type Manager struct {
 	DNS *runtimeapi.DNSConfig
 	// PodLogsDir is the root of Pod log directories.
 	PodLogsDir string
+	// PodsDir is the root of per-Pod kubelet data (emptyDir volumes).
+	PodsDir string
+	// Mounter mounts memory-backed emptyDir volumes.
+	Mounter Mounter
 	// Probes reports probe results; containers with readiness or startup
 	// probes are not ready (or started) until it says so.
 	Probes ProbeResults
@@ -60,6 +67,7 @@ type Manager struct {
 	// probeKilled maps containers stopped after a failed liveness or startup
 	// probe to their Pod UID; they restart even after exiting 0.
 	probeKilled map[string]string
+	tmpfs       map[string]bool // mounted emptyDir directories
 }
 
 type backoff struct {
@@ -82,8 +90,10 @@ func Dial(socket string) (*grpc.ClientConn, error) {
 
 // NewManager returns a manager for the given CRI clients.
 func NewManager(runtime runtimeapi.RuntimeServiceClient, images runtimeapi.ImageServiceClient) *Manager {
-	return &Manager{runtime: runtime, images: images, PodLogsDir: DefaultPodLogsDir, now: time.Now,
-		restarts: map[string]backoff{}, pulls: map[string]backoff{}, sandboxRuns: map[string]backoff{}, probeKilled: map[string]string{}}
+	return &Manager{runtime: runtime, images: images, PodLogsDir: DefaultPodLogsDir, PodsDir: DefaultPodsDir,
+		Mounter: SystemMounter{}, now: time.Now,
+		restarts: map[string]backoff{}, pulls: map[string]backoff{}, sandboxRuns: map[string]backoff{},
+		probeKilled: map[string]string{}, tmpfs: map[string]bool{}}
 }
 
 // Version reports the runtime as "containerd://2.2.1".
@@ -140,18 +150,38 @@ func (m *Manager) PodLogDir(pod *corev1.Pod) string {
 	return fmt.Sprintf("%s/%s_%s_%s", m.PodLogsDir, pod.Namespace, pod.Name, pod.UID)
 }
 
+// namespaces returns the Linux namespaces of a Pod's sandbox and containers:
+// the Pod's own network namespace (or the node's with hostNetwork), a shared
+// IPC namespace and a PID namespace per container, as in Kubernetes.
+func namespaces(pod *corev1.Pod) *runtimeapi.NamespaceOption {
+	ns := &runtimeapi.NamespaceOption{Network: runtimeapi.NamespaceMode_POD, Pid: runtimeapi.NamespaceMode_CONTAINER, Ipc: runtimeapi.NamespaceMode_POD}
+	if pod.Spec.HostNetwork {
+		ns.Network = runtimeapi.NamespaceMode_NODE
+	}
+	return ns
+}
+
 func (m *Manager) sandboxConfig(pod *corev1.Pod, attempt uint32) *runtimeapi.PodSandboxConfig {
-	return &runtimeapi.PodSandboxConfig{
+	cfg := &runtimeapi.PodSandboxConfig{
 		Metadata:     &runtimeapi.PodSandboxMetadata{Name: pod.Name, Namespace: pod.Namespace, Uid: pod.UID, Attempt: attempt},
 		Hostname:     podHostname(pod.Name),
 		LogDirectory: m.PodLogDir(pod),
 		DnsConfig:    m.DNS,
 		Labels:       podLabels(pod),
-		Linux:        &runtimeapi.LinuxPodSandboxConfig{},
+		Linux: &runtimeapi.LinuxPodSandboxConfig{SecurityContext: &runtimeapi.LinuxSandboxSecurityContext{
+			NamespaceOptions: namespaces(pod)}},
 	}
+	if pod.Spec.HostNetwork {
+		// The node's hostname and resolver apply, as for host-network Pods
+		// in Kubernetes.
+		cfg.Hostname, cfg.DnsConfig = "", nil
+	}
+	return cfg
 }
 
-func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32) *runtimeapi.ContainerConfig {
+// containerConfig describes one instance of c; volumes maps the Pod's volume
+// names to their node paths.
+func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32, volumes map[string]string) *runtimeapi.ContainerConfig {
 	labels := podLabels(pod)
 	labels[LabelContainerName] = c.Name
 	cfg := &runtimeapi.ContainerConfig{
@@ -161,10 +191,14 @@ func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32) *runti
 		Args:     c.Args,
 		Labels:   labels,
 		LogPath:  fmt.Sprintf("%s/%d.log", c.Name, attempt),
-		Linux:    &runtimeapi.LinuxContainerConfig{Resources: linuxResources(c.Resources)},
+		Linux: &runtimeapi.LinuxContainerConfig{Resources: linuxResources(c.Resources),
+			SecurityContext: &runtimeapi.LinuxContainerSecurityContext{NamespaceOptions: namespaces(pod)}},
 	}
 	for _, e := range c.Env {
 		cfg.Envs = append(cfg.Envs, &runtimeapi.KeyValue{Key: e.Name, Value: []byte(e.Value)})
+	}
+	for _, vm := range c.VolumeMounts {
+		cfg.Mounts = append(cfg.Mounts, &runtimeapi.Mount{ContainerPath: vm.MountPath, HostPath: volumes[vm.Name], Readonly: vm.ReadOnly})
 	}
 	return cfg
 }
