@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	"mini-k8s/pkg/client"
 )
 
 func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
-	server := fakeNodeServer(t, "test-token", func() []api.Node {
-		return []api.Node{readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
+	server := fakeNodeServer(t, "test-token", func() []corev1.Node {
+		return []corev1.Node{readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
 	})
 	var calls [][]string
 	c := cluster{

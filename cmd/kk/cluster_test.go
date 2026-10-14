@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	"mini-k8s/pkg/client"
 )
 
 func TestTokenCreationAndReuse(t *testing.T) {
@@ -112,8 +112,8 @@ func TestReadinessRequiresAuthenticatedHealthAndBothFreshWorkers(t *testing.T) {
 			if scenario == "unauthorized" {
 				token = "other"
 			}
-			server := fakeNodeServer(t, token, func() []api.Node {
-				nodes := []api.Node{readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
+			server := fakeNodeServer(t, token, func() []corev1.Node {
+				nodes := []corev1.Node{readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
 				switch scenario {
 				case "stale":
 					nodes[1] = readyNode("worker-2", time.Now().Add(-time.Minute))

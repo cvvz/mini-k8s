@@ -10,8 +10,9 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/client"
 )
 
 // Framework is created once per Describe block. Every spec gets a fresh
@@ -44,7 +45,7 @@ func NewDefaultFramework(baseName string) *Framework {
 // deletion. An empty suffix uses the framework base name only.
 func (f *Framework) CreateNamespace(ctx context.Context, suffix string) string {
 	name := f.UniqueName(suffix)
-	_, err := client.Namespaces(f.Client).Create(ctx, &api.Namespace{ObjectMeta: api.ObjectMeta{Name: name}})
+	_, err := client.Namespaces(f.Client).Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})
 	ExpectNoError(err, "create namespace %s", name)
 	ginkgo.DeferCleanup(f.DeleteNamespace, name)
 	Logf("created namespace %s", name)
@@ -111,7 +112,7 @@ func WaitForClusterReady(ctx context.Context, workers int) {
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		ready := 0
 		for i := range nodes.Items {
-			if api.IsNodeReady(&nodes.Items[i], time.Now()) {
+			if corev1.IsNodeReady(&nodes.Items[i], time.Now()) {
 				ready++
 			}
 		}

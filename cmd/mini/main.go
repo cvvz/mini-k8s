@@ -12,15 +12,16 @@ import (
 	"syscall"
 	"time"
 
-	"mini-k8s/internal/apiserver"
-	"mini-k8s/internal/client"
-	"mini-k8s/internal/controller"
-	"mini-k8s/internal/informer"
-	"mini-k8s/internal/kubelet"
-	"mini-k8s/internal/proxy"
-	"mini-k8s/internal/record"
-	"mini-k8s/internal/scheduler"
-	"mini-k8s/internal/storage"
+	"mini-k8s/pkg/apiserver"
+	"mini-k8s/pkg/client"
+	"mini-k8s/pkg/client/informers"
+	"mini-k8s/pkg/client/record"
+	"mini-k8s/pkg/controller"
+	"mini-k8s/pkg/gateway"
+	"mini-k8s/pkg/kubelet"
+	"mini-k8s/pkg/kubelet/dockershim"
+	"mini-k8s/pkg/scheduler"
+	"mini-k8s/pkg/storage/etcd3"
 )
 
 const usage = "usage: mini apiserver|scheduler|controller-manager|kubelet|proxy|demo"
@@ -54,13 +55,13 @@ func main() {
 		runAPIServer(ctx, token)
 	case "scheduler":
 		rec := record.New(c, "default-scheduler", host)
-		pods := informer.New(client.Pods(c, ""), client.ListOptions{}, 0)
-		nodes := informer.New(client.Nodes(c), client.ListOptions{}, 0)
+		pods := informers.New(client.Pods(c, ""), client.ListOptions{}, 0)
+		nodes := informers.New(client.Nodes(c), client.ListOptions{}, 0)
 		s := scheduler.New(c, pods, nodes, rec)
 		go rec.Run(ctx)
 		go pods.Run(ctx)
 		go nodes.Run(ctx)
-		informer.WaitForSync(ctx, pods.HasSynced, nodes.HasSynced)
+		informers.WaitForSync(ctx, pods.HasSynced, nodes.HasSynced)
 		log.Print("scheduler started")
 		s.Run(ctx)
 	case "controller-manager", "controller":
@@ -68,7 +69,7 @@ func main() {
 	case "kubelet":
 		runKubelet(ctx, c, token)
 	case "proxy":
-		g := proxy.NewGateway(c)
+		g := gateway.NewGateway(c)
 		go g.Run(ctx)
 		serve(ctx, ":8080", g)
 	default:
@@ -91,7 +92,7 @@ func serve(ctx context.Context, addr string, handler http.Handler) {
 }
 
 func runAPIServer(ctx context.Context, token string) {
-	s := apiserver.New(apiserver.Config{Store: storage.New(env("MINI_ETCD", "http://etcd:2379")), Token: token})
+	s := apiserver.New(apiserver.Config{Store: etcd3.New(env("MINI_ETCD", "http://etcd:2379")), Token: token})
 	for {
 		err := s.Bootstrap(ctx)
 		if err == nil {
@@ -109,9 +110,9 @@ func runAPIServer(ctx context.Context, token string) {
 
 func runControllerManager(ctx context.Context, c *client.Client, host string) {
 	rec := record.New(c, "controller-manager", host)
-	pods := informer.New(client.Pods(c, ""), client.ListOptions{}, 30*time.Second)
-	deployments := informer.New(client.Deployments(c, ""), client.ListOptions{}, 30*time.Second)
-	namespaces := informer.New(client.Namespaces(c), client.ListOptions{}, 30*time.Second)
+	pods := informers.New(client.Pods(c, ""), client.ListOptions{}, 30*time.Second)
+	deployments := informers.New(client.Deployments(c, ""), client.ListOptions{}, 30*time.Second)
+	namespaces := informers.New(client.Namespaces(c), client.ListOptions{}, 30*time.Second)
 	dc := controller.NewDeploymentController(c, deployments, pods, rec)
 	nc := controller.NewNamespaceController(c, namespaces)
 	gc := controller.NewGarbageCollector(c, controller.GCResources())
@@ -119,7 +120,7 @@ func runControllerManager(ctx context.Context, c *client.Client, host string) {
 	for _, run := range []func(context.Context){pods.Run, deployments.Run, namespaces.Run} {
 		go run(ctx)
 	}
-	informer.WaitForSync(ctx, pods.HasSynced, deployments.HasSynced, namespaces.HasSynced)
+	informers.WaitForSync(ctx, pods.HasSynced, deployments.HasSynced, namespaces.HasSynced)
 	go nc.Run(ctx, 2)
 	go gc.Run(ctx)
 	log.Print("controller-manager started")
@@ -131,7 +132,7 @@ func runKubelet(ctx context.Context, c *client.Client, token string) {
 	if node == "" {
 		log.Fatal("MINI_NODE is required")
 	}
-	rt, err := kubelet.NewRuntime("/var/run/docker.sock", env("MINI_CLUSTER", "mini-k8s"), node, env("MINI_NETWORK", "mini-k8s"))
+	rt, err := dockershim.NewRuntime("/var/run/docker.sock", env("MINI_CLUSTER", "mini-k8s"), node, env("MINI_NETWORK", "mini-k8s"))
 	if err != nil {
 		log.Fatal(err)
 	}

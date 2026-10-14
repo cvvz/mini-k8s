@@ -13,8 +13,11 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"mini-k8s/internal/api"
-	"mini-k8s/internal/client"
+	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/client"
+	"mini-k8s/pkg/scheme"
 )
 
 func newTabWriter(w io.Writer) *tabwriter.Writer { return tabwriter.NewWriter(w, 0, 8, 3, ' ', 0) }
@@ -31,10 +34,10 @@ type tableOptions struct {
 type column struct {
 	header string
 	wide   bool
-	value  func(obj api.Object, now time.Time) string
+	value  func(obj metav1.Object, now time.Time) string
 }
 
-func age(t api.Time, now time.Time) string {
+func age(t metav1.Time, now time.Time) string {
 	if t.IsZero() {
 		return "<unknown>"
 	}
@@ -63,15 +66,15 @@ func humanDuration(d time.Duration) string {
 }
 
 func nameColumn() column {
-	return column{header: "NAME", value: func(o api.Object, _ time.Time) string { return o.GetObjectMeta().Name }}
+	return column{header: "NAME", value: func(o metav1.Object, _ time.Time) string { return o.GetObjectMeta().Name }}
 }
 
 func ageColumn() column {
-	return column{header: "AGE", value: func(o api.Object, now time.Time) string { return age(o.GetObjectMeta().CreationTimestamp, now) }}
+	return column{header: "AGE", value: func(o metav1.Object, now time.Time) string { return age(o.GetObjectMeta().CreationTimestamp, now) }}
 }
 
 // PodStatusReason summarises a Pod the way kubectl's STATUS column does.
-func PodStatusReason(p *api.Pod) string {
+func PodStatusReason(p *corev1.Pod) string {
 	if p.DeletionTimestamp != nil {
 		return "Terminating"
 	}
@@ -88,12 +91,12 @@ func PodStatusReason(p *api.Pod) string {
 		}
 	}
 	if reason == "" {
-		reason = api.PodPending
+		reason = corev1.PodPending
 	}
 	return reason
 }
 
-func podReadyCount(p *api.Pod) string {
+func podReadyCount(p *corev1.Pod) string {
 	ready := 0
 	for _, cs := range p.Status.ContainerStatuses {
 		if cs.Ready {
@@ -103,7 +106,7 @@ func podReadyCount(p *api.Pod) string {
 	return fmt.Sprintf("%d/%d", ready, len(p.Spec.Containers))
 }
 
-func podRestarts(p *api.Pod) string {
+func podRestarts(p *corev1.Pod) string {
 	n := int32(0)
 	for _, cs := range p.Status.ContainerStatuses {
 		n += cs.RestartCount
@@ -118,9 +121,9 @@ func orNone(s string) string {
 	return s
 }
 
-func nodeStatus(n *api.Node, now time.Time) string {
+func nodeStatus(n *corev1.Node, now time.Time) string {
 	s := "NotReady"
-	if api.IsNodeReady(n, now) {
+	if corev1.IsNodeReady(n, now) {
 		s = "Ready"
 	}
 	if n.Spec.Unschedulable {
@@ -129,7 +132,7 @@ func nodeStatus(n *api.Node, now time.Time) string {
 	return s
 }
 
-func servicePorts(s *api.Service) string {
+func servicePorts(s *corev1.Service) string {
 	var parts []string
 	for _, p := range s.Spec.Ports {
 		parts = append(parts, fmt.Sprintf("%d->%d/%s", p.Port, p.TargetPort, p.Protocol))
@@ -150,89 +153,91 @@ func labelsString(m map[string]string) string {
 	return strings.Join(parts, ",")
 }
 
-func columnsFor(res api.ResourceInfo) []column {
+func columnsFor(res scheme.ResourceInfo) []column {
 	switch res.Resource {
-	case api.Pods.Resource:
+	case scheme.Pods.Resource:
 		return []column{nameColumn(),
-			{header: "READY", value: func(o api.Object, _ time.Time) string { return podReadyCount(o.(*api.Pod)) }},
-			{header: "STATUS", value: func(o api.Object, _ time.Time) string { return PodStatusReason(o.(*api.Pod)) }},
-			{header: "RESTARTS", value: func(o api.Object, _ time.Time) string { return podRestarts(o.(*api.Pod)) }},
+			{header: "READY", value: func(o metav1.Object, _ time.Time) string { return podReadyCount(o.(*corev1.Pod)) }},
+			{header: "STATUS", value: func(o metav1.Object, _ time.Time) string { return PodStatusReason(o.(*corev1.Pod)) }},
+			{header: "RESTARTS", value: func(o metav1.Object, _ time.Time) string { return podRestarts(o.(*corev1.Pod)) }},
 			ageColumn(),
-			{header: "IP", wide: true, value: func(o api.Object, _ time.Time) string { return orNone(o.(*api.Pod).Status.PodIP) }},
-			{header: "NODE", wide: true, value: func(o api.Object, _ time.Time) string { return orNone(o.(*api.Pod).Spec.NodeName) }},
+			{header: "IP", wide: true, value: func(o metav1.Object, _ time.Time) string { return orNone(o.(*corev1.Pod).Status.PodIP) }},
+			{header: "NODE", wide: true, value: func(o metav1.Object, _ time.Time) string { return orNone(o.(*corev1.Pod).Spec.NodeName) }},
 		}
-	case api.Deployments.Resource:
+	case scheme.Deployments.Resource:
 		return []column{nameColumn(),
-			{header: "READY", value: func(o api.Object, _ time.Time) string {
-				d := o.(*api.Deployment)
+			{header: "READY", value: func(o metav1.Object, _ time.Time) string {
+				d := o.(*appsv1.Deployment)
 				return fmt.Sprintf("%d/%d", d.Status.ReadyReplicas, *d.Spec.Replicas)
 			}},
-			{header: "UP-TO-DATE", value: func(o api.Object, _ time.Time) string { return fmt.Sprint(o.(*api.Deployment).Status.UpdatedReplicas) }},
-			{header: "AVAILABLE", value: func(o api.Object, _ time.Time) string {
-				return fmt.Sprint(o.(*api.Deployment).Status.AvailableReplicas)
+			{header: "UP-TO-DATE", value: func(o metav1.Object, _ time.Time) string {
+				return fmt.Sprint(o.(*appsv1.Deployment).Status.UpdatedReplicas)
+			}},
+			{header: "AVAILABLE", value: func(o metav1.Object, _ time.Time) string {
+				return fmt.Sprint(o.(*appsv1.Deployment).Status.AvailableReplicas)
 			}},
 			ageColumn(),
-			{header: "CONTAINERS", wide: true, value: func(o api.Object, _ time.Time) string {
+			{header: "CONTAINERS", wide: true, value: func(o metav1.Object, _ time.Time) string {
 				var names []string
-				for _, c := range o.(*api.Deployment).Spec.Template.Spec.Containers {
+				for _, c := range o.(*appsv1.Deployment).Spec.Template.Spec.Containers {
 					names = append(names, c.Name)
 				}
 				return strings.Join(names, ",")
 			}},
-			{header: "IMAGES", wide: true, value: func(o api.Object, _ time.Time) string {
+			{header: "IMAGES", wide: true, value: func(o metav1.Object, _ time.Time) string {
 				var images []string
-				for _, c := range o.(*api.Deployment).Spec.Template.Spec.Containers {
+				for _, c := range o.(*appsv1.Deployment).Spec.Template.Spec.Containers {
 					images = append(images, c.Image)
 				}
 				return strings.Join(images, ",")
 			}},
-			{header: "SELECTOR", wide: true, value: func(o api.Object, _ time.Time) string {
-				sel, _ := o.(*api.Deployment).Spec.Selector.AsSelector()
+			{header: "SELECTOR", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				sel, _ := o.(*appsv1.Deployment).Spec.Selector.AsSelector()
 				return sel.String()
 			}},
 		}
-	case api.Services.Resource:
+	case scheme.Services.Resource:
 		return []column{nameColumn(),
-			{header: "SELECTOR", value: func(o api.Object, _ time.Time) string { return labelsString(o.(*api.Service).Spec.Selector) }},
-			{header: "PORT(S)", value: func(o api.Object, _ time.Time) string { return servicePorts(o.(*api.Service)) }},
+			{header: "SELECTOR", value: func(o metav1.Object, _ time.Time) string { return labelsString(o.(*corev1.Service).Spec.Selector) }},
+			{header: "PORT(S)", value: func(o metav1.Object, _ time.Time) string { return servicePorts(o.(*corev1.Service)) }},
 			ageColumn(),
 		}
-	case api.Nodes.Resource:
+	case scheme.Nodes.Resource:
 		return []column{nameColumn(),
-			{header: "STATUS", value: func(o api.Object, now time.Time) string { return nodeStatus(o.(*api.Node), now) }},
-			{header: "ROLES", value: func(api.Object, time.Time) string { return "worker" }},
+			{header: "STATUS", value: func(o metav1.Object, now time.Time) string { return nodeStatus(o.(*corev1.Node), now) }},
+			{header: "ROLES", value: func(metav1.Object, time.Time) string { return "worker" }},
 			ageColumn(),
-			{header: "VERSION", value: func(o api.Object, _ time.Time) string { return o.(*api.Node).Status.NodeInfo.KubeletVersion }},
-			{header: "INTERNAL-IP", wide: true, value: func(o api.Object, _ time.Time) string { return orNone(o.(*api.Node).InternalIP()) }},
-			{header: "CONTAINER-RUNTIME", wide: true, value: func(o api.Object, _ time.Time) string {
-				return o.(*api.Node).Status.NodeInfo.ContainerRuntimeVersion
+			{header: "VERSION", value: func(o metav1.Object, _ time.Time) string { return o.(*corev1.Node).Status.NodeInfo.KubeletVersion }},
+			{header: "INTERNAL-IP", wide: true, value: func(o metav1.Object, _ time.Time) string { return orNone(o.(*corev1.Node).InternalIP()) }},
+			{header: "CONTAINER-RUNTIME", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return o.(*corev1.Node).Status.NodeInfo.ContainerRuntimeVersion
 			}},
 		}
-	case api.Namespaces.Resource:
+	case scheme.Namespaces.Resource:
 		return []column{nameColumn(),
-			{header: "STATUS", value: func(o api.Object, _ time.Time) string { return o.(*api.Namespace).Status.Phase }},
+			{header: "STATUS", value: func(o metav1.Object, _ time.Time) string { return o.(*corev1.Namespace).Status.Phase }},
 			ageColumn(),
 		}
-	case api.Events.Resource:
+	case scheme.Events.Resource:
 		return []column{
-			{header: "LAST SEEN", value: func(o api.Object, now time.Time) string { return age(o.(*api.Event).LastTimestamp, now) }},
-			{header: "TYPE", value: func(o api.Object, _ time.Time) string { return o.(*api.Event).Type }},
-			{header: "REASON", value: func(o api.Object, _ time.Time) string { return o.(*api.Event).Reason }},
-			{header: "OBJECT", value: func(o api.Object, _ time.Time) string {
-				ref := o.(*api.Event).InvolvedObject
+			{header: "LAST SEEN", value: func(o metav1.Object, now time.Time) string { return age(o.(*corev1.Event).LastTimestamp, now) }},
+			{header: "TYPE", value: func(o metav1.Object, _ time.Time) string { return o.(*corev1.Event).Type }},
+			{header: "REASON", value: func(o metav1.Object, _ time.Time) string { return o.(*corev1.Event).Reason }},
+			{header: "OBJECT", value: func(o metav1.Object, _ time.Time) string {
+				ref := o.(*corev1.Event).InvolvedObject
 				return strings.ToLower(ref.Kind) + "/" + ref.Name
 			}},
-			{header: "COUNT", wide: true, value: func(o api.Object, _ time.Time) string { return fmt.Sprint(o.(*api.Event).Count) }},
-			{header: "MESSAGE", value: func(o api.Object, _ time.Time) string { return o.(*api.Event).Message }},
+			{header: "COUNT", wide: true, value: func(o metav1.Object, _ time.Time) string { return fmt.Sprint(o.(*corev1.Event).Count) }},
+			{header: "MESSAGE", value: func(o metav1.Object, _ time.Time) string { return o.(*corev1.Event).Message }},
 		}
 	}
 	return []column{nameColumn(), ageColumn()}
 }
 
-func printTable(w io.Writer, res api.ResourceInfo, objs []api.Object, o tableOptions) error {
-	if res.Resource == api.Events.Resource {
+func printTable(w io.Writer, res scheme.ResourceInfo, objs []metav1.Object, o tableOptions) error {
+	if res.Resource == scheme.Events.Resource {
 		sort.SliceStable(objs, func(i, j int) bool {
-			return objs[i].(*api.Event).LastTimestamp.Before(objs[j].(*api.Event).LastTimestamp.Time)
+			return objs[i].(*corev1.Event).LastTimestamp.Before(objs[j].(*corev1.Event).LastTimestamp.Time)
 		})
 	}
 	var cols []column
@@ -325,7 +330,7 @@ func indentYAML(v any, prefix string) string {
 	return b.String()
 }
 
-func (a *app) describeObject(ctx context.Context, res api.ResourceInfo, obj api.Object) error {
+func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj metav1.Object) error {
 	m := obj.GetObjectMeta()
 	now := a.now()
 	tw := newTabWriter(a.out)
@@ -336,7 +341,7 @@ func (a *app) describeObject(ctx context.Context, res api.ResourceInfo, obj api.
 	fmt.Fprintf(tw, "Labels:\t%s\n", orNone(labelsString(m.Labels)))
 	fmt.Fprintf(tw, "Annotations:\t%s\n", orNone(labelsString(m.Annotations)))
 	fmt.Fprintf(tw, "CreationTimestamp:\t%s (%s ago)\n", m.CreationTimestamp.Format(time.RFC3339), age(m.CreationTimestamp, now))
-	if ref := api.ControllerOf(m); ref != nil {
+	if ref := metav1.ControllerOf(m); ref != nil {
 		fmt.Fprintf(tw, "Controlled By:\t%s/%s\n", ref.Kind, ref.Name)
 	}
 	if len(m.Finalizers) > 0 {
@@ -346,14 +351,14 @@ func (a *app) describeObject(ctx context.Context, res api.ResourceInfo, obj api.
 		fmt.Fprintf(tw, "Terminating:\tsince %s (grace %ds)\n", m.DeletionTimestamp.Format(time.RFC3339), *m.DeletionGracePeriodSeconds)
 	}
 	switch o := obj.(type) {
-	case *api.Pod:
+	case *corev1.Pod:
 		fmt.Fprintf(tw, "Node:\t%s\n", orNone(o.Spec.NodeName))
 		fmt.Fprintf(tw, "Status:\t%s\n", PodStatusReason(o))
 		fmt.Fprintf(tw, "IP:\t%s\n", orNone(o.Status.PodIP))
-	case *api.Deployment:
+	case *appsv1.Deployment:
 		fmt.Fprintf(tw, "Replicas:\t%d desired | %d updated | %d total | %d available | %d unavailable\n",
 			*o.Spec.Replicas, o.Status.UpdatedReplicas, o.Status.Replicas, o.Status.AvailableReplicas, o.Status.UnavailableReplicas)
-	case *api.Node:
+	case *corev1.Node:
 		fmt.Fprintf(tw, "Status:\t%s\n", nodeStatus(o, now))
 		fmt.Fprintf(tw, "InternalIP:\t%s\n", orNone(o.InternalIP()))
 	}
@@ -368,12 +373,12 @@ func (a *app) describeObject(ctx context.Context, res api.ResourceInfo, obj api.
 			fmt.Fprintf(a.out, "%s%s:\n%s", strings.ToUpper(section[:1]), section[1:], indentYAML(v, "  "))
 		}
 	}
-	if res.Resource == api.Events.Resource {
+	if res.Resource == scheme.Events.Resource {
 		return nil
 	}
 	ns := m.Namespace
 	if ns == "" {
-		ns = api.NamespaceDefault
+		ns = corev1.NamespaceDefault
 	}
 	events, err := client.Events(a.client, ns).List(ctx, client.ListOptions{FieldSelector: "involvedObject.uid=" + m.UID})
 	if err != nil {
