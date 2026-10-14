@@ -239,19 +239,20 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M0 | Engineering baseline, Linux docs | ✅ |
 | E2E | Ginkgo e2e framework | ✅ |
 | M1 | API machinery: Kubernetes-style REST, namespaces, watch, informers/work queues, GC, graceful deletion, events | ✅ |
-| M2 | Pods and kubelet: CRI-shaped runtime interface, pause sandbox, multiple and init containers, probes, resource limits, exec | planned |
-| M3 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system | planned |
-| M4 | ReplicaSets, rolling updates and rollbacks | planned |
-| M5 | ClusterIP, Endpoints, kube-proxy, DNS, NodePort, Ingress | planned |
-| M6 | Scheduling framework, node leases and eviction, taints, cordon/drain | planned |
-| M7 | ConfigMaps, Secrets, volumes, PVCs | planned |
-| M8 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
-| optional | kind-style nodes: containerd + CRI inside each node, home-grown host-gw CNI | not scheduled |
+| M2 | kind-style nodes: containerd inside each node, kubelet managing Pods over CRI, home-grown CNI (host-gw routing) | planned |
+| M3 | Pods and kubelet: multiple and init containers, probes, resource limits, exec | planned |
+| M4 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system | planned |
+| M5 | ReplicaSets, rolling updates and rollbacks | planned |
+| M6 | ClusterIP, Endpoints, iptables kube-proxy, DNS, NodePort, Ingress | planned |
+| M7 | Scheduling framework, node leases and eviction, taints, cordon/drain | planned |
+| M8 | ConfigMaps, Secrets, volumes, PVCs | planned |
+| M9 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
 - [M1 API machinery plan (Chinese)](docs/superpowers/plans/2026-10-14-m1-api-machinery.md)
+- [kind-style node feasibility spike (Chinese)](docs/superpowers/spikes/2026-10-15-kind-node-spike.md): verified recipe for containerd in node containers, CRI and host-gw networking
 - [M0 baseline plan (Chinese)](docs/superpowers/plans/2026-10-14-m0-baseline.md)
 - [v1 design specification](docs/superpowers/specs/2026-10-14-mini-k8s-design.md) and
   [v1 implementation plan](docs/superpowers/plans/2026-10-14-mini-k8s-plan.md) (Chinese):

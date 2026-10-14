@@ -17,73 +17,80 @@ v2 的目标是在**保持自研、可读、可在单机运行**的前提下，�
 | API 机制 | K8s 风格 REST、命名空间、通用元数据、Watch、乐观并发、优雅删除、finalizer、ownerReferences 与级联删除、Events |
 | 控制器 | Informer + WorkQueue 事件驱动；ReplicaSet、Deployment 滚动更新/回滚、DaemonSet、Job、CronJob、StatefulSet、Endpoints、GC、Namespace、节点生命周期 |
 | 调度 | Filter/Score 插件、资源感知、nodeSelector/亲和性、污点与容忍、binding 子资源、失败原因与事件 |
-| 节点 | 多容器 Pod（pause 沙箱）、init 容器、重启策略、探针、资源限制、优雅终止、日志/exec、节点租约 |
-| 网络 | 多 Service、ClusterIP、Endpoints、kube-proxy、集群 DNS、NodePort、Headless、Ingress |
+| 节点 | kind 式节点（节点内 containerd，kubelet 经 CRI 管理 Pod）；多容器 Pod、init 容器、重启策略、探针、资源限制、优雅终止、日志/exec、节点租约；static Pod 自托管控制面 |
+| 网络 | 自研 CNI（host-gw 跨节点路由）；多 Service、ClusterIP、Endpoints、iptables kube-proxy、集群 DNS、NodePort、Headless、Ingress |
 | 配置与存储 | ConfigMap、Secret、emptyDir、PVC/PV 动态供给 |
 | CLI | `kk` 覆盖 get/describe/apply/delete/logs/exec/scale/rollout/top/cordon/drain/node 故障注入等 |
 
 ## 2. 已确认的关键决策
 
-1. **节点模型**：保留“多个 kubelet 共享宿主 Docker Engine、以标签划分逻辑节点”。
-   补齐节点租约、NotReady 判定、污点驱逐、可配置 worker 数，以及 `kk node stop|start`
-   故障注入（同时停止该节点 kubelet 与其业务容器，模拟整机掉电）。默认不做 DinD/自研 CNI；
-   kind 式节点作为可选方向保留在 §14，暂不排期。
+1. **节点模型（2026-10-15 修订）**：M1 及以前是“多个 kubelet 共享宿主 Docker Engine、以标签
+   划分的逻辑节点”。经可行性验证（[spike 报告](../spikes/2026-10-15-kind-node-spike.md)），
+   **M2 改为 kind 式节点**：每个节点是一个 privileged 容器，内含自己的 containerd 与 kubelet，
+   Pod 由节点内 containerd 经 CRI 创建，Pod 网络由自研 CNI（`mini-cni` + host-gw 路由）提供。
+   M2 完成后逻辑节点模式退役，不长期维护两套运行时与网络实现。节点故障即停止节点容器，
+   无需再模拟。
 2. **API 形态**：K8s 风格 REST 路径和对象结构，`kk` 是唯一受支持客户端，不承诺 `kubectl`
    兼容。
 3. **严格子集**：继续拒绝未知字段。每种资源只实现文档列出的字段，宁可报错，不静默忽略。
-4. **仅可信本地实验**：单一 bearer token、无 TLS；kubelet 与 kube-proxy 挂载 Docker socket。
+4. **仅可信本地实验**：单一 bearer token、无 TLS；节点容器以 privileged 运行（与 kind 相同），
+   等同于拥有宿主 Docker 主机的高权限。
 5. **验证环境**：Linux（WSL2 Ubuntu 24.04 + Docker Engine 29）。文档只给 Linux 命令。
    语义拿不准时，在真实 AKS 集群（`kubectl`，context `testaks`）上对照实测，或查阅
    Kubernetes 文档与源码；实测只在临时命名空间中进行，用完即删。
-6. **控制面自托管（2026-10-15 确认）**：仿 kubeadm，M2 之后紧接着实现（M3，见 §12.2）。
-   etcd、kube-apiserver、kube-controller-manager、kube-scheduler 作为 `control-plane` 节点上的
-   static Pod 运行在 `kube-system`，网关等插件也迁入 `kube-system`；Compose 最终只启动各节点的
-   kubelet（相当于每台机器上用 systemd 启动 kubelet）。
-7. **运行时边界**：M2 起 kubelet 通过 CRI 形状的内部接口（RunPodSandbox、CreateContainer、
-   ContainerStatus、ExecSync 等）访问运行时，当前唯一实现基于 Docker（相当于 dockershim）。
-   这样 kind 式节点（§14）若将来启动，只需新增 containerd CRI 实现。
+6. **控制面自托管（2026-10-15 确认）**：仿 kubeadm，在 kind 式节点（M2）与 Pod 能力（M3）之后
+   实现（M4，见 §12.2）。etcd、kube-apiserver、kube-controller-manager、kube-scheduler 作为
+   `control-plane` 节点上的 static Pod 运行在 `kube-system`，网关等插件也迁入 `kube-system`；
+   Compose 最终只启动节点容器（相当于每台机器上用 systemd 启动 containerd 与 kubelet）。
+7. **运行时边界**：M2 起 kubelet 只通过 CRI（gRPC，`k8s.io/cri-api`）访问节点内 containerd，
+   与真实 kubelet 相同；为此接受 `google.golang.org/grpc` 与 `k8s.io/cri-api` 两个依赖。
+   kubelet 内部以 CRI 形状的接口封装运行时，单元测试使用假 CRI 实现。
 
 ## 3. 拓扑
 
+### 3.0 M2（kind 式节点）之后、M4 之前
+
 ```text
-                         kk (宿主机)
-                            │ HTTP + Bearer token
-                            ▼ 127.0.0.1:18000
- etcd ◀──────────────── kube-apiserver ◀───────────────────────────────┐
-                            ▲  list/watch/write                        │
-     ┌──────────────┬───────┴──────┬───────────────┬──────────────┐    │
- scheduler  controller-manager  kubelet × N   kube-proxy      cluster-dns │
-                                  │ docker.sock   │ docker.sock   10.244.128.10
-                                  ▼               ▼                      │
-                       Pod 沙箱 + 业务容器   每个 Service 一个代理容器   │
-                                                  (持有 ClusterIP)        │
-                       ingress-controller ── 127.0.0.1:18080 ───────────┘
+WSL2 / Linux 宿主机
+ └─ Docker Engine ── 网络 mini-k8s（节点与控制面容器所在的“机房网络”）
+     ├─ etcd / kube-apiserver / scheduler / controller-manager / gateway   Compose 容器（M4 前过渡）
+     ├─ worker-1  privileged 节点容器
+     │    ├─ mini node-init → containerd + kubelet
+     │    └─ cni0 网桥 10.244.1.0/24 ── Pod（pause 沙箱 + 业务容器，由 containerd 经 CRI 创建）
+     └─ worker-2  privileged 节点容器
+          ├─ mini node-init → containerd + kubelet
+          └─ cni0 网桥 10.244.2.0/24 ── Pod
+   跨节点：每个节点上有“去往其他节点 Pod 网段 via 该节点地址”的 host-gw 路由
 ```
 
-- 所有组件是同一个二进制 `mini` 的不同角色，镜像 `mini-k8s:local`（`FROM scratch`）。
-- 专用 Docker 网络 `mini-k8s`：子网 `10.244.0.0/16`；Docker 动态分配段 `10.244.0.0/17`
-  （控制面与 Pod）；Service ClusterIP 段 `10.244.128.0/17`，由 API Server 分配；
-  集群 DNS 固定 `10.244.128.10`。
-- worker 数量由 `kk cluster up --workers N` 决定（默认 2），Compose 服务 `worker` 按 N 扩展，
-  kubelet 从自身容器名推导节点名 `worker-1..N`。
-- 对宿主机只发布：API `127.0.0.1:18000`、Ingress `127.0.0.1:18080`、
-  NodePort `127.0.0.1:30000-32767`。
+- 所有 Go 组件是同一个二进制 `mini` 的不同角色。镜像：`mini-k8s:local`（`FROM scratch`，
+  控制面与 demo 应用）、`mini-k8s-node:local`（基于 Ubuntu 24.04，含 containerd、runc、iptables、
+  iproute2、`mini`）、`mini-k8s-pause:local`（`/mini pause`）、etcd 镜像。
+- 地址规划：节点与控制面容器使用 Docker 网络 `mini-k8s` 的地址；Pod 网段 `10.244.0.0/16`，
+  每个节点一个 `/24`（node IPAM 控制器写入 `Node.spec.podCIDR`）；Service 网段 `10.96.0.0/12`
+  （M6 起，由 kube-proxy 在每个节点内用 iptables 实现，不占用 Docker 地址）；集群 DNS `10.96.0.10`。
+- worker 数量由 `kk cluster up --workers N` 决定（默认 2），节点名 `worker-1..N`。
+- M4 之前网关仍是 Compose 容器，需要 `NET_ADMIN` 并运行同一套 host-gw 路由代理才能访问 Pod IP。
+- 对宿主机只发布：API `127.0.0.1:18000`、网关/Ingress `127.0.0.1:18080`，M6 起 NodePort 经节点
+  容器发布到 `127.0.0.1`。
+- 本地镜像（`mini-k8s:local`、pause、etcd 等）在 `cluster up` 时导入每个节点的 containerd；
+  `kk image load IMAGE` 用于导入用户自己构建的镜像（同 `kind load docker-image`）。
 
-### 3.1 控制面自托管后的拓扑（M3 起）
+### 3.1 控制面自托管后的拓扑（M4 起）
 
 ```text
 WSL2 / Linux 宿主机
  └─ Docker Engine
-     ├─ control-plane   节点容器：kubelet（发布 127.0.0.1:18000 → apiserver）
-     │    └─ static Pod（hostNetwork，共享节点容器的网络命名空间），mirror Pod 位于 kube-system：
+     ├─ control-plane   节点容器：containerd + kubelet（发布 127.0.0.1:18000 → apiserver）
+     │    └─ static Pod（hostNetwork，即节点容器自身的网络），mirror Pod 位于 kube-system：
      │         etcd-control-plane / kube-apiserver-control-plane /
      │         kube-controller-manager-control-plane / kube-scheduler-control-plane
-     ├─ worker-1 … N    节点容器：kubelet
-     └─ 业务容器、kube-system 插件（网关、后续的 kube-proxy、DNS）——均由各节点 kubelet 创建
+     ├─ worker-1 … N    节点容器：containerd + kubelet
+     └─ 业务 Pod、kube-system 插件（网关、kube-proxy、DNS）——均在节点内由 kubelet 经 CRI 创建
 ```
 
 - Compose 只定义节点：`control-plane` 与 `worker`（按 `--workers N` 扩展）。节点容器像一台机器，
-  kubelet 是其中唯一的常驻进程，不能也不需要以 Pod 形式运行。
+  containerd 与 kubelet 是其中的常驻进程，kubelet 不能也不需要以 Pod 形式运行。
 - `kk cluster up` 生成 static Pod 清单（含 token）写入 `.mini-k8s/manifests/`（0600），以只读
   bind mount 挂进 control-plane 节点，等价于 kubeadm 的 `/etc/kubernetes/manifests`。
 - `control-plane` 节点带 `node-role.kubernetes.io/control-plane:NoSchedule` 污点，业务 Pod
@@ -194,47 +201,60 @@ API Server 内置的准入链：命名空间存在且未终止 → 默认值 →
 
 ## 8. kubelet
 
+kubelet 运行在节点容器内，经 Unix socket 以 CRI gRPC 调用同一节点内的 containerd（M2 起）。
+
 - 只 watch `spec.nodeName=自己` 的 Pod；每个 Pod 一个 worker goroutine，慢操作（拉镜像）
   不阻塞其他 Pod。
-- 沙箱：每个 Pod 先创建 pause 容器（`/mini pause`）加入集群网络，设置 hostname、集群 DNS
-  与搜索域；业务容器使用 `container:<pause>` 网络模式共享网络命名空间，Pod IP 即沙箱 IP。
-- 容器命名沿用 dockershim 风格 `k8s_{container}_{pod}_{ns}_{uid}_{restartCount}`，
-  每次重启创建新容器并保留上一个，以支持 `logs --previous`。
-- init 容器按序运行至成功；`restartPolicy` Always/OnFailure/Never；退避 1s 起翻倍、上限 30s。
+- 沙箱：`RunPodSandbox` 由 containerd 创建 pause 容器与网络命名空间并调用 CNI；kubelet 在
+  `PodSandboxConfig` 中给出 hostname、DNS（集群 DNS 与搜索域，M6 起）、端口映射与
+  `hostNetwork`。Pod IP 来自 `PodSandboxStatus`。pause 镜像为本地构建的 `mini-k8s-pause:local`。
+- 容器：`CreateContainer`/`StartContainer`，CRI 元数据中的 `attempt` 即重启次数；每次重启创建
+  新容器并保留上一个，以支持 `logs --previous`。日志由 containerd 写入
+  `/var/log/pods/{ns}_{pod}_{uid}/{container}/{attempt}.log`（CRI 日志格式），kubelet 读取文件
+  提供 logs/follow/tail。
+- init 容器按序运行至成功；`restartPolicy` Always/OnFailure/Never；退避 1s 起翻倍、上限 30s（M3）。
 - 状态：Pod phase、conditions（PodScheduled/Initialized/ContainersReady/Ready）、
   每个容器的 state/lastState/ready/restartCount；**只在变化时写 status**。
-- 探针：liveness/readiness/startup，支持 httpGet、tcpSocket、exec。
-- 资源：limits → Docker `Memory`/`NanoCpus`，requests.cpu → `CpuShares`；记录 OOMKilled。
-- 卷：emptyDir（Pod 级 Docker volume）、configMap/secret（写入 Pod 级 volume，周期刷新）、
-  persistentVolumeClaim（绑定 PV 对应的 Docker named volume）。
+- 探针：liveness/readiness/startup，支持 httpGet、tcpSocket、exec（`ExecSync`）（M3）。
+- 资源：requests/limits 映射为 CRI `LinuxContainerResources`（cpu shares/quota、memory limit），
+  由 runc 写入 cgroup；记录 OOMKilled（M3）。
+- 卷：emptyDir（节点内 Pod 目录）、hostPath（节点容器的文件系统，节点数据目录在 volume 上，
+  节点重启与 `cluster down/up` 后保留）、configMap/secret（kubelet 写入 Pod 目录后挂载并周期刷新）、
+  persistentVolumeClaim（M8）。
+- `hostNetwork: true` 的 Pod 使用节点容器自身的网络命名空间，即真实的“主机网络”。
 - 节点：注册 capacity/allocatable（`MINI_NODE_CPU`、`MINI_NODE_MEMORY`）、地址、标签；
-  每 2s 续约 `kube-node-lease` 中的 Lease，节点 status 变化或每 10s 更新一次。
+  每 2s 续约 `kube-node-lease` 中的 Lease，节点 status 变化或每 10s 更新一次（M7）。
 - 服务端口 10250：日志（含 follow/previous/tail/container）、exec、指标摘要。
-- 清理：只删除带本集群、本节点标签且不再属于任何 Pod 的容器与 volume。
-- 运行时接口：kubelet 的 Pod 同步逻辑只依赖 CRI 形状的 `RuntimeService` 接口；Docker 实现
-  负责把沙箱映射为 pause 容器、把容器映射为加入其网络命名空间的 Docker 容器。
-- 节点本地资源（为 M3 准备）：`hostNetwork: true` 的 Pod 共享**节点容器**的网络命名空间
-  （`container:<节点容器>`），即逻辑节点的“主机网络”；`hostPath` 卷映射为按“节点名 + 路径”
-  命名的 Docker named volume，即逻辑节点的“本地磁盘”，节点重启与 `cluster down/up` 后保留。
-- static Pod（M3）：kubelet 监视清单目录，不经过 API 直接运行其中的 Pod；API 可用后在 Pod
+- 清理：kubelet 只管理本节点 containerd 中带 CRI Pod 元数据的沙箱与容器；API 中已不存在的
+  Pod 的沙箱在 housekeeping 中停止并删除。节点重启后残留的旧沙箱同样清理后按 API 重新创建。
+- static Pod（M4）：kubelet 监视清单目录，不经过 API 直接运行其中的 Pod；API 可用后在 Pod
   所在命名空间创建 mirror Pod（名称 `<pod>-<node>`，注解 `kubernetes.io/config.mirror`）并
   持续上报其状态。删除 mirror Pod 不会停止 static Pod，kubelet 会重建 mirror Pod；修改或删除
   清单文件才会替换或停止 static Pod。
 
 ## 9. 网络
 
-- **ClusterIP**：API Server 从 `10.244.128.0/17` 分配并持久化在 Service 上。
-- **kube-proxy**：`mini proxy` 为每个有 ClusterIP 的 Service 维护一个代理容器，
-  该容器以静态 IP=ClusterIP 加入集群网络，按 Endpoints 轮询转发 TCP（userspace 模式），
-  支持多端口和 `sessionAffinity: ClientIP`。NodePort 发布到 `127.0.0.1:{nodePort}`。
-  这是因逻辑节点共享网络而做的简化：语义上等价于“任意节点上的 kube-proxy”。
-- **Headless**（`clusterIP: None`）：不创建代理，DNS 直接返回就绪端点 IP。
-- **集群 DNS**：`mini dns` 在 `10.244.128.10:53/udp` 提供
-  `svc.ns.svc.cluster.local`、`hostname.svc.ns.svc.cluster.local`、ExternalName CNAME，
-  其余查询转发给 Docker 内置 DNS。Pod 默认 `ndots:5`，搜索域
+- **Pod 网络（M2）**：
+  - node IPAM 控制器（controller-manager）为每个 Node 分配 `spec.podCIDR`（`10.244.N.0/24`）。
+  - `mini-cni` 是自研 CNI 插件（遵循 CNI 1.0 规范，由 containerd 调用）：创建 veth 对，一端接入
+    节点网桥 `cni0`（网关为网段第一个地址），一端移入 Pod 网络命名空间；在节点网段内分配地址
+    （文件锁保护的 host-local 式分配）；DEL 时回收。kubelet 根据 `podCIDR` 生成 CNI 配置。
+  - host-gw 路由代理（kubelet 内的一个循环）监视 Node 列表，在本节点维护
+    “其他节点 Pod 网段 via 该节点 InternalIP”的路由；对 `10.244.0.0/16 → 集群外` 做 MASQUERADE，
+    Pod 之间通信保留源 IP。节点容器同在一个 Docker 网桥上，下一跳二层直达。
+- **ClusterIP（M6）**：API Server 从 `10.96.0.0/12` 分配并持久化在 Service 上；Endpoints 控制器
+  维护就绪地址。
+- **kube-proxy（M6）**：`kube-system` 中的 DaemonSet（`hostNetwork`，`NET_ADMIN`），在每个节点内
+  用 iptables 实现 ClusterIP 与 NodePort：`KUBE-SERVICES` → `KUBE-SVC-*`（按概率均分）→
+  `KUBE-SEP-*`（DNAT 到 Pod），与真实 kube-proxy 的 iptables 模式一致；支持多端口与
+  `sessionAffinity: ClientIP`。DaemonSet 实现前以 static Pod 过渡。
+- **Headless**（`clusterIP: None`）：不分配 ClusterIP，DNS 直接返回就绪端点 IP。
+- **集群 DNS（M6）**：`mini dns` 以 Deployment 运行在 `kube-system`，Service 固定 ClusterIP
+  `10.96.0.10`；提供 `svc.ns.svc.cluster.local`、`hostname.svc.ns.svc.cluster.local`、
+  ExternalName CNAME，其余查询转发上游。Pod 默认 `ndots:5`，搜索域
   `ns.svc.cluster.local svc.cluster.local cluster.local`。
-- **Ingress**：`mini ingress` 在 `127.0.0.1:18080` 按 host + path（Prefix/Exact，
-  最长匹配）把 HTTP 请求直接转发到 Service 的就绪端点。
+- **Ingress（M6）**：`mini ingress` 在 `127.0.0.1:18080` 按 host + path（Prefix/Exact，
+  最长匹配）把 HTTP 请求转发到 Service 的就绪端点。
 
 ## 10. kk
 
@@ -244,7 +264,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 
 ## 11. 测试策略
 
-- 单元测试：类型/校验/选择器/数量解析、调度插件、控制器纯函数、Docker 运行时（假 Docker HTTP）。
+- 单元测试：类型/校验/选择器/数量解析、调度插件、控制器纯函数、kubelet 运行时（进程内假 CRI gRPC 服务）、CNI 插件（网络命名空间内的实测，需要 root 时跳过）。
 - 组件集成测试：测试辅助程序启动真实 `bin/etcd`（不存在则跳过），在进程内运行 API Server，
   对存储、Watch、删除语义、控制器做黑盒验证。
 - 端到端测试：仿照 Kubernetes `test/e2e` 的 Ginkgo v2 + Gomega 套件（`test/e2e`），
@@ -262,15 +282,15 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M0 ✅ | 工程基线：LF 换行、etcd 压缩、kubelet 仅在变化时写状态、修正 v1 缺陷、Linux 文档 |
 | E2E ✅ | Ginkgo v2 e2e 框架，迁移全部 live 用例（22 个 spec） |
 | M1 ✅ | API 机制重构 + 所有组件迁移到 informer/workqueue；Namespace、Event、GC、优雅删除 |
-| M2 | Pod 与 kubelet：CRI 形状的运行时接口、沙箱、多容器、init、重启策略、探针、资源、logs/exec、hostNetwork、hostPath |
-| M3 | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system |
-| M4 | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout` |
-| M5 | 网络：ClusterIP、Endpoints、kube-proxy、DNS、NodePort、Headless、Ingress |
-| M6 | 调度框架、节点租约与生命周期、污点驱逐、cordon/drain、worker 扩展、故障注入 |
-| M7 | ConfigMap、Secret、卷、PVC/PV |
-| M8 | DaemonSet、Job、CronJob、StatefulSet |
-| M9+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
-| 可选 | kind 式节点：privileged 节点容器 + containerd + CRI + 自研 host-gw CNI（未排期，见 §14） |
+| M2 | kind 式节点：节点镜像与 `mini node-init`、节点内 containerd、kubelet 的 CRI 客户端、`mini-cni` + node IPAM + host-gw 路由、本地镜像导入与自建 pause；退役逻辑节点模式（设计见 §14） |
+| M3 | Pod 与 kubelet：多容器、init 容器、重启策略、探针、资源限制、logs `--previous`、exec、hostNetwork、emptyDir/hostPath |
+| M4 | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system |
+| M5 | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout` |
+| M6 | 网络：ClusterIP、Endpoints、iptables kube-proxy、DNS、NodePort、Headless、Ingress |
+| M7 | 调度框架、节点租约与生命周期、污点驱逐、cordon/drain、worker 扩展 |
+| M8 | ConfigMap、Secret、卷、PVC/PV |
+| M9 | DaemonSet、Job、CronJob、StatefulSet |
+| M10+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
 
 ### 12.1 M1 落地记录与过渡态
 
@@ -279,12 +299,13 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
 
 | 过渡实现 | 替换里程碑 |
 | --- | --- |
-| Deployment 直接拥有 Pod（`pod-template-hash` 标签），模板变化按 Recreate 替换 | M4 ReplicaSet + RollingUpdate |
-| Pod 只允许单容器，kubelet 重启同一个容器 | M2 沙箱与多容器 |
-| 控制面组件与网关由 Compose 直接启动，不在 API 中可见 | M3 控制面自托管 |
-| Service 仍是全局唯一的 HTTP 网关（准入保证），无 ClusterIP | M5 |
-| 节点通过 Node status 的 Ready 条件每 5 秒心跳，消费者按 20 秒新鲜度判断就绪；无 Lease、无驱逐 | M6 |
-| 调度器只按 Pod 数选最少者，遵守 `spec.unschedulable` | M3 加入污点过滤，M6 调度框架 |
+| 逻辑节点：kubelet 经 Docker API 直接管理宿主 Docker 上的容器，所有节点共享一个网桥 | M2 kind 式节点 |
+| Deployment 直接拥有 Pod（`pod-template-hash` 标签），模板变化按 Recreate 替换 | M5 ReplicaSet + RollingUpdate |
+| Pod 只允许单容器，kubelet 重启同一个容器 | M3 多容器与重启语义 |
+| 控制面组件与网关由 Compose 直接启动，不在 API 中可见 | M4 控制面自托管 |
+| Service 仍是全局唯一的 HTTP 网关（准入保证），无 ClusterIP | M6 |
+| 节点通过 Node status 的 Ready 条件每 5 秒心跳，消费者按 20 秒新鲜度判断就绪；无 Lease、无驱逐 | M7 |
+| 调度器只按 Pod 数选最少者，遵守 `spec.unschedulable` | M4 加入污点过滤，M7 调度框架 |
 
 实现中确认的细节：
 
@@ -296,7 +317,7 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
 - 控制器以 expectations 防止 informer 滞后导致的重复创建/删除；缩容优先删除未调度、
   Pending、未就绪、较新的 Pod。
 
-### 12.2 M3 控制面自托管设计要点
+### 12.2 M4 控制面自托管设计要点
 
 参照 kubeadm 与 AKS 实测（AKS 的 kube-system 中有 kube-proxy DaemonSet、coredns 等插件，
 托管控制面不可见；kubeadm 以 static Pod 运行控制面以解决“apiserver 尚未启动、无法通过 API
@@ -306,51 +327,83 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
    五个服务；`kk cluster up` 在 `.mini-k8s/manifests/` 生成四个 static Pod 清单并挂载进该节点。
 2. **kubelet 自举**：清单目录的 Pod 不依赖 API 即可运行；节点注册、mirror Pod、普通 Pod 的
    informer 在 apiserver 就绪前持续重试，互不阻塞。
-3. **静态 Pod 运行方式**：均为 `hostNetwork`（共享 control-plane 节点容器的网络，apiserver
-   监听其上，经节点容器发布到 `127.0.0.1:18000`）；etcd 数据目录为 hostPath，即按节点命名的
-   Docker volume，`cluster down/up` 后保留。镜像沿用本地构建的 `mini-k8s:local` 与 etcd 镜像。
+3. **静态 Pod 运行方式**：均为 `hostNetwork`（即 control-plane 节点容器自身的网络，apiserver
+   监听其上，经节点容器发布到 `127.0.0.1:18000`）；etcd 数据目录为 hostPath
+   `/var/lib/etcd`，位于节点的数据 volume 上，`cluster down/up` 后保留。镜像沿用本地构建的
+   `mini-k8s:local` 与 etcd 镜像（`cluster up` 时导入节点）。
 4. **mirror Pod**：名称 `etcd-control-plane` 等，位于 `kube-system`，带 `kubernetes.io/config.mirror`
    注解与指向 Node 的 ownerReference；status 由 kubelet 上报。API 拒绝更新 mirror Pod 的 spec；
    删除后由 kubelet 重建。
 5. **污点**：引入 `spec.taints` 与 Pod `spec.tolerations` 的最小子集（NoSchedule/NoExecute 的
    Equal/Exists 匹配），调度器过滤不容忍的节点；control-plane 节点注册时自带
-   `node-role.kubernetes.io/control-plane:NoSchedule`。完整的污点驱逐留在 M6。
+   `node-role.kubernetes.io/control-plane:NoSchedule`。完整的污点驱逐留在 M7。
 6. **插件**：HTTP 网关改为 `kube-system` 中容忍 control-plane 污点、固定在 control-plane 节点的
-   Pod（hostNetwork，经节点容器发布 `127.0.0.1:18080`）；M5 的 kube-proxy、DNS 同样部署在
-   `kube-system`，DaemonSet 实现前用 Deployment/static Pod 过渡。
-7. **生命周期**：`cluster down` 先停 worker 与 control-plane 的 kubelet，再清理所有带本集群标签的
-   容器（含 static Pod），最后 Compose down；控制面组件崩溃由 kubelet 按 CrashLoopBackOff 重启。
+   Pod（hostNetwork，经节点容器发布 `127.0.0.1:18080`），不再需要单独的路由代理；M6 的
+   kube-proxy、DNS 同样部署在 `kube-system`，DaemonSet 实现前用 static Pod/Deployment 过渡。
+7. **生命周期**：`cluster down` 停止所有节点容器（节点内的 Pod 随之停止，包括 static Pod），
+   再 Compose down；节点数据 volume 与 token 保留。控制面组件崩溃由 kubelet 按
+   CrashLoopBackOff 重启。
 8. **验收**：`kk get pods -n kube-system` 可见四个控制面组件且 Running；`kk logs -n kube-system
    kube-apiserver-control-plane` 可用；杀死 apiserver 容器后由 kubelet 拉起；删除 mirror Pod 后被
    重建且控制面不中断；业务 Pod 不会调度到 control-plane；`cluster down/up` 保留全部状态。
 
 ## 13. 非目标
 
-kubectl 兼容、CRD/聚合 API、多机器部署、真正的 CNI（见 §14 可选方向）与网络策略、CSI、
+kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
 控制面 TLS 与多租户隔离、生产级性能与可用性承诺。
 
-## 14. 可选方向：kind 式节点（未排期）
+## 14. kind 式节点设计（M2）
 
-**现状与取舍**：逻辑节点共享外层 Docker Engine，Pod 是宿主 Docker 上的平级容器，所有节点共用
-内核、运行时、镜像缓存与同一个 Docker 网桥。容器、重启、日志、网络通信都是真实的；
-节点隔离、节点级故障与 CNI 是逻辑上的。kind 式节点用更多复杂度换取更真实的节点语义。
+2026-10-15 决定由逻辑节点改为 kind 式节点，作为后续里程碑的地基。风险最大的环节已在本地验证
+通过，配方与注意事项见 [可行性验证报告](../spikes/2026-10-15-kind-node-spike.md)。
 
-| | 逻辑节点（现状） | kind 式节点（可选） |
+| | 逻辑节点（M1 及以前） | kind 式节点（M2 起） |
 | --- | --- | --- |
 | 节点 | 只运行 kubelet 的容器 | privileged 容器，运行自己的 containerd + kubelet |
 | kubelet ↔ 运行时 | Docker Engine API（类 dockershim） | CRI gRPC → 节点内 containerd |
 | Pod 所在位置 | 宿主 Docker 上的平级容器 | 嵌套在节点容器内 |
-| Pod 网络 | 同一 Docker 网桥，Docker IPAM 分配 IP | 自研 CNI：每节点一个 Pod 网段（`spec.podCIDR` 由 node IPAM 控制器分配），节点内网桥，跨节点 host-gw 路由，出网 MASQUERADE |
-| Service | 每个 Service 一个代理容器持有 ClusterIP | 每节点 kube-proxy（iptables，DaemonSet，hostNetwork + NET_ADMIN） |
-| 节点故障 | 需 `kk node stop` 模拟 | 停掉节点容器即真实宕机 |
-| 镜像 | 共享宿主镜像缓存 | 需 `kk image load` 导入每个节点（类似 `kind load docker-image`） |
+| Pod 网络 | 同一 Docker 网桥，Docker IPAM 分配 IP | `mini-cni`：每节点一个 Pod 网段，节点内网桥，跨节点 host-gw 路由，出网 MASQUERADE |
+| Service | 单一 HTTP 网关 | 每节点 kube-proxy（iptables，M6） |
+| 节点故障 | 停 kubelet 不影响 Pod | 停掉节点容器即真实宕机 |
+| 镜像 | 共享宿主镜像缓存 | `cluster up` 导入本地镜像；`kk image load` 导入用户镜像 |
 
-**若启动的工作量**：节点镜像（基于发行版镜像，含 containerd、runc、iptables、iproute2，需要
-从镜像仓库拉取基础镜像）；kubelet 的 containerd CRI 实现（引入 gRPC 与 CRI API 依赖）；
-`mini-cni` 插件与 node IPAM 控制器；iptables 版 kube-proxy；DNS 改为 ClusterIP 后面的
-Deployment；`cluster up` 的镜像预加载。预计 4 小时以上，环境风险集中在嵌套 cgroup v2、
-privileged 容器内的 containerd 与跨节点路由。
+### 14.1 节点容器
 
-**排序考量**：若决定实施，最好在网络里程碑（M5）之前完成，否则 kube-proxy 与 DNS 要按两种
-网络模型各做一遍；M2 引入的 CRI 形状运行时接口保证 kubelet 上层逻辑无需返工。实施后逻辑节点
-模式退役，避免长期维护两套网络实现。
+- 镜像 `mini-k8s-node:local`：Ubuntu 24.04 + containerd + runc + iptables + iproute2 + `mini`
+  （含 `mini-cni` 插件入口）。首次构建需要访问 Docker Hub 与 Ubuntu 软件源。
+- 入口 `mini node-init`：在 cgroup v2 下把自身移入 `init.scope` 并向子 cgroup 委派全部
+  controller、`mount --make-rshared /`、开启 `ip_forward`，然后以子进程运行 containerd，
+  等待其 socket 就绪后运行 kubelet；任一子进程退出则整体退出，由 Compose 重启节点。
+- 运行参数：`--privileged --cgroupns=private`、seccomp/apparmor unconfined、`/run` 与 `/tmp`
+  为 tmpfs；`/var` 为每个节点独立的 named volume（containerd 的 overlayfs snapshotter 需要
+  非 overlay 的底层文件系统，且节点数据需跨重启保留）。
+- containerd 配置（v3）：CNI 插件目录与配置目录、`sandbox` 镜像指向 `mini-k8s-pause:local`。
+
+### 14.2 kubelet 与 CRI
+
+- 依赖 `google.golang.org/grpc` 与 `k8s.io/cri-api`，经 `/run/containerd/containerd.sock` 调用
+  RuntimeService 与 ImageService。
+- kubelet 内部定义 CRI 形状的接口，生产实现转发到 containerd，单元测试使用进程内假实现。
+- 节点地址取节点容器在 `mini-k8s` 网络上的 IP；容器运行时版本报告为 `containerd://<version>`。
+- M2 保持 M1 的 Pod 能力（单容器、重启退避、镜像拉取错误、优雅终止、日志），只替换实现；
+  多容器等扩展在 M3。
+
+### 14.3 Pod 网络
+
+- node IPAM 控制器：为没有 `spec.podCIDR` 的 Node 从 `10.244.0.0/16` 分配未使用的 `/24`，
+  `spec.podCIDR` 一经设置不可修改。
+- `mini-cni`：CNI 1.0 插件（ADD/DEL/CHECK/VERSION），从 stdin 读取网络配置、从环境变量读取
+  容器 ID 与网络命名空间路径；创建 `cni0` 网桥与 veth 对、分配地址、设置默认路由，向 stdout
+  返回 CNI 结果。kubelet 在得到 `podCIDR` 后写入 `/etc/cni/net.d/10-mini.conflist`；
+  写入之前节点上报 `NetworkReady=false`，调度器不向其调度 Pod。
+- host-gw 路由代理：kubelet 内的循环，按 Node 列表维护到其他节点 Pod 网段的路由，并确保
+  MASQUERADE 规则存在；M4 之前的网关容器运行同一代理以访问 Pod IP。
+
+### 14.4 集群生命周期与测试
+
+- `kk cluster up`：构建三类本地镜像，Compose 启动控制面容器与节点容器，向每个节点导入
+  `mini-k8s:local` 与 pause 镜像，等待节点 Ready（含 `podCIDR` 已分配、CNI 配置已写入）。
+- `kk cluster down`：停止节点容器后 Compose down；节点 volume、etcd 数据与 token 保留。
+- `kk image load IMAGE...`：`docker save` 后在每个节点 `ctr -n k8s.io images import`。
+- e2e：断言“Pod 有真实运行的容器”改为在节点内经 CRI 查询；新增跨节点 Pod 互通、Pod 源 IP
+  保留、Pod 出网（TCP）、停止节点容器后其 Pod 不可达、`kk image load` 等用例。
