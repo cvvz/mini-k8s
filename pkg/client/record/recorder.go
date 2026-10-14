@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"mini-k8s/pkg/client"
-	metav1 "mini-k8s/pkg/apis/meta/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/client"
 )
 
 // Recorder sends Events asynchronously; it never blocks the caller.

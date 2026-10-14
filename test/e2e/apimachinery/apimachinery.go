@@ -151,9 +151,9 @@ var _ = framework.SIGDescribe("api-machinery", "API server", func() {
 			_, err := client.Namespaces(f.Client).Get(ctx, ns)
 			return client.IsNotFound(err)
 		}).WithTimeout(2 * time.Minute).Should(BeTrue())
-		out, err := framework.Docker(ctx, "ps", "-aq", "--filter", "label=mini.pod.namespace="+ns)
-		framework.ExpectNoError(err)
-		Expect(out).To(BeEmpty(), "containers of the deleted namespace must be removed")
+		Eventually(ctx, func() ([]string, error) {
+			return framework.PodSandboxes(ctx, "io.kubernetes.pod.namespace="+ns)
+		}).WithTimeout(30*time.Second).Should(BeEmpty(), "sandboxes of the deleted namespace must be removed")
 	})
 
 	It("should generate unique names from generateName", func(ctx SpecContext) {

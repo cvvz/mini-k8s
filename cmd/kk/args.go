@@ -36,11 +36,13 @@ var commandFlags = map[string][]flagSpec{
 	"delete": {{long: "filename", short: "f", takesValue: true}, {long: "selector", short: "l", takesValue: true},
 		{long: "grace-period", takesValue: true}, {long: "force"}, {long: "cascade", takesValue: true}, {long: "wait"},
 		{long: "ignore-not-found"}, {long: "all"}},
-	"logs":          {{long: "container", short: "c", takesValue: true}, {long: "follow", short: "f"}, {long: "tail", takesValue: true}},
+	"logs": {{long: "container", short: "c", takesValue: true}, {long: "follow", short: "f"}, {long: "tail", takesValue: true},
+		{long: "previous", short: "p"}},
 	"scale":         {{long: "replicas", takesValue: true}},
 	"api-resources": {},
 	"version":       {},
-	"cluster":       {},
+	"cluster":       {{long: "volumes"}},
+	"image":         {},
 	"help":          {},
 }
 

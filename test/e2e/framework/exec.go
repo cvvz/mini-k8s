@@ -6,7 +6,14 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/onsi/gomega/gbytes"
+
+	corev1 "mini-k8s/pkg/apis/core/v1"
 )
+
+// Workers are the node containers of the cluster.
+var Workers = []string{"worker-1", "worker-2"}
 
 // RunKK runs the project's kk binary from the repository root and returns its
 // combined output.
@@ -40,18 +47,93 @@ func Docker(ctx context.Context, args ...string) (string, error) {
 	return string(out), nil
 }
 
-// PodContainers lists Docker container IDs owned by the given Pod UID.
+// Crictl runs crictl against the containerd inside a node container.
+func Crictl(ctx context.Context, node string, args ...string) (string, error) {
+	return Docker(ctx, append([]string{"exec", ComponentContainer(node), "crictl"}, args...)...)
+}
+
+// PodContainers lists the CRI container IDs of a Pod UID across all nodes.
 func PodContainers(ctx context.Context, podUID string, runningOnly bool) ([]string, error) {
-	args := []string{"ps", "-q", "--filter", "label=mini.cluster=mini-k8s", "--filter", "label=mini.pod=" + podUID}
+	args := []string{"ps", "-q", "--label", "io.kubernetes.pod.uid=" + podUID}
 	if !runningOnly {
 		args = append(args, "-a")
 	}
-	out, err := Docker(ctx, args...)
-	return strings.Fields(out), err
+	return acrossNodes(ctx, args)
 }
 
-// ComponentContainer returns the Compose container name for a control-plane
-// component, e.g. "apiserver" -> "mini-k8s-apiserver-1".
+// PodSandboxes lists the CRI sandbox IDs matching a label across all nodes.
+func PodSandboxes(ctx context.Context, label string) ([]string, error) {
+	return acrossNodes(ctx, []string{"pods", "-q", "--label", label})
+}
+
+func acrossNodes(ctx context.Context, crictlArgs []string) ([]string, error) {
+	var ids []string
+	for _, node := range Workers {
+		out, err := Crictl(ctx, node, crictlArgs...)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, strings.Fields(out)...)
+	}
+	return ids, nil
+}
+
+// ExecInPod runs a command in the Pod's first container, like kubectl exec.
+func ExecInPod(ctx context.Context, pod corev1.Pod, command ...string) (string, error) {
+	return Crictl(ctx, pod.Spec.NodeName, append([]string{"exec", ContainerID(pod)}, command...)...)
+}
+
+// ComponentContainer returns the Compose container name of a service, e.g.
+// "apiserver" -> "mini-k8s-apiserver-1", "worker-1" -> "mini-k8s-worker-1-1".
 func ComponentContainer(component string) string {
 	return "mini-k8s-" + component + "-1"
+}
+
+// PodLogDirs lists a Pod UID's log directories (/var/log/pods/<ns>_<name>_<uid>) across all nodes.
+func PodLogDirs(ctx context.Context, podUID string) ([]string, error) {
+	var dirs []string
+	for _, node := range Workers {
+		out, err := Docker(ctx, "exec", ComponentContainer(node), "sh", "-c", "ls /var/log/pods 2>/dev/null || true")
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range strings.Fields(out) {
+			if strings.HasSuffix(name, "_"+podUID) {
+				dirs = append(dirs, node+":"+name)
+			}
+		}
+	}
+	return dirs, nil
+}
+
+// NodeZombies counts zombie processes in a node container.
+func NodeZombies(ctx context.Context, node string) (int, error) {
+	out, err := Docker(ctx, "exec", ComponentContainer(node), "ps", "-eo", "stat=")
+	zombies := 0
+	for _, stat := range strings.Fields(out) {
+		if strings.HasPrefix(stat, "Z") {
+			zombies++
+		}
+	}
+	return zombies, err
+}
+
+// StartKK runs kk in the background, streaming its combined output into the
+// returned buffer until stop is called (for kk get -w and kk logs -f).
+func StartKK(ctx context.Context, args ...string) (out *gbytes.Buffer, stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	out = gbytes.NewBuffer()
+	cmd := exec.CommandContext(ctx, TestContext.KKPath, args...)
+	cmd.Dir = TestContext.RepoRoot
+	cmd.Stdout, cmd.Stderr = out, out
+	ExpectNoError(cmd.Start())
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	return out, func() {
+		cancel()
+		<-done
+	}
 }

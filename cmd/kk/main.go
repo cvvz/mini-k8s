@@ -22,7 +22,8 @@ func apiURL() string {
 const usage = `kk controls a mini-k8s cluster.
 
 Cluster lifecycle (run from the project root or via its bin/kk):
-  kk cluster up|status|down
+  kk cluster up|status|down [--volumes]   --volumes also deletes etcd data and node disks
+  kk image load IMAGE...                  copy local Docker images into every node
 
 Resources:
   kk get TYPE[,TYPE...] [NAME...] [-o wide|json|yaml|name] [-l SELECTOR] [--field-selector F] [-w]
@@ -32,7 +33,7 @@ Resources:
   kk create namespace NAME
   kk delete -f FILE | TYPE NAME... | TYPE -l SELECTOR | TYPE --all
             [--grace-period N] [--force] [--cascade background|foreground|orphan] [--wait=false]
-  kk logs POD [-c CONTAINER] [-f] [--tail N]
+  kk logs POD [-c CONTAINER] [-f] [--tail N] [-p]
   kk scale deployment NAME --replicas N
   kk api-resources
   kk version
@@ -67,8 +68,11 @@ func execute(ctx context.Context, argv []string) error {
 	if err != nil {
 		return err
 	}
-	if command == "cluster" {
+	switch command {
+	case "cluster":
 		return runCluster(ctx, root, parsed)
+	case "image":
+		return runImage(ctx, root, parsed)
 	}
 	token, err := loadToken(root, false)
 	if err != nil {

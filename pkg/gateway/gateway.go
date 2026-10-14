@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	corev1 "mini-k8s/pkg/apis/core/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/client/informers"
-	corev1 "mini-k8s/pkg/apis/core/v1"
 	"mini-k8s/pkg/labels"
 )
 

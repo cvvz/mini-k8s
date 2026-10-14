@@ -3,9 +3,9 @@
 **English** | [简体中文](README.zh-CN.md)
 
 mini-k8s is a compact Kubernetes written from scratch in Go. It implements its own
-API server, scheduler, controller manager, kubelet, HTTP gateway and a CLI called
-**`kk`**, reusing only etcd for storage and a local Docker Engine to run real
-containers.
+API server, scheduler, controller manager, kubelet, CNI plugin, HTTP gateway and a CLI
+called **`kk`**, reusing only etcd for storage, containerd as the container runtime and a
+local Docker Engine to host the cluster's "machines".
 
 The goal is "small but complete": the core Kubernetes mechanisms — declarative API,
 watch, control loops, scheduling, node agent and cascading deletion — implemented in
@@ -27,32 +27,44 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   (Recreate replacement on template changes, status reporting); garbage collector;
   namespace controller; scheduler binding through the `binding` subresource and
   reporting unschedulable Pods with conditions and events.
-- **kubelet**: node registration and heartbeats; one worker per Pod; real Docker
-  containers; CrashLoopBackOff; image pull errors (ErrImagePull/ImagePullBackOff);
-  per-container status; logs with follow/tail; orphan container cleanup.
+- **Nodes like kind**: each node is a privileged container running its own containerd;
+  the kubelet manages Pods over **CRI** (a sandbox per Pod, then its container);
+  Ready only when the runtime, the Pod network and the sandbox image are ready.
+- **kubelet**: node registration and heartbeats; one worker per Pod; restarts with
+  backoff (CrashLoopBackOff); image pull errors (ErrImagePull/ImagePullBackOff); sandbox
+  recreation after a node restart; logs with follow/tail/`--previous`; orphan cleanup.
+- **Pod network**: the node IPAM controller gives every node a `/24` from `10.244.0.0/16`;
+  a home-grown CNI plugin (`mini-cni`: bridge, veth, IP allocation) wires each Pod; a
+  host-gw route agent connects the nodes' Pod subnets, so Pods reach each other across
+  nodes without NAT; Pods resolve names and reach the outside world through their node.
 - **Observability**: Events (identical events aggregated with a count, expired after one
   hour by an etcd lease); `kk describe` shows an object's events.
 - **kk**: `get` (`-o wide|json|yaml|name`, `-l`, `--field-selector`, `-A`, `-w`),
   `describe`, `apply`/`create` (server-side dry run of the whole batch first), `delete`
-  (`--grace-period`, `--force`, `--cascade`), `logs -f`, `scale`, `api-resources`,
-  `version`, and cluster lifecycle commands.
+  (`--grace-period`, `--force`, `--cascade`), `logs -f/-p`, `scale`, `api-resources`,
+  `version`, cluster lifecycle and `image load` (copy local images into the nodes).
 
 ```text
                          kk
                           │ HTTP + bearer token (127.0.0.1:18000)
                           ▼
-    etcd ◀──────── kube-apiserver ◀─────────── list / watch / write ────────────┐
-                          ▲                                                    │
-       ┌──────────────────┼───────────────────┬───────────────────┐            │
-   scheduler     controller-manager       kubelet × 2          gateway         │
-                 (deployment / gc /        │ docker.sock          │           │
-                  namespace)               ▼                      ▼           │
-                                     workload containers ◀── 127.0.0.1:18080 ──┘
+    etcd ◀──────── kube-apiserver ◀──────────── list / watch / write ───────────────┐
+                          ▲                                                         │
+        ┌─────────────────┼────────────────────┐                                    │
+   scheduler     controller-manager             │                    gateway ◀── 127.0.0.1:18080
+                 (deployment / gc /             │                       │ host-gw routes
+                  namespace / nodeipam)         │                       ▼
+   ┌─ node container worker-1 ──────────────────┴──┐   ┌─ node container worker-2 ─────┐
+   │ kubelet ──CRI──▶ containerd ──▶ Pods          │   │ kubelet ─▶ containerd ─▶ Pods │
+   │ mini-cni: cni0 bridge, 10.244.1.0/24          │◀─▶│ cni0, 10.244.2.0/24           │
+   └───────────────────────────────────────────────┘   └───────────────────────────────┘
 ```
 
-Every component is a role of the single `mini` binary. Components and workloads share
-one local Docker Engine and a dedicated Docker network; workers are currently **logical
-nodes**, not separate machines (kind-style nodes from M2, see the roadmap).
+Every component is a role of the single `mini` binary. The control plane runs in plain
+containers; each worker is a **privileged node container** (like a
+[kind](https://kind.sigs.k8s.io) node) whose own containerd runs the Pods, so Pods are
+not visible to the host's `docker ps`. All containers share one Docker network, which
+plays the role of the machines' L2 network.
 
 ## What is built here and what is reused
 
@@ -65,15 +77,15 @@ container runtime) uses those open-source components as-is, configured but not m
 | Component | Responsibility | Status |
 | --- | --- | --- |
 | kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources | done |
-| controller-manager | Deployment, garbage collector, namespace controllers; later ReplicaSet, node IPAM, Endpoints, node lifecycle and more | done, growing |
+| controller-manager | Deployment, garbage collector, namespace and node IPAM controllers; later ReplicaSet, Endpoints, node lifecycle and more | done, growing |
 | scheduler | Picks a node for each Pod and binds it | done |
-| kubelet | Node registration and heartbeats, Pod lifecycle, status, graceful termination, logs; talks to the Docker API today and becomes a CRI client in M2 | done, reworked in M2 |
+| kubelet | Node registration and heartbeats, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), status, graceful termination, logs, CNI configuration, node-local DNS forwarder | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
 | gateway | Forwards HTTP on `127.0.0.1:18080` to a Service's ready Pods | done |
-| `kk` | CLI and cluster lifecycle | done |
-| demo app | HTTP server for examples and tests | done |
-| `mini-cni` + host-gw route agent | Pod networking: veth, bridge, IP allocation, cross-node routes | M2 |
-| `mini node-init`, pause image | Node container entrypoint (cgroup delegation, starts containerd and kubelet); Pod sandbox process | M2 |
+| `kk` | CLI, cluster lifecycle, image loading | done |
+| demo app | HTTP server for examples and tests; `mini fetch` is a tiny HTTP client for images without a shell | done |
+| `mini-cni` + host-gw route agent | Pod networking: bridge, veth, IP allocation, loopback, cross-node routes, egress masquerading | done |
+| `mini node-init`, pause image | Node container entrypoint (cgroup delegation, containerd configuration and start, then the kubelet); Pod sandbox process | done |
 | kube-proxy, cluster DNS, Ingress | iptables rules for ClusterIP/NodePort; service discovery | M6 |
 
 **Open-source components used as-is**:
@@ -81,13 +93,14 @@ container runtime) uses those open-source components as-is, configured but not m
 | Component | Use | Status |
 | --- | --- | --- |
 | [etcd](https://etcd.io) v3.5.17 | The only state store (accessed through its v3 JSON gateway) | in use |
-| Docker Engine + Compose | Today: runs every component and workload; from M2: only runs the node containers (the "machines") | in use |
-| [containerd](https://containerd.io) + [runc](https://github.com/opencontainers/runc) | Container runtime inside each node; containerd's built-in CRI plugin is the CRI server, the kubelet is the client | M2 |
-| Ubuntu 24.04 base image, iptables, iproute2 | Operating environment of the node containers | M2 |
+| Docker Engine + Compose | Hosts the control-plane containers and the node containers (the "machines"); never runs Pods | in use |
+| [containerd](https://containerd.io) + [runc](https://github.com/opencontainers/runc) | Container runtime inside each node (Ubuntu packages); containerd's built-in CRI plugin is the CRI server, the kubelet is the client | in use |
+| [crictl](https://github.com/kubernetes-sigs/cri-tools) | Debugging tool in the node image (`crictl ps`), used by e2e tests | in use |
+| Ubuntu 24.04 base image, iptables, iproute2 | Operating environment of the node containers | in use |
 | Linux kernel features | namespaces, cgroups, netfilter, bridges, veth | in use |
 
-**Go dependencies**: `gopkg.in/yaml.v3` (manifests); from M2 also `google.golang.org/grpc`
-and `k8s.io/cri-api` (the CRI protocol definitions only, no implementation); tests use
+**Go dependencies**: `gopkg.in/yaml.v3` (manifests), `google.golang.org/grpc` and
+`k8s.io/cri-api` (the CRI protocol definitions only, no implementation); tests use
 Ginkgo/Gomega. The project depends on neither client-go nor any Kubernetes component's
 implementation.
 
@@ -98,8 +111,10 @@ side by side (full mapping in
 [v2 design specification §15](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)):
 
 ```text
-cmd/mini/                    multi-call binary: mini kube-apiserver | kube-controller-manager | kube-scheduler | kubelet | gateway | demo
+cmd/mini/                    multi-call binary: mini kube-apiserver | kube-controller-manager | kube-scheduler |
+                             node-init | gateway | demo | pause | fetch; as mini-cni/loopback the CNI plugin
 cmd/kk/                      CLI (kubectl plus cluster lifecycle)
+build/images/<name>/         Dockerfiles: mini (components, demo), node, pause, etcd
 pkg/apis/{meta,core,apps}/v1 resource types (metav1, corev1, appsv1) and validation
 pkg/labels, fields, watch    selectors and watch event types (as in apimachinery)
 pkg/scheme                   resource registry
@@ -107,9 +122,11 @@ pkg/apiserver                generic API server (as k8s.io/apiserver)
 pkg/registry/<group>/<res>   per-resource strategies: defaults, validation, mutability, field selectors
 pkg/storage/etcd3            etcd storage
 pkg/client/...               client, informers, workqueue, record (as client-go)
-pkg/controller/<name>        deployment, garbagecollector, namespace controllers
+pkg/controller/<name>        deployment, garbagecollector, namespace, nodeipam controllers
 pkg/scheduler                scheduler
-pkg/kubelet[/dockershim]     node agent and its Docker runtime adapter
+pkg/kubelet                  node agent; kuberuntime (CRI client), dns (node-local forwarder)
+pkg/network/{cni,hostgw}     CNI plugin and host-gw route agent
+pkg/nodeinit                 node container entrypoint
 pkg/gateway                  HTTP gateway
 test/e2e, test/integration   end-to-end and integration tests
 ```
@@ -118,8 +135,8 @@ test/e2e, test/integration   end-to-end and integration tests
 
 | Requirement | Notes |
 | --- | --- |
-| Go 1.25 or later | `go` must be on your `PATH`. |
-| Docker Engine (Linux containers) | A local, rootful Docker Engine on Linux. Workers require the daemon to accept Docker API **v1.41**. |
+| Go 1.26 or later | `go` must be on your `PATH`. |
+| Docker Engine (Linux containers) | A local, rootful Docker Engine on Linux that may run **privileged** containers, with **cgroup v2** (`stat -fc %T /sys/fs/cgroup` prints `cgroup2fs`). |
 | Docker Compose v2 | `docker compose version` must work. |
 | `make`, `curl`, `tar` | Used to build binaries and obtain etcd. |
 | Local Docker access | A local Unix socket; TCP, SSH and remote Docker endpoints are rejected. |
@@ -127,25 +144,27 @@ test/e2e, test/integration   end-to-end and integration tests
 
 | Environment | Status |
 | --- | --- |
-| Ubuntu 24.04 (WSL2, x86_64) with Docker Engine 29.9 installed inside WSL, Compose v5.6, Go 1.27 | ✅ verified end to end, including a fresh clone following this README |
-| Other Linux distributions (x86_64/arm64), rootful Docker | expected to work, not individually verified. SELinux-enforcing systems (e.g. Fedora, RHEL) may deny containers access to the mounted Docker socket |
+| Ubuntu 24.04 (WSL2, x86_64) with Docker Engine 29.9 installed inside WSL, Compose v5.6, Go 1.27 | ✅ verified end to end |
+| Other Linux distributions (x86_64/arm64) with cgroup v2, rootful Docker | expected to work, not individually verified |
 | WSL2 with Docker Desktop's WSL integration | not verified |
-| macOS with Docker Desktop | verified for v1, not yet re-verified for v2; component tests need `bin/etcd`, a Linux binary, so they are skipped on macOS |
-| Rootless Docker, native Windows | not supported |
+| macOS with Docker Desktop | not yet verified for kind-style nodes (Docker Desktop uses cgroup v2 and allows privileged containers); component tests need `bin/etcd`, a Linux binary, so they are skipped on macOS |
+| cgroup v1 hosts, rootless Docker, native Windows | not supported |
 
 On WSL, clone the repository into the WSL Linux filesystem (for example `~/`), not into a
 mounted Windows drive, where builds are much slower and file permissions behave differently.
 
 The first run needs network access to Go modules (`proxy.golang.org`; set `GOPROXY` to use
-a mirror) and to the etcd download (`storage.googleapis.com`). The example reuses the
-locally built image, so no registry pulls are needed.
+a mirror), to the etcd download (`storage.googleapis.com`), and, for the node image, to
+Docker Hub (`ubuntu:24.04`), the Ubuntu package archive (containerd, runc, iptables,
+iproute2) and GitHub (crictl). Later runs reuse the cached images. Pods use locally built
+images that `kk` loads into the nodes, so no registry pulls are needed for the examples.
 
 One project cluster per Docker Engine: the Compose project, network, volume names and
 published ports are fixed. A clone in another directory takes over the same cluster and the
 same etcd data (see step 5 to reset). The host build architecture must match the Linux
 container architecture.
 
-> **Trusted local use only.** Kubelets mount the Docker socket, which grants extensive
+> **Trusted local use only.** Node containers are privileged, which grants them extensive
 > control over the Docker host. The API uses a shared bearer token, without TLS or RBAC.
 > Do not expose it or run untrusted workloads.
 
@@ -176,9 +195,11 @@ make build
 ```
 
 `cluster up` builds the components, prepares etcd (on first use it downloads v3.5.17
-from `storage.googleapis.com` with host-side curl), builds two `FROM scratch` images and
-starts the Compose services. It then waits up to 90 seconds for a healthy API and fresh
-Ready heartbeats from both workers.
+from `storage.googleapis.com` with host-side curl), builds four images from
+`build/images/` (components, node, pause and etcd; the node image takes about a minute
+the first time), starts the Compose services, loads the component and pause images into
+each node's containerd, and waits up to 90 seconds for a healthy API and fresh Ready
+heartbeats from both workers.
 
 ```text
 API healthy
@@ -186,6 +207,8 @@ NAME       STATUS   ROLES    AGE   VERSION
 worker-1   Ready    worker   5s    mini-kubelet/v2
 worker-2   Ready    worker   5s    mini-kubelet/v2
 ```
+
+`kk get nodes -o wide` also shows each node's address and `containerd://` runtime.
 
 ### 3. Deploy the example
 
@@ -196,9 +219,10 @@ curl -sS --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:1
 ```
 
 The [example](examples/demo.yaml) creates a two-replica Deployment and a Service. The
-gateway round-robins across ready Pods; responses look like
-`hello from web-997d7b744-f8shs` (the Pod name is its hostname). The gateway may answer
-`503` while the Pods start; the curl command above retries.
+Pods get addresses from their nodes' Pod CIDRs (`10.244.x.y`, see `-o wide`); the gateway
+round-robins across ready Pods; responses look like `hello from web-997d7b744-f8shs` (the
+Pod name is its hostname). The gateway may answer `503` while the Pods start; the curl
+command above retries.
 
 ### 4. Observe and operate
 
@@ -209,6 +233,7 @@ kk get pods -w                           # watch changes live (Ctrl-C to stop)
 kk describe deployment web               # details and related events
 kk get events
 kk logs -f POD_NAME                      # a name printed by kk get pods
+kk logs -p POD_NAME                      # the previous instance after a restart
 kk scale deployment web --replicas 3
 kk delete pod POD_NAME                   # graceful; the Deployment replaces it
 kk delete pod POD_NAME --force           # removed from the API immediately
@@ -217,6 +242,16 @@ kk create namespace team
 kk apply -n team -f examples/hello.yaml  # deploy into another namespace (no Service)
 kk get pods -A                           # list across namespaces
 kk delete namespace team                 # deletes everything inside
+
+docker exec mini-k8s-worker-1-1 crictl ps    # look inside a node, like on a real machine
+```
+
+Pods run inside the nodes, so to run your own image, build it with Docker and copy it
+into the nodes (like `kind load docker-image`); Pods that use it need no registry:
+
+```sh
+docker build -t my-app:v1 PATH_TO_YOUR_APP
+kk image load my-app:v1
 ```
 
 ### 5. Stop the cluster
@@ -225,16 +260,16 @@ kk delete namespace team                 # deletes everything inside
 ./bin/kk cluster down
 ```
 
-This stops reconcilers, removes this cluster's workload containers and stops Compose,
-**keeping the etcd volume and token**. A later `cluster up` restores saved resources.
-To remove the example for good, run `kk delete -f examples/demo.yaml` first.
+This stops the reconcilers and the nodes (their Pods stop with them) and removes the
+Compose containers, **keeping the etcd data, the nodes' disks and the token**. A later
+`cluster up` restores saved resources and the kubelets recreate their Pods. To remove the
+example for good, run `kk delete -f examples/demo.yaml` first.
 
-To **start from scratch** (dropping every resource in the cluster), remove the etcd volume
-after stopping:
+To **start from scratch** (dropping every resource in the cluster and the images loaded
+into the nodes), also delete the volumes:
 
 ```sh
-./bin/kk cluster down
-docker volume rm mini-k8s_etcd-data
+./bin/kk cluster down --volumes
 ./bin/kk cluster up
 ```
 
@@ -243,7 +278,7 @@ docker volume rm mini-k8s_etcd-data
 | Resource | apiVersion | Supported fields and behaviour |
 | --- | --- | --- |
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
-| Node | `v1` | Registered and heartbeated by kubelets; `spec.unschedulable` is honoured by the scheduler. |
+| Node | `v1` | Registered and heartbeated by kubelets; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` is honoured by the scheduler. |
 | Pod | `v1` | **One container**: `name`, `image`, `command`, `args`, `env`, `ports`; `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. |
 | Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template`. Template changes replace Pods (Recreate). |
 | Service | `v1` | One cluster-wide HTTP gateway Service: `selector`, one `port: 80`, `targetPort`. |
@@ -259,7 +294,9 @@ still not a cross-resource transaction.
 
 - Pods have one container and no probes, resource limits, ConfigMaps/Secrets or volumes.
 - Deployments manage Pods directly: no ReplicaSets, rolling updates or rollbacks.
-- One HTTP gateway Service; no ClusterIP, DNS, NodePort or Ingress.
+- One HTTP gateway Service; no ClusterIP, cluster DNS, NodePort or Ingress (Pods resolve
+  the Docker network's names, e.g. `apiserver`, through their node).
+- Two worker nodes, fixed in `compose.yaml`; nodes are containers sharing the host kernel.
 - Lost nodes are not marked NotReady and their Pods are not evicted; no resource-aware
   scheduling, taints or affinity.
 - No DaemonSets, Jobs, CronJobs, StatefulSets, HPA, RBAC or control-plane HA.
@@ -287,7 +324,7 @@ make e2e E2E_FOCUS='sig-apps'     # run a subset by name
 ```
 
 **Run them only against a disposable project cluster.** Disruptive specs restart the
-control plane and run `cluster down/up`. The gateway serves a single Service for now, so
+control plane and a node container and run `cluster down/up`. The gateway serves a single Service for now, so
 gateway specs require that no other Service exists and are skipped otherwise. If you
 deployed the quick-start example, delete it before running the full suite:
 
@@ -305,25 +342,27 @@ Every new feature ships with e2e specs.
 | `go`, `docker` or `make` not found | Install the prerequisites and add them to your `PATH`. |
 | Docker commands hang | Check the engine itself (for example `systemctl status docker`) before restarting it. |
 | etcd download fails | Check access to `storage.googleapis.com`, or provide a Linux etcd v3.5.17 binary at `bin/etcd`. |
-| Pod shows `ErrImagePull`/`ImagePullBackOff` | `kk describe pod NAME` shows the events. Private images must be pre-pulled into the same Engine. |
-| Pod shows `CrashLoopBackOff` | `kk logs NAME` shows the application output; restarts back off from 1s up to 30s. |
+| Pod shows `ErrImagePull`/`ImagePullBackOff` | `kk describe pod NAME` shows the events. Nodes pull public images themselves; local or private images must be copied in with `kk image load IMAGE`. |
+| Node stays `NotReady` | `kk describe node NAME` shows the reason (runtime, network plugin or sandbox image not ready); `docker logs mini-k8s-worker-1-1` shows containerd and kubelet output; `docker exec mini-k8s-worker-1-1 crictl pods` lists sandboxes. |
+| Pod shows `CreatePodSandboxError` | The message comes from containerd and the CNI plugin; check the node's logs as above. |
+| Node build fails at `apt-get` or the crictl download | The node image needs Docker Hub, the Ubuntu archive and GitHub on first build; retry or configure a proxy/mirror. |
+| Node containers exit at start with a cgroup error | The host must use cgroup v2 and allow privileged containers. |
+| Pod shows `CrashLoopBackOff` | `kk logs NAME` shows the application output and `kk logs -p NAME` the previous run's; restarts back off from 1s up to 30s. |
 | Gateway returns `503` | Wait for ready Pods; check the Service selector, targetPort and node heartbeats. |
 | `Error from server (Invalid)` | Fix the field named in the message; unknown fields are rejected too. |
 | Port or project-name conflict | Free the ports or stop the conflicting project; `MINI_API` alone does not change Compose ports. |
 | `only one Service is supported` | The gateway serves a single Service for now; in other namespaces use Service-less manifests such as `examples/hello.yaml`. |
-| A fresh clone shows old resources | One Docker Engine hosts one cluster and one etcd volume; remove `mini-k8s_etcd-data` as in step 5 to reset. |
-| Worker logs show access to `/var/run/docker.sock` denied | Make sure your user can use Docker; SELinux-enforcing systems may block containers from the mounted socket. |
+| A fresh clone shows old resources | One Docker Engine hosts one cluster and one etcd volume; reset with `kk cluster down --volumes` as in step 5. |
 
 The first start creates `.mini-k8s/token` with mode `0600`; keep it private and do not
-delete it while the cluster runs. For manual Compose diagnostics, export the variables
+delete it while the cluster runs. For manual Compose diagnostics, export the variable
 `kk` normally provides (never print the token):
 
 ```sh
 export MINI_TOKEN="$(cat .mini-k8s/token)"
-export MINI_DOCKER_SOCKET=/var/run/docker.sock
 docker compose ps
 docker compose logs --tail=100 controller
-unset MINI_TOKEN MINI_DOCKER_SOCKET
+unset MINI_TOKEN
 ```
 
 Only for a diagnosed credential-helper hang, `MINI_DOCKER_NO_CREDENTIALS=1 ./bin/kk cluster up`
@@ -336,7 +375,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M0 | Engineering baseline, Linux docs | ✅ |
 | E2E | Ginkgo e2e framework | ✅ |
 | M1 | API machinery: Kubernetes-style REST, namespaces, watch, informers/work queues, GC, graceful deletion, events | ✅ |
-| M2 | kind-style nodes: containerd inside each node, kubelet managing Pods over CRI, home-grown CNI (host-gw routing) | planned |
+| M2 | kind-style nodes: containerd inside each node, kubelet managing Pods over CRI, home-grown CNI (host-gw routing) | ✅ |
 | M3 | Pods and kubelet: multiple and init containers, probes, resource limits, exec | planned |
 | M4 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system | planned |
 | M5 | ReplicaSets, rolling updates and rollbacks | planned |
@@ -348,6 +387,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M2 kind-style nodes plan (Chinese)](docs/superpowers/plans/2026-10-15-m2-kind-nodes.md)
 - [M1 API machinery plan (Chinese)](docs/superpowers/plans/2026-10-14-m1-api-machinery.md)
 - [kind-style node feasibility spike (Chinese)](docs/superpowers/spikes/2026-10-15-kind-node-spike.md): verified recipe for containerd in node containers, CRI and host-gw networking
 - [M0 baseline plan (Chinese)](docs/superpowers/plans/2026-10-14-m0-baseline.md)

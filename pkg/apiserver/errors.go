@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"strings"
 
-	"mini-k8s/pkg/storage/etcd3"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/scheme"
+	"mini-k8s/pkg/storage/etcd3"
 )
 
 // statusError is an API error rendered as a Status object.

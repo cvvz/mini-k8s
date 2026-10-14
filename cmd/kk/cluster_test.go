@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -50,28 +51,69 @@ func TestDockerEndpointOnlyLocalUnix(t *testing.T) {
 	}
 }
 
-func TestClusterDownStopsReconcilersBeforeRemovingWorkloads(t *testing.T) {
-	var calls [][]string
+func TestClusterDownStopsNodesAndReconcilersFirst(t *testing.T) {
+	for _, volumes := range []bool{false, true} {
+		var calls [][]string
+		c := cluster{
+			run: func(_ context.Context, name string, args ...string) (string, error) {
+				calls = append(calls, append([]string{name}, args...))
+				return "", nil
+			},
+		}
+		if err := c.down(context.Background(), volumes); err != nil {
+			t.Fatal(err)
+		}
+		down := []string{"docker", "compose", "down", "--remove-orphans"}
+		if volumes {
+			down = append(down, "--volumes")
+		}
+		want := [][]string{
+			{"docker", "compose", "stop", "worker-1", "worker-2", "controller", "scheduler"},
+			down,
+		}
+		if !reflect.DeepEqual(calls, want) {
+			t.Fatalf("volumes=%v: unsafe down sequence: %#v", volumes, calls)
+		}
+	}
+}
+
+func TestLoadImagesPipesDockerSaveIntoEveryNodeAndRetries(t *testing.T) {
+	var pipes [][]string
+	failures := 1
 	c := cluster{
-		run: func(_ context.Context, name string, args ...string) (string, error) {
-			calls = append(calls, append([]string{name}, args...))
-			if len(args) > 0 && args[0] == "ps" {
-				return "abc123\ndef456\n", nil
+		out: io.Discard,
+		pipe: func(_ context.Context, from, to []string) (string, error) {
+			pipes = append(pipes, append(append(append([]string{}, from...), "|"), to...))
+			if failures > 0 {
+				failures--
+				return "", errors.New("containerd is starting")
 			}
 			return "", nil
 		},
 	}
-	if err := c.down(context.Background()); err != nil {
+	if err := c.loadImages(context.Background(), []string{"app:v1"}); err != nil {
 		t.Fatal(err)
 	}
-	want := [][]string{
-		{"docker", "compose", "stop", "worker-1", "worker-2", "controller", "scheduler"},
-		{"docker", "ps", "-aq", "--filter", "label=mini.cluster=mini-k8s", "--filter", "label=mini.pod"},
-		{"docker", "rm", "-f", "abc123", "def456"},
-		{"docker", "compose", "down"},
+	load := func(node string) []string {
+		return []string{"docker", "save", "app:v1", "|", "docker", "exec", "-i", "mini-k8s-" + node + "-1", "ctr", "-n", "k8s.io", "images", "import", "-"}
 	}
-	if !reflect.DeepEqual(calls, want) {
-		t.Fatalf("unsafe down sequence: %#v", calls)
+	want := [][]string{load("worker-1"), load("worker-1"), load("worker-2")}
+	if !reflect.DeepEqual(pipes, want) {
+		t.Fatalf("image load sequence: %#v", pipes)
+	}
+}
+
+func TestCommandPipeConnectsProducerToConsumer(t *testing.T) {
+	pipe := commandPipe(t.TempDir(), os.Environ())
+	out, err := pipe(context.Background(), []string{"echo", "hello"}, []string{"tr", "a-z", "A-Z"})
+	if err != nil || out != "HELLO\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+	if _, err := pipe(context.Background(), []string{"echo", "x"}, []string{"false"}); err == nil {
+		t.Fatal("a failing consumer must fail the pipe")
+	}
+	if _, err := pipe(context.Background(), []string{"false"}, []string{"cat"}); err == nil {
+		t.Fatal("a failing producer must fail the pipe")
 	}
 }
 
@@ -81,7 +123,7 @@ func TestClusterDownDoesNotRemoveWhenStopFails(t *testing.T) {
 		calls++
 		return "", errors.New("stop failed")
 	}}
-	if err := c.down(context.Background()); err == nil || !strings.Contains(err.Error(), "stop failed") || calls != 1 {
+	if err := c.down(context.Background(), false); err == nil || !strings.Contains(err.Error(), "stop failed") || calls != 1 {
 		t.Fatalf("continued after failed stop: calls=%d err=%v", calls, err)
 	}
 }

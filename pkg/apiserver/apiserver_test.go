@@ -9,18 +9,18 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/apiserver"
-	"mini-k8s/pkg/registry"
 	"mini-k8s/pkg/client"
+	"mini-k8s/pkg/registry"
+	"mini-k8s/pkg/scheme"
 	"mini-k8s/pkg/storage/etcd3"
 	etcdtesting "mini-k8s/pkg/storage/etcd3/testing"
-	metav1 "mini-k8s/pkg/apis/meta/v1"
-	corev1 "mini-k8s/pkg/apis/core/v1"
-	appsv1 "mini-k8s/pkg/apis/apps/v1"
-	"mini-k8s/pkg/watch"
-	"mini-k8s/pkg/scheme"
-	"mini-k8s/pkg/util/ptr"
 	"mini-k8s/pkg/util/deepcopy"
+	"mini-k8s/pkg/util/ptr"
+	"mini-k8s/pkg/watch"
 )
 
 func newServer(t *testing.T) (*client.Client, string) {

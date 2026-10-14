@@ -29,18 +29,30 @@ func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
 			calls = append(calls, append([]string{name}, args...))
 			return "", nil
 		},
+		pipe: func(_ context.Context, from, to []string) (string, error) {
+			calls = append(calls, append(append(append([]string{}, from...), "|"), to...))
+			return "", nil
+		},
 	}
 	if err := c.up(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	load := func(node string) []string {
+		return []string{"docker", "save", "mini-k8s:local", "mini-k8s-pause:local", "|",
+			"docker", "exec", "-i", "mini-k8s-" + node + "-1", "ctr", "-n", "k8s.io", "images", "import", "-"}
+	}
 	want := [][]string{
 		{"make", "build", "prepare-etcd"},
-		{"docker", "build", "-t", "mini-k8s:local", "."},
-		{"docker", "build", "-t", "mini-k8s-etcd:3.5.17", "-f", "Dockerfile.etcd", "."},
-		{"docker", "compose", "up", "-d", "--pull", "never"},
+		{"docker", "build", "-t", "mini-k8s:local", "-f", "build/images/mini/Dockerfile", "."},
+		{"docker", "build", "-t", "mini-k8s-pause:local", "-f", "build/images/pause/Dockerfile", "."},
+		{"docker", "build", "-t", "mini-k8s-node:local", "-f", "build/images/node/Dockerfile", "."},
+		{"docker", "build", "-t", "mini-k8s-etcd:3.5.17", "-f", "build/images/etcd/Dockerfile", "."},
+		{"docker", "compose", "up", "-d", "--pull", "never", "--remove-orphans"},
+		load("worker-1"),
+		load("worker-2"),
 	}
 	if !reflect.DeepEqual(calls, want) {
-		t.Fatalf("startup must build both images and never pull: %#v", calls)
+		t.Fatalf("startup must build every image, never pull, and preload node images: %#v", calls)
 	}
 }
 

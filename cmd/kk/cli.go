@@ -477,7 +477,7 @@ func (a *app) delete(ctx context.Context, p args) error {
 
 func (a *app) logs(ctx context.Context, p args) error {
 	if len(p.positional) != 1 {
-		return errors.New("usage: kk logs POD [-c CONTAINER] [-f] [--tail N]")
+		return errors.New("usage: kk logs POD [-c CONTAINER] [-f] [--tail N] [-p]")
 	}
 	name := strings.TrimPrefix(strings.TrimPrefix(p.positional[0], "pod/"), "pods/")
 	tail := 0
@@ -489,7 +489,8 @@ func (a *app) logs(ctx context.Context, p args) error {
 		tail = n
 	}
 	stream, err := a.client.PodLogs(ctx, a.namespace, name, client.LogOptions{
-		Container: p.value("container", ""), Follow: p.boolean("follow", false), TailLines: tail})
+		Container: p.value("container", ""), Follow: p.boolean("follow", false), TailLines: tail,
+		Previous: p.boolean("previous", false)})
 	if err != nil {
 		return err
 	}

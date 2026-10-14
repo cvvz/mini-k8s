@@ -5,6 +5,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "mini-k8s/pkg/apis/core/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/test/e2e/framework"
 )
@@ -34,6 +35,28 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 		f.WaitForRunningPods(ctx, labels, 2)
 	})
 
+	It("should recover a node's Pods after its node container restarts", func(ctx SpecContext) {
+		labels := map[string]string{"app": "reboot"}
+		obj := framework.NewPod("reboot", labels, framework.DemoContainer())
+		obj.Spec()["nodeName"] = "worker-2"
+		f.Apply(ctx, obj)
+		before := f.WaitForRunningPods(ctx, labels, 1)[0]
+
+		By("restarting the worker-2 node container, which kills its containerd and Pods")
+		_, err := framework.Docker(ctx, "restart", framework.ComponentContainer("worker-2"))
+		framework.ExpectNoError(err)
+		framework.WaitForClusterReady(ctx, 2)
+
+		after := f.WaitForPod(ctx, "reboot", "runs again in a new sandbox", func(p *corev1.Pod) bool {
+			return corev1.IsPodReady(p) && len(p.Status.ContainerStatuses) == 1 &&
+				p.Status.ContainerStatuses[0].ContainerID != before.Status.ContainerStatuses[0].ContainerID
+		})
+		Expect(after.UID).To(Equal(before.UID))
+		Eventually(ctx, func() (string, error) {
+			return framework.RunKK(ctx, "logs", "reboot", "-n", f.Namespace)
+		}).Should(ContainSubstring("demo web server started"))
+	})
+
 	It("should remove workloads on cluster down and restore them on cluster up", func(ctx SpecContext) {
 		labels := map[string]string{"app": "downup"}
 		f.Apply(ctx, framework.NewDeployment("downup", 2, labels, framework.DemoContainer()))
@@ -43,9 +66,9 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 
 		By("stopping the cluster")
 		framework.KK(ctx, "cluster", "down")
-		out, err := framework.Docker(ctx, "ps", "-aq", "--filter", "label=mini.cluster=mini-k8s", "--filter", "label=mini.pod")
+		out, err := framework.Docker(ctx, "ps", "-aq", "--filter", "label=com.docker.compose.project=mini-k8s")
 		framework.ExpectNoError(err)
-		Expect(out).To(BeEmpty(), "cluster down must remove every workload container")
+		Expect(out).To(BeEmpty(), "cluster down must remove every node and component container")
 
 		By("starting the cluster again")
 		framework.KK(ctx, "cluster", "up")

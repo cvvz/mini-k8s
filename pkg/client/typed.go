@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"net/http"
 
-	metav1 "mini-k8s/pkg/apis/meta/v1"
-	corev1 "mini-k8s/pkg/apis/core/v1"
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
-	"mini-k8s/pkg/watch"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/scheme"
+	"mini-k8s/pkg/watch"
 )
 
 // ObjectPtr constrains PT to be a pointer to an API object type T.
@@ -39,10 +39,14 @@ func Namespaces(c *Client) Resource[corev1.Namespace, *corev1.Namespace] {
 }
 
 // Nodes returns a Node client.
-func Nodes(c *Client) Resource[corev1.Node, *corev1.Node] { return For[corev1.Node](c, scheme.Nodes, "") }
+func Nodes(c *Client) Resource[corev1.Node, *corev1.Node] {
+	return For[corev1.Node](c, scheme.Nodes, "")
+}
 
 // Pods returns a Pod client for namespace ("" = all namespaces, read only).
-func Pods(c *Client, ns string) Resource[corev1.Pod, *corev1.Pod] { return For[corev1.Pod](c, scheme.Pods, ns) }
+func Pods(c *Client, ns string) Resource[corev1.Pod, *corev1.Pod] {
+	return For[corev1.Pod](c, scheme.Pods, ns)
+}
 
 // Services returns a Service client.
 func Services(c *Client, ns string) Resource[corev1.Service, *corev1.Service] {

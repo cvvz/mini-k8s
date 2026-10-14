@@ -9,14 +9,14 @@ import (
 	"sort"
 	"sync"
 
+	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/client/informers"
 	"mini-k8s/pkg/client/record"
 	"mini-k8s/pkg/client/workqueue"
 	"mini-k8s/pkg/controller"
-	metav1 "mini-k8s/pkg/apis/meta/v1"
-	corev1 "mini-k8s/pkg/apis/core/v1"
-	appsv1 "mini-k8s/pkg/apis/apps/v1"
 	"mini-k8s/pkg/util/deepcopy"
 )
 

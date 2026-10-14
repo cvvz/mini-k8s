@@ -232,7 +232,6 @@ type Preconditions struct {
 	ResourceVersion *string `json:"resourceVersion,omitempty"`
 }
 
-
 // WatchEvent is one line of a watch stream.
 type WatchEvent struct {
 	Type   string          `json:"type"`
