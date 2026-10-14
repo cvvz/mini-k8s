@@ -76,7 +76,7 @@ flowchart TB
         api["kube-apiserver"]
         etcd[("etcd")]
         ctl["kube-controller-manager<br/>kube-scheduler"]
-        ing["ingress-controller"]
+        ing["ingress-controller<br/>proxies to ready Pods"]
     end
 
     subgraph w2["worker-2 node container"]
@@ -97,8 +97,6 @@ flowchart TB
     api <-- "watch / status" --> k2
     k1 -- CRI --> p1
     k2 -- CRI --> p2
-    ing -.-> p1
-    ing -.-> p2
 ```
 
 How to read it:
@@ -108,10 +106,11 @@ How to read it:
 - The control-plane node's kubelet runs etcd, the API server, the controller manager, the
   scheduler and the Ingress controller as static Pods; the node's taint keeps workloads on
   the workers. Every node (the control-plane one too) also runs kube-proxy.
-- Solid arrows are API traffic: every component lists and watches the API server and
-  writes back; only the API server talks to etcd. The kubelet starts Pods through containerd (CRI).
-- Dotted arrows: the Ingress controller forwards requests on `127.0.0.1:18080` to ready
-  Pods. Pods on different nodes reach each other directly over host-gw routes; cluster IPs
+- Arrows between components are API traffic: every component lists and watches the API
+  server and writes back; only the API server talks to etcd. The kubelet starts Pods through
+  containerd (CRI).
+- The Ingress controller forwards requests on `127.0.0.1:18080` straight to the ready Pods
+  on the workers. Pods on different nodes reach each other directly over host-gw routes; cluster IPs
   (`10.96.0.0/12`) exist only as kube-proxy's iptables rules on each node, and node ports
   answer on every node's address.
 

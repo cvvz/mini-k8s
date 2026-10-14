@@ -63,7 +63,7 @@ flowchart TB
         api["kube-apiserver"]
         etcd[("etcd")]
         ctl["kube-controller-manager<br/>kube-scheduler"]
-        ing["ingress-controller"]
+        ing["ingress-controller<br/>转发到就绪 Pod"]
     end
 
     subgraph w2["worker-2 节点容器"]
@@ -84,8 +84,6 @@ flowchart TB
     api <-- "watch / 状态" --> k2
     k1 -- CRI --> p1
     k2 -- CRI --> p2
-    ing -.-> p1
-    ing -.-> p2
 ```
 
 图例：
@@ -93,9 +91,9 @@ flowchart TB
 - 每个方框是一个扮演“机器”的特权 Docker 容器，三者共享 Docker 网络 `mini-k8s`。
 - control-plane 节点的 kubelet 以 static Pod 运行 etcd、API Server、Controller Manager、调度器和
   Ingress 控制器；该节点的污点让业务 Pod 只调度到 worker。每个节点（包括 control-plane）都运行 kube-proxy。
-- 实线是 API 流量：各组件 list/watch API Server 并写回状态，只有 API Server 访问 etcd；kubelet 经
-  containerd（CRI）启动 Pod。
-- 虚线：Ingress 控制器把 `127.0.0.1:18080` 上的请求转发给就绪的 Pod。不同节点上的 Pod 经 host-gw
+- 组件之间的箭头是 API 流量：各组件 list/watch API Server 并写回状态，只有 API Server 访问 etcd；
+  kubelet 经 containerd（CRI）启动 Pod。
+- Ingress 控制器把 `127.0.0.1:18080` 上的请求直接转发给各 worker 上就绪的 Pod。不同节点上的 Pod 经 host-gw
   路由直接互访；ClusterIP（`10.96.0.0/12`）只以 kube-proxy 的 iptables 规则存在于每个节点中，
   NodePort 在每个节点的地址上应答。
 
