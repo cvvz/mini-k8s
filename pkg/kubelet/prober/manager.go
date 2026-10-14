@@ -135,6 +135,13 @@ func (m *Manager) ok(k key, containerID string) bool {
 	return found && r.containerID == containerID && r.ok
 }
 
+// current reports whether w is still the worker for k.
+func (m *Manager) current(w *worker, k key) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.workers[k] == w
+}
+
 // set records a result and reports whether it changed.
 func (m *Manager) set(w *worker, k key, ok bool) bool {
 	m.mu.Lock()
@@ -191,9 +198,22 @@ func (m *Manager) run(w *worker, k key, pod *corev1.Pod, podIP string, c corev1.
 				}
 				return // a started container is not probed again
 			case k.probe != Readiness && !ok && failures >= int(p.FailureThreshold):
+				if !m.current(w, k) {
+					return // superseded while probing: the result is not this instance's
+				}
 				m.Failed(pod, w.containerID, fmt.Sprintf("Container %s failed %s probe, will be restarted",
 					c.Name, map[ProbeType]string{Liveness: "liveness", Startup: "startup"}[k.probe]))
-				return // the next instance gets a new worker
+				// Normally the instance exits and Sync stops this worker. Should
+				// stopping it fail, probe again after its grace period, so the
+				// container is not left without liveness checks.
+				grace := int64(30)
+				if pod.Spec.TerminationGracePeriodSeconds != nil {
+					grace = *pod.Spec.TerminationGracePeriodSeconds
+				}
+				if !sleep(time.Duration(grace) * m.Second) {
+					return
+				}
+				successes, failures = 0, 0
 			}
 		}
 		if !sleep(period) {

@@ -163,9 +163,11 @@ func TestReadinessFollowsThresholds(t *testing.T) {
 	}
 }
 
-func TestLivenessFailureIsReportedOnceAndStopsTheWorker(t *testing.T) {
+func TestLivenessFailureIsReportedAndRetriedAfterTheGracePeriod(t *testing.T) {
 	m, f, _, failed := newTestManager()
 	pod, status := probePod(corev1.Container{Name: "web", LivenessProbe: probe(3)})
+	grace := int64(20) // 200ms with 10ms probe seconds
+	pod.Spec.TerminationGracePeriodSeconds = &grace
 	defer m.Remove("uid")
 	m.Sync(pod, status)
 	if got := <-failed; got != "c1 Container web failed liveness probe, will be restarted" {
@@ -174,12 +176,22 @@ func TestLivenessFailureIsReportedOnceAndStopsTheWorker(t *testing.T) {
 	n := f.count(Liveness)
 	time.Sleep(50 * time.Millisecond)
 	if n != 3 || f.count(Liveness) != 3 {
-		t.Fatalf("the worker must stop after reporting: %d then %d checks", n, f.count(Liveness))
+		t.Fatalf("no checks while the container is being stopped: %d then %d", n, f.count(Liveness))
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if len(f.events) != 3 || f.events[0] != "Unhealthy: Liveness probe failed: boom" {
 		t.Fatalf("events: %v", f.events)
+	}
+	f.mu.Unlock()
+	// The instance is still running after its grace period (stopping it
+	// failed): it is probed again and reported again.
+	select {
+	case got := <-failed:
+		if !strings.HasPrefix(got, "c1 ") {
+			t.Fatalf("second failure: %s", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("liveness checks stopped for a container that kept running")
 	}
 }
 

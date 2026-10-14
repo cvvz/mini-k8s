@@ -194,7 +194,8 @@ func (r *podRun) step(c corev1.Container, cs *corev1.ContainerStatus, restart fu
 		return outcomeWaiting
 	case runtimeapi.ContainerState_CONTAINER_EXITED:
 		term := terminated(status)
-		if !restart(status.ExitCode) {
+		probeKilled := m.killedByProbe(status.Id) && restartPolicy(pod) != corev1.RestartPolicyNever
+		if !restart(status.ExitCode) && !probeKilled {
 			cs.State = corev1.ContainerState{Terminated: term}
 			if status.ExitCode == 0 {
 				return outcomeSucceeded

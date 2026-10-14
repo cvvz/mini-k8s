@@ -372,3 +372,25 @@ func TestProbesGateReadyAndStarted(t *testing.T) {
 		t.Fatalf("ready: %+v", pod.Status)
 	}
 }
+
+func TestContainersStoppedByProbesRestartEvenAfterExitingZero(t *testing.T) {
+	for _, policy := range []string{corev1.RestartPolicyOnFailure, corev1.RestartPolicyNever} {
+		f, m, now := newTestManager(t)
+		pod := testPod()
+		pod.Spec.RestartPolicy = policy
+		syncOnce(m, pod)
+		if err := m.StopContainer(context.Background(), pod, pod.Status.ContainerStatuses[0].ContainerID, 30); err != nil {
+			t.Fatal(err)
+		}
+		f.exit(0) // the app exits cleanly on SIGTERM
+		*now = now.Add(time.Minute)
+		syncOnce(m, pod)
+		cs := pod.Status.ContainerStatuses[0]
+		if policy == corev1.RestartPolicyOnFailure && (cs.State.Running == nil || cs.RestartCount != 1) {
+			t.Fatalf("OnFailure: a container killed by its liveness probe is restarted: %+v", cs)
+		}
+		if policy == corev1.RestartPolicyNever && (cs.State.Terminated == nil || pod.Status.Phase != corev1.PodSucceeded) {
+			t.Fatalf("Never: nothing restarts: %+v", pod.Status)
+		}
+	}
+}

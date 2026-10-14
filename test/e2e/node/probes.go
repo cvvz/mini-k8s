@@ -58,6 +58,20 @@ var _ = framework.SIGDescribe("node", "Probes", func() {
 		}).WithTimeout(4*time.Second).Should(BeEquivalentTo(1), "the new instance is healthy")
 	})
 
+	It("should restart a container killed by its liveness probe under OnFailure even if it exits 0", func(ctx SpecContext) {
+		c := framework.DemoContainer() // exits 0 on SIGTERM
+		c.Fields = map[string]any{"livenessProbe": httpProbe("/healthz", 2)}
+		f.Apply(ctx, framework.NewPod("onfail", map[string]string{"app": "onfail"}, c).WithRestartPolicy(corev1.RestartPolicyOnFailure))
+		f.WaitForRunningPods(ctx, map[string]string{"app": "onfail"}, 1)
+
+		fetch(ctx, "onfail", "/fail-live")
+		pod := f.WaitForPod(ctx, "onfail", "is restarted, not completed", func(p *corev1.Pod) bool {
+			return corev1.IsPodReady(p) && p.Status.ContainerStatuses[0].RestartCount == 1
+		})
+		Expect(pod.Status.Phase).To(Equal(corev1.PodRunning))
+		Expect(pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.ExitCode).To(BeZero())
+	})
+
 	It("should hold off liveness checks until the startup probe passes", func(ctx SpecContext) {
 		c := framework.DemoContainer()
 		c.Env = map[string]string{"DEMO_START_DELAY": "6s"}

@@ -67,6 +67,11 @@ func (m *Manager) forget(uid string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.sandboxRuns, uid)
+	for id, owner := range m.probeKilled {
+		if owner == uid {
+			delete(m.probeKilled, id)
+		}
+	}
 	for key := range m.restarts {
 		if strings.HasPrefix(key, uid+"/") {
 			delete(m.restarts, key)
@@ -74,14 +79,27 @@ func (m *Manager) forget(uid string) {
 	}
 }
 
-// StopContainer stops one container instance (given as its status ID,
-// "containerd://...") within grace seconds, as after a failed liveness probe.
-func (m *Manager) StopContainer(ctx context.Context, containerID string, grace int64) error {
+// StopContainer stops a container instance of the Pod (given as its status
+// ID, "containerd://...") within grace seconds after a failed liveness or
+// startup probe. Unless the restart policy is Never, the instance is then
+// replaced whatever its exit code, as in Kubernetes.
+func (m *Manager) StopContainer(ctx context.Context, pod *corev1.Pod, containerID string, grace int64) error {
+	id := strings.TrimPrefix(containerID, "containerd://")
+	m.mu.Lock()
+	m.probeKilled[id] = pod.UID
+	m.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(grace)*time.Second+30*time.Second)
 	defer cancel()
-	_, err := m.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{
-		ContainerId: strings.TrimPrefix(containerID, "containerd://"), Timeout: grace})
+	_, err := m.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: id, Timeout: grace})
 	return err
+}
+
+// killedByProbe reports whether the instance was stopped after a failed probe.
+func (m *Manager) killedByProbe(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.probeKilled[id]
+	return ok
 }
 
 // Cleanup removes sandboxes and log directories of Pods that are not in keep
