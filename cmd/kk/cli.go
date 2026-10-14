@@ -64,6 +64,8 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 		return a.exec(ctx, p)
 	case "scale":
 		return a.scale(ctx, p)
+	case "rollout":
+		return a.rollout(ctx, p)
 	case "api-resources":
 		return a.apiResources(ctx)
 	case "version":
@@ -522,13 +524,13 @@ func (a *app) scale(ctx context.Context, p args) error {
 		pos = []string{typ, name}
 	}
 	if len(pos) != 2 {
-		return errors.New("usage: kk scale deployment NAME --replicas N")
+		return errors.New("usage: kk scale deployment|replicaset NAME --replicas N")
 	}
 	res, err := lookupResource(pos[0])
 	if err != nil {
 		return err
 	}
-	if res.Resource != scheme.Deployments.Resource {
+	if res.Resource != scheme.Deployments.Resource && res.Resource != scheme.ReplicaSets.Resource {
 		return fmt.Errorf("scale is not supported for %s", res.Resource)
 	}
 	replicas, err := strconv.Atoi(p.value("replicas", ""))

@@ -49,6 +49,7 @@ func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
 		{"docker", "build", "-t", "mini-k8s-etcd:3.5.17", "-f", "build/images/etcd/Dockerfile", "."},
 		{"docker", "compose", "up", "-d", "--pull", "never", "--remove-orphans"},
 		load("control-plane", "mini-k8s-etcd:3.5.17"),
+		{"docker", "exec", "mini-k8s-control-plane-1", "crictl", "ps", "-o", "json", "--label", "io.kubernetes.pod.namespace=kube-system"},
 		load("worker-1"),
 		load("worker-2"),
 	}

@@ -7,16 +7,19 @@ import (
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/util/intstr"
 	"mini-k8s/pkg/util/ptr"
 )
 
 func deployment() *appsv1.Deployment {
 	labels := map[string]string{"app": "web"}
-	return &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
+	d := &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
 		Replicas: ptr.To[int32](1), Selector: &metav1.LabelSelector{MatchLabels: labels},
 		Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels},
 			Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyAlways, Containers: []corev1.Container{{Name: "web", Image: "img", ImagePullPolicy: corev1.PullIfNotPresent}}}},
 	}}
+	appsv1.SetDefaultsDeployment(d)
+	return d
 }
 
 func TestValidateDeployment(t *testing.T) {
@@ -42,5 +45,29 @@ func TestValidateDeployment(t *testing.T) {
 	changed.Spec.Selector.MatchLabels = map[string]string{"app": "web", "tier": "x"}
 	if len(ValidateDeploymentUpdate(changed, deployment())) != 1 {
 		t.Error("selector change accepted")
+	}
+}
+
+func TestValidateDeploymentStrategy(t *testing.T) {
+	zero := intstr.FromInt(0)
+	pct := intstr.FromString("120%")
+	bad := intstr.FromString("ten")
+	for name, tc := range map[string]struct {
+		mutate func(*appsv1.Deployment)
+		want   string
+	}{
+		"unknown type": {func(d *appsv1.Deployment) { d.Spec.Strategy.Type = "BlueGreen" }, `spec.strategy.type: Unsupported value: "BlueGreen"`},
+		"both zero": {func(d *appsv1.Deployment) {
+			d.Spec.Strategy.RollingUpdate.MaxSurge, d.Spec.Strategy.RollingUpdate.MaxUnavailable = &zero, &zero
+		}, "may not be 0 when `maxSurge` is 0"},
+		"over 100%":       {func(d *appsv1.Deployment) { d.Spec.Strategy.RollingUpdate.MaxUnavailable = &pct }, "must not be greater than 100%"},
+		"not a number":    {func(d *appsv1.Deployment) { d.Spec.Strategy.RollingUpdate.MaxSurge = &bad }, "spec.strategy.rollingUpdate.maxSurge: Invalid value"},
+		"recreate params": {func(d *appsv1.Deployment) { d.Spec.Strategy.Type = "Recreate" }, "spec.strategy.rollingUpdate: Forbidden"},
+	} {
+		d := deployment()
+		tc.mutate(d)
+		if errs := strings.Join(ValidateDeployment(d), "\n"); !strings.Contains(errs, tc.want) {
+			t.Errorf("%s: want %q in %q", name, tc.want, errs)
+		}
 	}
 }

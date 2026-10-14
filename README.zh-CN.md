@@ -20,8 +20,9 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
 - **删除语义**：finalizer；Pod 优雅终止（SIGTERM，宽限期后 SIGKILL）；强制删除；
   ownerReferences 与垃圾回收（Background / Foreground / Orphan 三种传播策略）；
   删除 Namespace 时级联清空其中的资源。
-- **控制面**：Informer + WorkQueue 事件驱动；Deployment 控制器（模板变化时按 Recreate
-  策略替换 Pod，并上报 status）；GC 控制器；Namespace 控制器；
+- **控制面**：Informer + WorkQueue 事件驱动；Deployment 与 ReplicaSet 控制器（RollingUpdate 按
+  `maxSurge`/`maxUnavailable` 滚动或 Recreate、修订历史、回滚、暂停/恢复、带进度期限的
+  Available/Progressing 条件）；GC 控制器；Namespace 控制器；
   调度器（通过 binding 子资源绑定，遵守污点与容忍，不可调度时写入条件和事件）。
 - **像 kubeadm 一样自托管**：etcd、kube-apiserver、kube-controller-manager、kube-scheduler 与网关
   都是 `control-plane` 节点上的 **static Pod**，以 mirror Pod 的形式出现在 `kube-system` 中；
@@ -44,7 +45,7 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   `kk describe` 会展示对象关联的事件。
 - **kk**：`get`（`-o wide|json|yaml|name`、`-l`、`--field-selector`、`-A`、`-w`）、`describe`、
   `apply`/`create`（先整体 dry-run 再写入）、`delete`（`--grace-period`、`--force`、
-  `--cascade`）、`logs -f/-p/-c`、`exec`、`scale`、`api-resources`、`version`、集群生命周期命令，
+  `--cascade`）、`logs -f/-p/-c`、`exec`、`scale`、`rollout status|history|undo|pause|resume|restart`、`api-resources`、`version`、集群生命周期命令，
   以及 `image load`（把本地镜像导入各节点）。
 
 ```text
@@ -80,7 +81,7 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 | 组件 | 职责 | 状态 |
 | --- | --- | --- |
 | kube-apiserver | K8s 风格 REST、Watch、准入与校验、删除语义、子资源 | 已实现 |
-| controller-manager | Deployment、垃圾回收、Namespace、node IPAM 控制器；后续加入 ReplicaSet、Endpoints、节点生命周期等 | 已实现，持续扩展 |
+| controller-manager | Deployment、ReplicaSet、垃圾回收、Namespace、node IPAM 控制器；后续加入 Endpoints、节点生命周期等 | 已实现，持续扩展 |
 | scheduler | 为 Pod 选择节点（遵守污点与容忍）并通过 binding 绑定 | 已实现 |
 | kubelet | 节点注册与心跳、static Pod 与 mirror Pod、基于 CRI 的 Pod 生命周期（客户端一侧，`pkg/kubelet/kuberuntime`）、探针、状态上报、优雅终止、日志、CNI 配置、节点本地 DNS 转发 | 已实现 |
 | 客户端库 | 泛型 REST 客户端、Informer、WorkQueue、Event 记录器 | 已实现 |
@@ -126,7 +127,7 @@ pkg/apiserver                通用 API 服务（对应 k8s.io/apiserver）
 pkg/registry/<group>/<res>   各资源的 Strategy：默认值、校验、可变性、字段选择器
 pkg/storage/etcd3            etcd 存储
 pkg/client/...               客户端、informers、workqueue、record（对应 client-go）
-pkg/controller/<name>        deployment、garbagecollector、namespace、nodeipam 控制器
+pkg/controller/<name>        deployment、replicaset、garbagecollector、namespace、nodeipam 控制器
 pkg/scheduler                调度器
 pkg/kubelet                  节点代理与 static Pod；kuberuntime（CRI 客户端）、prober（探针）、dns（节点本地转发）
 pkg/network/{cni,hostgw}     CNI 插件与 host-gw 路由代理
@@ -247,6 +248,11 @@ kk get pods                              # 约 2 秒后变为 0/1，网关只把
 kk exec POD_NAME -- /mini fetch http://127.0.0.1:8080/recover
 kk exec POD_NAME -- /mini cat /sys/fs/cgroup/memory.max          # 64Mi 的限制：67108864
 kk scale deployment web --replicas 3
+kk rollout restart deployment/web        # 一次滚动更新：新建 ReplicaSet，逐个替换 Pod
+kk rollout status deployment/web         # 等待完成
+kk get replicasets                       # 旧 ReplicaSet 缩到 0 后保留，用于回滚
+kk rollout history deployment/web
+kk rollout undo deployment/web           # 回到上一个版本
 kk delete pod POD_NAME                   # 优雅终止，Deployment 会补建新 Pod
 kk delete pod POD_NAME --force           # 立即从 API 删除
 
@@ -296,7 +302,8 @@ kk image load my-app:v1
 | Namespace | `v1` | 创建、删除（Terminating → 清空内容 → 删除）。启动时自动创建 `default`、`kube-system`。 |
 | Node | `v1` | 由 kubelet 注册并心跳，上报 `capacity`/`allocatable`（cpu、memory、pods）与角色标签；`spec.podCIDR` 由 node IPAM 一次性分配；调度器遵守 `spec.unschedulable` 与 `spec.taints`（NoSchedule、PreferNoSchedule、NoExecute）；control-plane 节点带污点 `node-role.kubernetes.io/control-plane:NoSchedule`。 |
 | Pod | `v1` | `containers`（一个或多个）与 `initContainers`：`name`、`image`、`command`、`args`、`env`、`ports`、`resources`（cpu、memory）、`livenessProbe`/`readinessProbe`/`startupProbe`（init 容器不可用）、`volumeMounts`；`volumes`（`emptyDir` 支持 `medium`/`sizeLimit`，`hostPath` 支持 `type`）；`hostNetwork`；`tolerations`；`imagePullPolicy`（Always、IfNotPresent、Never，默认值同 Kubernetes）；`restartPolicy`（Always、OnFailure、Never）；`terminationGracePeriodSeconds`；`nodeName`。创建后 spec 不可变。static Pod 以 mirror Pod 呈现（只读；删除后 kubelet 会重建）。子资源 `log` 与 `exec`。 |
-| Deployment | `apps/v1` | `replicas`（默认 1）、`selector`（matchLabels/matchExpressions，创建后不可变）、`template`（`restartPolicy` 必须为 Always）。模板变化时按 Recreate 策略替换 Pod。 |
+| Deployment | `apps/v1` | `replicas`（默认 1）、`selector`（matchLabels/matchExpressions，创建后不可变）、`template`（`restartPolicy` 必须为 Always）、`strategy`（RollingUpdate 的 `maxSurge`/`maxUnavailable` 默认各 25%，或 Recreate）、`minReadySeconds`、`revisionHistoryLimit`（10）、`paused`、`progressDeadlineSeconds`（600）。每个模板版本对应一个 ReplicaSet；注解 `deployment.kubernetes.io/revision` 与 `kubernetes.io/change-cause`。 |
+| ReplicaSet | `apps/v1` | `replicas`、`selector`（不可变）、`template`、`minReadySeconds`；通常由 Deployment 管理。 |
 | Service | `v1` | 整个集群一个 HTTP 网关 Service：`selector`，一个 `port: 80`，`targetPort`。 |
 | Event | `v1` | 由组件记录，可查询；1 小时后过期。 |
 
@@ -308,7 +315,8 @@ kk image load my-app:v1
 
 - 还没有 ConfigMap、Secret 和持久卷（M8）；不支持 `subPath` 与 `hostPort`；调度器不考虑资源请求（资源感知调度在 M7）。`kk exec` 把命令执行完再返回输出，
   不支持交互式会话（stdin/tty），与 Kubernetes 的流式 exec 不同。
-- Deployment 直接管理 Pod，没有 ReplicaSet，也没有滚动更新和回滚。
+- 滚动更新过程中修改 `replicas` 不做按比例扩缩；ReplicaSet 不收养孤儿 Pod。`kk apply` 是 merge patch：
+  把 Deployment 改成 `Recreate` 时需要在清单中写 `rollingUpdate: null`。
 - 只有一个 HTTP 网关 Service，没有 ClusterIP、集群 DNS、NodePort 和 Ingress
   （Pod 经节点解析 Docker 网络中的名字，例如 `control-plane`）。
 - 节点失联不会被标记为 NotReady，也不会驱逐 Pod（NoExecute 污点同样不驱逐）；没有资源感知调度和亲和性。
@@ -394,7 +402,7 @@ unset MINI_TOKEN
 | M3b | Pod：liveness/readiness/startup 探针、资源 requests 与 limits、QoS、节点容量 | ✅ |
 | M3c | Pod：卷（emptyDir、hostPath）、hostNetwork | ✅ |
 | M4 | 控制面自托管：control-plane 节点、static/mirror Pod，etcd 与控制面组件运行在 kube-system，污点与容忍 | ✅ |
-| M5 | ReplicaSet、滚动更新与回滚 | 计划中 |
+| M5 | ReplicaSet、滚动更新与回滚、`kk rollout` | ✅ |
 | M6 | ClusterIP、Endpoints、iptables kube-proxy、DNS、NodePort、Ingress | 计划中 |
 | M7 | 调度框架、节点租约与驱逐、污点、cordon/drain | 计划中 |
 | M8 | ConfigMap、Secret、卷、PVC | 计划中 |
@@ -403,6 +411,7 @@ unset MINI_TOKEN
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M5 ReplicaSet 与滚动更新计划](docs/superpowers/plans/2026-10-15-m5-replicaset-rollout.md)
 - [M4 控制面自托管计划](docs/superpowers/plans/2026-10-15-m4-self-hosted-control-plane.md)
 - [M3c 卷与主机网络计划](docs/superpowers/plans/2026-10-15-m3c-volumes-hostnetwork.md)
 - [M3b 探针与资源计划](docs/superpowers/plans/2026-10-15-m3b-probes-resources.md)

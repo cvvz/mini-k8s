@@ -146,7 +146,7 @@ func TestApplyValidatesWholeBatchFirst(t *testing.T) {
 		{strings.Replace(webManifest, "metadata:\n  name: web", "metadata:\n  name: web\n  uid: x", 1), "server-managed"},
 		{webManifest + "status: {}\n", "status is managed"},
 		{strings.Replace(webManifest, "kind: Deployment", "kind: Widget", 1), "no matches for kind"},
-		{strings.Replace(webManifest, "  replicas: 2", "  replicas: 2\n  paused: true", 1), "unknown field"},
+		{strings.Replace(webManifest, "  replicas: 2", "  replicas: 2\n  suspended: true", 1), "unknown field"},
 	} {
 		if _, err := kk(t, c, "", "apply", "-f", writeFile(t, tc.manifest)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("want %q, got %v", tc.want, err)

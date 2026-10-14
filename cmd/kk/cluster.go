@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -281,6 +282,9 @@ func newCluster(ctx context.Context, root, token string, out io.Writer) (cluster
 }
 
 func (c cluster) up(ctx context.Context) error {
+	// Node objects in etcd may still show heartbeats from before Compose
+	// recreated the nodes: only heartbeats sent after this point count.
+	since := time.Now()
 	commands := [][]string{{"make", "build", "prepare-etcd"}}
 	for _, image := range images {
 		commands = append(commands, []string{"docker", "build", "-t", image.tag, "-f", "build/images/" + image.dir + "/Dockerfile", "."})
@@ -292,7 +296,12 @@ func (c cluster) up(ctx context.Context) error {
 		}
 	}
 	// The control plane's static Pods start as soon as their images arrive.
+	// The node's disk keeps images across restarts, so they may already be
+	// running from an older build: restart those (a kubeadm-style upgrade).
 	if err := c.loadImages(ctx, append(append([]string{}, nodeImages...), etcdImage), controlPlane); err != nil {
+		return err
+	}
+	if err := c.restartStaleControlPlane(ctx); err != nil {
 		return err
 	}
 	if err := c.loadImages(ctx, nodeImages, workerNames...); err != nil {
@@ -300,7 +309,7 @@ func (c cluster) up(ctx context.Context) error {
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	if err := c.waitReady(waitCtx); err != nil {
+	if err := c.waitReady(waitCtx, since); err != nil {
 		return err
 	}
 	_, err := fmt.Fprintf(c.out, "mini-k8s ready: API http://127.0.0.1:18000; nodes %s Ready\n", strings.Join(nodeNames, ", "))
@@ -348,7 +357,46 @@ func (c cluster) loadImages(ctx context.Context, refs []string, nodes ...string)
 	return nil
 }
 
-func (c cluster) waitReady(ctx context.Context) error {
+// restartStaleControlPlane stops the control-plane node's static Pod
+// containers whose image name now refers to another image than the one they
+// run; the kubelet restarts them from the freshly loaded image.
+func (c cluster) restartStaleControlPlane(ctx context.Context) error {
+	node := nodeContainer(controlPlane)
+	out, err := c.run(ctx, "docker", "exec", node, "crictl", "ps", "-o", "json", "--label", "io.kubernetes.pod.namespace=kube-system")
+	if err != nil {
+		return err
+	}
+	var list struct {
+		Containers []struct {
+			ID       string `json:"id"`
+			ImageRef string `json:"imageRef"`
+			Image    struct {
+				Image string `json:"image"`
+			} `json:"image"`
+			Labels map[string]string `json:"labels"`
+		} `json:"containers"`
+	}
+	if strings.TrimSpace(out) != "" {
+		if err := json.Unmarshal([]byte(out), &list); err != nil {
+			return fmt.Errorf("parse crictl ps: %w", err)
+		}
+	}
+	for _, ctr := range list.Containers {
+		current, err := c.run(ctx, "docker", "exec", node, "crictl", "inspecti", "-o", "go-template", "--template", "{{.status.id}}", ctr.Image.Image)
+		if err != nil || strings.TrimSpace(current) == "" || strings.TrimSpace(current) == ctr.ImageRef {
+			continue
+		}
+		if _, err := fmt.Fprintf(c.out, "Restarting %s with the new image\n", ctr.Labels["io.kubernetes.pod.name"]); err != nil {
+			return err
+		}
+		if _, err := c.run(ctx, "docker", "exec", node, "crictl", "stop", "--timeout", "10", ctr.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c cluster) waitReady(ctx context.Context, since time.Time) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var last error
@@ -360,7 +408,8 @@ func (c cluster) waitReady(ctx context.Context) error {
 			if err == nil {
 				ready := map[string]bool{}
 				for i := range nodes.Items {
-					if corev1.IsNodeReady(&nodes.Items[i], time.Now()) {
+					cond := nodes.Items[i].Status.Condition(corev1.NodeReady)
+					if corev1.IsNodeReady(&nodes.Items[i], time.Now()) && cond.LastHeartbeatTime.After(since) {
 						ready[nodes.Items[i].Name] = true
 					}
 				}

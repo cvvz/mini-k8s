@@ -80,6 +80,46 @@ var _ = framework.SIGDescribe("network", "Service gateway", Serial, func() {
 		Expect(out).To(ContainSubstring("only one Service is supported"))
 	})
 
+	It("should keep serving through a rolling update", func(ctx SpecContext) {
+		labels := map[string]string{"app": "nonstop"}
+		version := func(v string) framework.Object {
+			c := framework.DemoContainer()
+			// Keep serving briefly after SIGTERM while the gateway drops the Pod.
+			c.Env = map[string]string{"VERSION": v, "DEMO_SHUTDOWN_DELAY": "2s"}
+			c.Fields = map[string]any{"readinessProbe": map[string]any{
+				"httpGet": map[string]any{"path": "/ready", "port": 8080}, "periodSeconds": 1}}
+			d := framework.NewDeployment("nonstop", 2, labels, c)
+			d.Spec()["strategy"] = map[string]any{"type": "RollingUpdate", "rollingUpdate": map[string]any{"maxSurge": 1, "maxUnavailable": 0}}
+			return d
+		}
+		f.Apply(ctx, version("1"), framework.NewService("nonstop", labels, 8080))
+		framework.KK(ctx, "rollout", "-n", f.Namespace, "status", "deployment/nonstop", "--timeout", "90s")
+		Eventually(ctx, func() (int, error) {
+			code, _, err := framework.HTTPGet(ctx, framework.TestContext.GatewayURL+"/")
+			return code, err
+		}).WithTimeout(20 * time.Second).Should(Equal(200))
+
+		f.Apply(ctx, version("2"))
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = framework.RunKK(ctx, "rollout", "-n", f.Namespace, "status", "deployment/nonstop", "--timeout", "90s")
+		}()
+		requests := 0
+		for running := true; running; {
+			select {
+			case <-done:
+				running = false
+			case <-time.After(100 * time.Millisecond):
+				code, body, err := framework.HTTPGet(ctx, framework.TestContext.GatewayURL+"/")
+				framework.ExpectNoError(err)
+				Expect(code).To(Equal(200), "request %d during the rollout: %s", requests, body)
+				requests++
+			}
+		}
+		Expect(requests).To(BeNumerically(">", 5))
+	})
+
 	It("should route only to Pods whose readiness probe passes", func(ctx SpecContext) {
 		labels := map[string]string{"app": "gated"}
 		c := framework.DemoContainer()

@@ -256,6 +256,8 @@ func columnsFor(res scheme.ResourceInfo) []column {
 				return sel.String()
 			}},
 		}
+	case scheme.ReplicaSets.Resource:
+		return replicaSetColumns()
 	case scheme.Services.Resource:
 		return []column{nameColumn(),
 			{header: "SELECTOR", value: func(o metav1.Object, _ time.Time) string { return labelsString(o.(*corev1.Service).Spec.Selector) }},

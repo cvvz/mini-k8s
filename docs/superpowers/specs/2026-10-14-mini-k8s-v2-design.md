@@ -287,7 +287,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M3b ✅ | 探针（liveness/readiness/startup；httpGet/tcpSocket/exec）、资源 requests/limits（cgroup、OOMKilled）、QoS、节点容量（[计划](../plans/2026-10-15-m3b-probes-resources.md)） |
 | M3c ✅ | Pod 与 kubelet：hostNetwork、emptyDir（磁盘与内存）/hostPath（[计划](../plans/2026-10-15-m3c-volumes-hostnetwork.md)） |
 | M4 ✅ | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system（落地记录见 §12.3） |
-| M5 | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout` |
+| M5 ✅ | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout`（[计划](../plans/2026-10-15-m5-replicaset-rollout.md)） |
 | M6 | 网络：ClusterIP、Endpoints、iptables kube-proxy、DNS、NodePort、Headless、Ingress |
 | M7 | 调度框架、节点租约与生命周期、污点驱逐、cordon/drain、worker 扩展 |
 | M8 | ConfigMap、Secret、卷、PVC/PV |
@@ -302,7 +302,7 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
 | 过渡实现 | 替换里程碑 |
 | --- | --- |
 | 逻辑节点：kubelet 经 Docker API 直接管理宿主 Docker 上的容器，所有节点共享一个网桥 | M2 kind 式节点（已替换） |
-| Deployment 直接拥有 Pod（`pod-template-hash` 标签），模板变化按 Recreate 替换 | M5 ReplicaSet + RollingUpdate |
+| Deployment 直接拥有 Pod（`pod-template-hash` 标签），模板变化按 Recreate 替换 | M5 ReplicaSet + RollingUpdate（已替换） |
 | Pod 只允许单容器，kubelet 重启同一个容器 | M3 多容器与重启语义（M2/M3a 已替换） |
 | 控制面组件与网关由 Compose 直接启动，不在 API 中可见 | M4 控制面自托管 |
 | Service 仍是全局唯一的 HTTP 网关（准入保证），无 ClusterIP | M6 |
