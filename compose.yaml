@@ -1,0 +1,65 @@
+name: mini-k8s
+x-common: &common
+  image: mini-k8s:local
+  restart: unless-stopped
+  environment: &env
+    MINI_API: http://apiserver:8080
+    MINI_TOKEN: ${MINI_TOKEN:?run kk cluster up}
+    MINI_CLUSTER: mini-k8s
+    MINI_NETWORK: mini-k8s
+  networks: [cluster]
+services:
+  etcd:
+    image: mini-k8s-etcd:3.5.17
+    command:
+      - /usr/local/bin/etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    environment:
+      ETCD_UNSUPPORTED_ARCH: arm64
+    volumes: [etcd-data:/etcd-data]
+    networks: [cluster]
+    restart: unless-stopped
+  apiserver:
+    <<: *common
+    command: [apiserver]
+    environment:
+      <<: *env
+      MINI_ETCD: http://etcd:2379
+    ports: ["127.0.0.1:18000:8080"]
+    depends_on: [etcd]
+  scheduler:
+    <<: *common
+    command: [scheduler]
+    depends_on: [apiserver]
+  controller:
+    <<: *common
+    command: [controller]
+    depends_on: [apiserver]
+  worker-1:
+    <<: *common
+    command: [kubelet]
+    environment:
+      <<: *env
+      MINI_NODE: worker-1
+    volumes: ["${MINI_DOCKER_SOCKET:?run kk cluster up}:/var/run/docker.sock"]
+    depends_on: [apiserver]
+  worker-2:
+    <<: *common
+    command: [kubelet]
+    environment:
+      <<: *env
+      MINI_NODE: worker-2
+    volumes: ["${MINI_DOCKER_SOCKET:?run kk cluster up}:/var/run/docker.sock"]
+    depends_on: [apiserver]
+  proxy:
+    <<: *common
+    command: [proxy]
+    ports: ["127.0.0.1:18080:8080"]
+    depends_on: [apiserver]
+networks:
+  cluster:
+    name: mini-k8s
+volumes:
+  etcd-data:

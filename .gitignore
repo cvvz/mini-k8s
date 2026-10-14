@@ -1,0 +1,27 @@
+# Build outputs
+/bin/
+/mini
+/kk
+*.test
+
+# Local cluster state and credentials
+/.mini-k8s/
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Test and diagnostic output
+/coverage/
+/coverage*.out
+/coverage*.html
+*.prof
+*.pprof
+*.log
+
+# OS and editor files
+.DS_Store
+/.idea/
+*.swp
+*.swo
+*~
