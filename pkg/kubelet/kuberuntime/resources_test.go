@@ -20,6 +20,8 @@ func TestLinuxResourcesMapRequestsAndLimitsToCgroups(t *testing.T) {
 		"tiny cpu": {corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{"cpu": q("1m")}, Requests: corev1.ResourceList{"cpu": q("1m")}}, 2, 100000, 1000, 0},
 		"two cpus requested": {corev1.ResourceRequirements{Requests: corev1.ResourceList{"cpu": q("2")}}, 2048, 0, 0, 0},
+		"huge cpu": {corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{"cpu": q("300M")}, Requests: corev1.ResourceList{"cpu": q("300M")}}, 262144, 100000, 100_000_000_000, 0},
 	} {
 		got := linuxResources(tc.r)
 		if got.CpuShares != tc.shares || got.CpuPeriod != tc.period || got.CpuQuota != tc.quota ||

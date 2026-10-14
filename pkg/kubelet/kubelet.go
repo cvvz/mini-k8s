@@ -45,7 +45,7 @@ type Runtime interface {
 	Cleanup(ctx context.Context, keep map[string]bool) error
 	Logs(ctx context.Context, pod *corev1.Pod, container string, o kuberuntime.LogOptions, w io.Writer) error
 	Exec(ctx context.Context, pod *corev1.Pod, container string, cmd []string, timeout time.Duration) (*corev1.PodExecResult, error)
-	StopContainer(ctx context.Context, containerID string, grace int64) error
+	StopContainer(ctx context.Context, pod *corev1.Pod, containerID string, grace int64) error
 	Version(ctx context.Context) (string, error)
 	Status(ctx context.Context, sandboxImage string) kuberuntime.Readiness
 }
@@ -119,7 +119,7 @@ func (k *Kubelet) restartContainer(pod *corev1.Pod, containerID, message string)
 		grace = *pod.Spec.TerminationGracePeriodSeconds
 	}
 	go func() {
-		if err := k.runtime.StopContainer(context.Background(), containerID, grace); err != nil {
+		if err := k.runtime.StopContainer(context.Background(), pod, containerID, grace); err != nil {
 			log.Printf("kubelet: stop %s of %s/%s: %v", containerID, pod.Namespace, pod.Name, err)
 		}
 		k.dispatch(pod)

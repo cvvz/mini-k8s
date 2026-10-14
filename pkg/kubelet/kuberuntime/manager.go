@@ -57,6 +57,9 @@ type Manager struct {
 	restarts    map[string]backoff // by pod UID + container name
 	pulls       map[string]backoff // by image
 	sandboxRuns map[string]backoff // by pod UID
+	// probeKilled maps containers stopped after a failed liveness or startup
+	// probe to their Pod UID; they restart even after exiting 0.
+	probeKilled map[string]string
 }
 
 type backoff struct {
@@ -80,7 +83,7 @@ func Dial(socket string) (*grpc.ClientConn, error) {
 // NewManager returns a manager for the given CRI clients.
 func NewManager(runtime runtimeapi.RuntimeServiceClient, images runtimeapi.ImageServiceClient) *Manager {
 	return &Manager{runtime: runtime, images: images, PodLogsDir: DefaultPodLogsDir, now: time.Now,
-		restarts: map[string]backoff{}, pulls: map[string]backoff{}, sandboxRuns: map[string]backoff{}}
+		restarts: map[string]backoff{}, pulls: map[string]backoff{}, sandboxRuns: map[string]backoff{}, probeKilled: map[string]string{}}
 }
 
 // Version reports the runtime as "containerd://2.2.1".
@@ -166,8 +169,14 @@ func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32) *runti
 	return cfg
 }
 
-// cpuPeriod is the CFS period CPU limits are expressed in (100ms).
-const cpuPeriod = 100000
+// CPU settings: the CFS period limits are expressed in (100ms), the largest
+// share value cgroups accept, and a cap on CPU amounts (a million cores)
+// that keeps the arithmetic from overflowing.
+const (
+	cpuPeriod   = 100000
+	maxShares   = 262144
+	maxCPUMilli = 1_000_000_000
+)
 
 // linuxResources maps requests and limits to cgroup settings the way the
 // kubelet does: CPU requests become relative shares (at least 2, also for
@@ -176,10 +185,10 @@ const cpuPeriod = 100000
 func linuxResources(r corev1.ResourceRequirements) *runtimeapi.LinuxContainerResources {
 	res := &runtimeapi.LinuxContainerResources{CpuShares: 2}
 	if q, ok := r.Requests[corev1.ResourceCPU]; ok {
-		res.CpuShares = max(q.MilliValue()*1024/1000, 2)
+		res.CpuShares = min(max(min(q.MilliValue(), maxCPUMilli)*1024/1000, 2), maxShares)
 	}
 	if q, ok := r.Limits[corev1.ResourceCPU]; ok && !q.IsZero() {
-		res.CpuPeriod, res.CpuQuota = cpuPeriod, max(q.MilliValue()*cpuPeriod/1000, 1000)
+		res.CpuPeriod, res.CpuQuota = cpuPeriod, max(min(q.MilliValue(), maxCPUMilli)*cpuPeriod/1000, 1000)
 	}
 	if q, ok := r.Limits[corev1.ResourceMemory]; ok && !q.IsZero() {
 		res.MemoryLimitInBytes, res.MemorySwapLimitInBytes = q.Value(), q.Value()
