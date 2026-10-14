@@ -41,7 +41,7 @@ localhost:18080 --> HTTP Service Proxy
 
 | 依赖 | 要求 |
 | --- | --- |
-| Go 1.23 或更新版本 | `go` 已加入 `PATH`。 |
+| Go 1.25 或更新版本 | `go` 已加入 `PATH`。 |
 | Docker Engine（Linux 容器） | Linux 上的本地 rootful Docker Engine。worker 要求服务端接受 Docker API **v1.41**。 |
 | Docker Compose v2 | `docker compose version` 可正常执行。 |
 | `make`、`curl`、`tar` | 用于构建程序和获取 etcd。 |
@@ -209,15 +209,18 @@ make test
 go test -race ./...
 ```
 
-实时集群测试需要先启动集群，并确保 `docker` 在 `PATH` 中：
+端到端测试是仿照 Kubernetes `test/e2e` 的 Ginkgo v2 套件（见
+[test/e2e/README.md](test/e2e/README.md)），需要先启动集群并确保 `docker` 在 `PATH` 中：
 
 ```sh
-make e2e
+make e2e                          # 全部用例，包括破坏性用例
+make e2e-quick                    # 跳过带 Disruptive 标签的用例
+make e2e E2E_FOCUS='sig-apps'     # 按名称运行子集
 ```
 
-**只在可重建的本项目实验集群上运行。** 测试会先删除已有的 `web` 示例，再修改示例、终止一个受管理的容器、
-重启本项目控制面，并执行 `cluster down/up`。它检查实际容器数量、HTTP 访问、
-日志、自愈、版本冲突及持久化，结束时保留两副本示例运行。
+**只在可重建的本项目实验集群上运行。** 用例使用唯一名称创建资源并在结束后清理，
+检查 API 状态、真实 Docker 容器、HTTP 流量、日志、自愈、版本冲突与校验；
+Disruptive 用例会重启控制面并执行 `cluster down/up`。每个新功能都会附带 e2e 用例。
 
 ## 常见问题
 

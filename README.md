@@ -45,7 +45,7 @@ independent machines or isolated container runtimes.
 
 | Requirement | Notes |
 | --- | --- |
-| Go 1.23 or later | `go` must be available on your `PATH`. |
+| Go 1.25 or later | `go` must be available on your `PATH`. |
 | Docker Engine (Linux containers) | A local, rootful Docker Engine on Linux. The worker adapter requires the daemon to accept Docker API **v1.41**. |
 | Docker Compose v2 | `docker compose version` must work. |
 | `make`, `curl`, and `tar` | Used to build binaries and obtain etcd. |
@@ -225,18 +225,21 @@ make test
 go test -race ./...
 ```
 
-The opt-in live test needs a running cluster and `docker` on `PATH`:
+End-to-end tests are a Ginkgo v2 suite modelled after Kubernetes' `test/e2e`
+(see [test/e2e/README.md](test/e2e/README.md)). They need a running cluster and
+`docker` on `PATH`:
 
 ```sh
-make e2e
+make e2e                          # every spec, including disruptive ones
+make e2e-quick                    # skip specs labelled Disruptive
+make e2e E2E_FOCUS='sig-apps'     # run a subset by name
 ```
 
-**Run it only against a disposable project cluster.** It first removes any
-existing `web` example, then changes the example,
-kills an owned container, restarts this project's control plane, and executes
-`cluster down/up`. It checks actual container counts, HTTP access, logs,
-self-healing, version conflicts, and persistence. It leaves the two-replica
-example running.
+**Run them only against a disposable project cluster.** Specs create uniquely
+named resources and clean them up, and check API state, real Docker containers,
+HTTP traffic, logs, self-healing, version conflicts, and validation. Disruptive
+specs restart the control plane and run `cluster down/up`. Every new feature
+ships with e2e specs.
 
 ## Troubleshooting
 
