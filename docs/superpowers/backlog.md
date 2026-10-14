@@ -6,3 +6,9 @@
 ## 已知问题
 
 暂无。
+
+## 改进想法
+
+| 想法 | 现状 | 做法 | 收益 |
+| --- | --- | --- | --- |
+| API 改用明文 HTTP/2（h2c） | API Server 与 kk、各组件之间是明文 HTTP/1.1，每个 informer 的 watch 是一条 chunked JSON 长连接，各占一条 TCP 连接 | 服务端用 Go 1.24+ 的 `http.Server.Protocols.SetUnencryptedHTTP2`，客户端 Transport 同样启用；watch 的 JSON 行流格式不变 | 一个进程的所有 watch 复用一条连接，更接近 Kubernetes 客户端经 TLS 默认使用 HTTP/2 的行为 |

@@ -20,11 +20,10 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 		before, err := client.Deployments(f.Client, f.Namespace).Get(ctx, "cp")
 		framework.ExpectNoError(err)
 
-		By("restarting apiserver, controller-manager and scheduler")
-		_, err = framework.Docker(ctx, "restart",
-			framework.ComponentContainer("apiserver"), framework.ComponentContainer("controller"), framework.ComponentContainer("scheduler"))
+		By("restarting the control-plane node, which stops etcd and every control-plane component")
+		_, err = framework.Docker(ctx, "restart", framework.ComponentContainer("control-plane"))
 		framework.ExpectNoError(err)
-		framework.WaitForClusterReady(ctx, 2)
+		framework.WaitForClusterReady(ctx, len(framework.Nodes))
 
 		after, err := client.Deployments(f.Client, f.Namespace).Get(ctx, "cp")
 		framework.ExpectNoError(err)
@@ -49,7 +48,7 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 		By("restarting the worker-2 node container, which kills its containerd and Pods")
 		_, err := framework.Docker(ctx, "restart", framework.ComponentContainer("worker-2"))
 		framework.ExpectNoError(err)
-		framework.WaitForClusterReady(ctx, 2)
+		framework.WaitForClusterReady(ctx, len(framework.Nodes))
 
 		after := f.WaitForPod(ctx, "reboot", "runs again in a new sandbox", func(p *corev1.Pod) bool {
 			return corev1.IsPodReady(p) && len(p.Status.ContainerStatuses) == 1 &&
@@ -81,7 +80,7 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 
 		By("starting the cluster again")
 		framework.KK(ctx, "cluster", "up")
-		framework.WaitForClusterReady(ctx, 2)
+		framework.WaitForClusterReady(ctx, len(framework.Nodes))
 		after, err := client.Deployments(f.Client, f.Namespace).Get(ctx, "downup")
 		framework.ExpectNoError(err)
 		Expect(after.UID).To(Equal(before.UID), "desired state must survive down/up")

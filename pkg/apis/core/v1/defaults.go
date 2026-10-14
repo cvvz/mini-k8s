@@ -1,6 +1,10 @@
 package v1
 
-import "mini-k8s/pkg/util/ptr"
+import (
+	"strings"
+
+	"mini-k8s/pkg/util/ptr"
+)
 
 // SetDefaultsPodSpec fills omitted Pod spec fields.
 func SetDefaultsPodSpec(spec *PodSpec) {
@@ -13,6 +17,13 @@ func SetDefaultsPodSpec(spec *PodSpec) {
 	for _, list := range [][]Container{spec.InitContainers, spec.Containers} {
 		for i := range list {
 			c := &list[i]
+			if c.ImagePullPolicy == "" {
+				// As in Kubernetes: always pull ":latest" and untagged images.
+				c.ImagePullPolicy = PullIfNotPresent
+				if tag := imageTag(c.Image); tag == "" || tag == "latest" {
+					c.ImagePullPolicy = PullAlways
+				}
+			}
 			for j := range c.Ports {
 				if c.Ports[j].Protocol == "" {
 					c.Ports[j].Protocol = "TCP"
@@ -32,6 +43,19 @@ func SetDefaultsPodSpec(spec *PodSpec) {
 			}
 		}
 	}
+}
+
+// imageTag returns the tag of an image reference ("" without one; digests
+// count as tags).
+func imageTag(image string) string {
+	if i := strings.LastIndexByte(image, '@'); i >= 0 {
+		return image[i+1:]
+	}
+	name := image[strings.LastIndexByte(image, '/')+1:]
+	if i := strings.LastIndexByte(name, ':'); i >= 0 {
+		return name[i+1:]
+	}
+	return ""
 }
 
 func setDefaultsProbe(p *Probe) {

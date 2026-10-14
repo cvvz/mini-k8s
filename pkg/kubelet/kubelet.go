@@ -63,6 +63,12 @@ type Config struct {
 	CNIConfDir string
 	// Routes, when set, keeps host-gw routes to other nodes' Pod subnets.
 	Routes *hostgw.Agent
+	// StaticPodPath is a directory of Pod manifests run without the API.
+	StaticPodPath string
+	// Role, such as "control-plane" or "worker", becomes the
+	// node-role.kubernetes.io/<role> label when the node registers; a
+	// control-plane node also gets the control-plane NoSchedule taint.
+	Role string
 }
 
 // Kubelet manages the Pods of one node.
@@ -79,20 +85,31 @@ type Kubelet struct {
 	mu      sync.Mutex
 	workers map[string]chan struct{} // by Pod UID
 	killing map[string]bool
+	static  map[string]*corev1.Pod // static Pods by UID
 }
 
 // New returns a kubelet for cfg.NodeName.
 func New(c *client.Client, rt Runtime, recorder *record.Recorder, cfg Config) *Kubelet {
 	k := &Kubelet{cfg: cfg, client: c, runtime: rt, recorder: recorder, network: make(chan struct{}, 1),
-		workers: map[string]chan struct{}{}, killing: map[string]bool{}}
+		workers: map[string]chan struct{}{}, killing: map[string]bool{}, static: map[string]*corev1.Pod{}}
 	k.probes = prober.NewManager(rt.Exec, recorder)
 	k.probes.Changed = k.dispatch
 	k.probes.Failed = k.restartContainer
 	k.pods = informers.New(client.Pods(c, ""), client.ListOptions{FieldSelector: "spec.nodeName=" + cfg.NodeName}, 0)
+	// Mirror Pods are not run; their changes wake the static Pod they mirror.
+	onPod := func(p *corev1.Pod) {
+		if corev1.IsMirrorPod(p) {
+			if static, ok := k.staticPodNamed(p.Namespace, p.Name); ok {
+				k.dispatch(static)
+			}
+			return
+		}
+		k.dispatch(p)
+	}
 	k.pods.AddHandler(informers.Handler[*corev1.Pod]{
-		OnAdd:    func(p *corev1.Pod) { k.dispatch(p) },
-		OnUpdate: func(_, p *corev1.Pod) { k.dispatch(p) },
-		OnDelete: func(p *corev1.Pod) { k.dispatch(p) },
+		OnAdd:    onPod,
+		OnUpdate: func(_, p *corev1.Pod) { onPod(p) },
+		OnDelete: onPod,
 	})
 	poke := func() {
 		select {
@@ -132,6 +149,10 @@ func (k *Kubelet) Run(ctx context.Context) {
 	go k.nodes.Run(ctx)
 	go k.networkLoop(ctx)
 	go k.pods.Run(ctx)
+	// Static Pods run without the API, which may itself be one of them.
+	if k.cfg.StaticPodPath != "" {
+		go k.staticLoop(ctx)
+	}
 	if !informers.WaitForSync(ctx, k.pods.HasSynced) {
 		return
 	}
@@ -146,7 +167,9 @@ func (k *Kubelet) Run(ctx context.Context) {
 		case <-poll.C:
 			// Container exits are not pushed to us; poll each Pod's state.
 			for _, p := range k.pods.List("", nil) {
-				k.dispatch(p)
+				if !corev1.IsMirrorPod(p) {
+					k.dispatch(p)
+				}
 			}
 		case <-housekeeping.C:
 			k.cleanupOrphans(ctx)
@@ -232,8 +255,11 @@ func (k *Kubelet) dispatch(p *corev1.Pod) {
 func (k *Kubelet) worker(key, uid string, wake chan struct{}) {
 	ns, name := informers.SplitKey(key)
 	for range wake {
-		pod, ok := k.pods.Get(ns, name)
-		if !ok || pod.UID != uid {
+		pod, ok := k.staticPod(uid)
+		if !ok {
+			pod, ok = k.pods.Get(ns, name)
+		}
+		if !ok || pod.UID != uid || corev1.IsMirrorPod(pod) {
 			k.probes.Remove(uid)
 			k.mu.Lock()
 			delete(k.workers, uid)
@@ -263,6 +289,10 @@ func (k *Kubelet) syncPod(ctx context.Context, pod *corev1.Pod) {
 		status.StartTime = &now
 	}
 	k.recordTransitions(pod, &status)
+	if _, static := k.staticPod(pod.UID); static {
+		k.syncStatic(ctx, pod, status)
+		return
+	}
 	if equalStatus(pod.Status, status) {
 		return
 	}
@@ -296,7 +326,7 @@ func (k *Kubelet) recordContainerTransitions(pod *corev1.Pod, before, after []co
 			case kuberuntime.ReasonCrashLoopBackOff:
 				k.recorder.Eventf(pod, corev1.EventTypeWarning, "BackOff", "Back-off restarting failed container %s", cs.Name)
 			case kuberuntime.ReasonErrImagePull, kuberuntime.ReasonImagePullBackOff, kuberuntime.ReasonCreateContainerError,
-				kuberuntime.ReasonCreateContainerConfigError,
+				kuberuntime.ReasonCreateContainerConfigError, kuberuntime.ReasonErrImageNeverPull,
 				kuberuntime.ReasonRunContainerError, kuberuntime.ReasonCreatePodSandboxError:
 				k.recorder.Eventf(pod, corev1.EventTypeWarning, "Failed", "%s: %s", cs.State.Waiting.Reason, cs.State.Waiting.Message)
 			}
@@ -327,6 +357,10 @@ func (k *Kubelet) terminate(ctx context.Context, pod *corev1.Pod) {
 		log.Printf("kubelet: kill %s/%s: %v", pod.Namespace, pod.Name, err)
 		return
 	}
+	if _, static := k.staticPod(pod.UID); static {
+		k.removeStatic(ctx, pod)
+		return
+	}
 	err := client.Pods(k.client, pod.Namespace).Delete(ctx, pod.Name, &metav1.DeleteOptions{
 		GracePeriodSeconds: ptr.To[int64](0), Preconditions: &metav1.Preconditions{UID: &pod.UID}})
 	if err != nil && !client.IsNotFound(err) && !client.IsConflict(err) {
@@ -346,11 +380,28 @@ func (k *Kubelet) cleanupOrphans(ctx context.Context) {
 		for uid := range k.workers {
 			uids[uid] = true
 		}
+		for uid := range k.static {
+			uids[uid] = true
+		}
 		k.mu.Unlock()
 		return uids
 	}
 	if err := k.runtime.Cleanup(ctx, keep); err != nil {
 		log.Printf("kubelet: cleanup: %v", err)
+	}
+	// Mirror Pods of static Pods this kubelet no longer runs.
+	for _, p := range k.pods.List("", nil) {
+		if !corev1.IsMirrorPod(p) {
+			continue
+		}
+		if _, ok := k.staticPod(p.Annotations[corev1.AnnotationConfigMirror]); ok {
+			continue
+		}
+		err := client.Pods(k.client, p.Namespace).Delete(ctx, p.Name, &metav1.DeleteOptions{
+			GracePeriodSeconds: ptr.To[int64](0), Preconditions: &metav1.Preconditions{UID: &p.UID}})
+		if err != nil && !client.IsNotFound(err) && !client.IsConflict(err) {
+			log.Printf("kubelet: delete orphaned mirror Pod %s/%s: %v", p.Namespace, p.Name, err)
+		}
 	}
 }
 
@@ -374,9 +425,18 @@ func (k *Kubelet) heartbeat(ctx context.Context) error {
 	nodes := client.Nodes(k.client)
 	node, err := nodes.Get(ctx, k.cfg.NodeName)
 	if client.IsNotFound(err) {
-		node, err = nodes.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: k.cfg.NodeName, Labels: map[string]string{
+		labels := map[string]string{
 			corev1.LabelHostname: k.cfg.NodeName, corev1.LabelOSStable: "linux", corev1.LabelArchStable: runtime.GOARCH,
-		}}})
+		}
+		var taints []corev1.Taint
+		if k.cfg.Role != "" {
+			labels[corev1.LabelNodeRolePrefix+k.cfg.Role] = ""
+		}
+		if k.cfg.Role == "control-plane" {
+			taints = append(taints, corev1.Taint{Key: corev1.TaintNodeRoleControlPlane, Effect: corev1.TaintEffectNoSchedule})
+		}
+		node, err = nodes.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: k.cfg.NodeName, Labels: labels},
+			Spec: corev1.NodeSpec{Taints: taints}})
 	}
 	if err != nil {
 		return err
@@ -458,7 +518,10 @@ func (k *Kubelet) Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		pod, ok := k.pods.Get(parts[0], parts[1])
+		pod, ok := k.staticPodNamed(parts[0], parts[1])
+		if !ok {
+			pod, ok = k.pods.Get(parts[0], parts[1])
+		}
 		if !ok {
 			http.Error(w, "pod not found on this node", http.StatusNotFound)
 			return

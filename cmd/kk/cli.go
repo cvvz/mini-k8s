@@ -409,6 +409,7 @@ func (a *app) delete(ctx context.Context, p args) error {
 		res       scheme.ResourceInfo
 		namespace string
 		name      string
+		uid       string // of the deleted object, set after deletion
 	}
 	var victims []victim
 	if files := p.values["filename"]; len(files) > 0 {
@@ -417,7 +418,7 @@ func (a *app) delete(ctx context.Context, p args) error {
 			return err
 		}
 		for _, d := range docs {
-			victims = append(victims, victim{d.res, d.namespace, d.name})
+			victims = append(victims, victim{d.res, d.namespace, d.name, ""})
 		}
 	} else {
 		targets, err := parseTargets(p.positional)
@@ -435,11 +436,11 @@ func (a *app) delete(ctx context.Context, p args) error {
 					return err
 				}
 				for _, obj := range objs {
-					victims = append(victims, victim{t.res, obj.GetObjectMeta().Namespace, obj.GetObjectMeta().Name})
+					victims = append(victims, victim{t.res, obj.GetObjectMeta().Namespace, obj.GetObjectMeta().Name, ""})
 				}
 			}
 			for _, name := range t.names {
-				victims = append(victims, victim{t.res, a.ns(t.res, false), name})
+				victims = append(victims, victim{t.res, a.ns(t.res, false), name, ""})
 			}
 		}
 	}
@@ -449,7 +450,8 @@ func (a *app) delete(ctx context.Context, p args) error {
 		if v.res.Resource == scheme.Nodes.Resource {
 			return errors.New("nodes are registered by their kubelets and cannot be deleted with kk")
 		}
-		err := a.client.Do(ctx, http.MethodDelete, v.res.Path(v.namespace, v.name), nil, "", opts, nil)
+		obj := v.res.New()
+		err := a.client.Do(ctx, http.MethodDelete, v.res.Path(v.namespace, v.name), nil, "", opts, obj)
 		if client.IsNotFound(err) && ignoreNotFound {
 			continue
 		}
@@ -457,6 +459,7 @@ func (a *app) delete(ctx context.Context, p args) error {
 			return err
 		}
 		fmt.Fprintf(a.out, "%s %q deleted\n", qualifiedName(v.res), v.name)
+		v.uid = obj.GetObjectMeta().UID
 		deleted = append(deleted, v)
 	}
 	if !p.boolean("wait", true) {
@@ -466,8 +469,10 @@ func (a *app) delete(ctx context.Context, p args) error {
 	defer cancel()
 	for _, v := range deleted {
 		for {
-			_, err := a.getObject(waitCtx, v.res, v.namespace, v.name)
-			if client.IsNotFound(err) {
+			// Done once the deleted object is gone, even if a new one with
+			// the same name (a recreated mirror Pod) already exists.
+			obj, err := a.getObject(waitCtx, v.res, v.namespace, v.name)
+			if client.IsNotFound(err) || (err == nil && v.uid != "" && obj.GetObjectMeta().UID != v.uid) {
 				break
 			}
 			if waitCtx.Err() != nil {

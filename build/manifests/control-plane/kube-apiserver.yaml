@@ -1,0 +1,46 @@
+# Static Pod run by the control-plane node's kubelet. hostNetwork: it listens
+# on the node's port 8080, which Compose publishes on 127.0.0.1:18000. The API
+# token is read from the node's /etc/mini-k8s/token (never written here).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-apiserver
+  namespace: kube-system
+  labels:
+    component: kube-apiserver
+    tier: control-plane
+spec:
+  hostNetwork: true
+  containers:
+  - name: kube-apiserver
+    image: mini-k8s:local
+    imagePullPolicy: Never
+    command: ["/mini", "kube-apiserver"]
+    env:
+    - name: MINI_TOKEN_FILE
+      value: /etc/mini-k8s/token
+    - name: MINI_ETCD
+      value: http://127.0.0.1:2379
+    livenessProbe:
+      httpGet:
+        host: 127.0.0.1
+        path: /livez
+        port: 8080
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 8
+    readinessProbe:
+      httpGet:
+        host: 127.0.0.1
+        path: /readyz
+        port: 8080
+      periodSeconds: 2
+    volumeMounts:
+    - name: credentials
+      mountPath: /etc/mini-k8s
+      readOnly: true
+  volumes:
+  - name: credentials
+    hostPath:
+      path: /etc/mini-k8s
+      type: Directory

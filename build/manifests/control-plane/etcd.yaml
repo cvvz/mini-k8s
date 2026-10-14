@@ -1,0 +1,46 @@
+# Static Pod run by the control-plane node's kubelet (like kubeadm's
+# /etc/kubernetes/manifests/etcd.yaml). Its data lives on the node's disk.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: etcd
+  namespace: kube-system
+  labels:
+    component: etcd
+    tier: control-plane
+spec:
+  hostNetwork: true
+  containers:
+  - name: etcd
+    image: mini-k8s-etcd:3.5.17
+    imagePullPolicy: Never
+    command:
+    - /usr/local/bin/etcd
+    - --name=control-plane
+    - --data-dir=/var/lib/etcd
+    - --listen-client-urls=http://127.0.0.1:2379
+    - --advertise-client-urls=http://127.0.0.1:2379
+    - --listen-peer-urls=http://127.0.0.1:2380
+    - --initial-advertise-peer-urls=http://127.0.0.1:2380
+    - --initial-cluster=control-plane=http://127.0.0.1:2380
+    - --auto-compaction-mode=periodic
+    - --auto-compaction-retention=10m
+    env:
+    - name: ETCD_UNSUPPORTED_ARCH
+      value: arm64
+    livenessProbe:
+      httpGet:
+        host: 127.0.0.1
+        path: /health
+        port: 2379
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 8
+    volumeMounts:
+    - name: etcd-data
+      mountPath: /var/lib/etcd
+  volumes:
+  - name: etcd-data
+    hostPath:
+      path: /var/lib/etcd
+      type: DirectoryOrCreate

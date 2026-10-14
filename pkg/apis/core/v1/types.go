@@ -55,6 +55,8 @@ type NodeSpec struct {
 	// PodCIDR is the node's Pod address range, assigned once by the node IPAM controller.
 	PodCIDR       string `json:"podCIDR,omitempty"`
 	Unschedulable bool   `json:"unschedulable,omitempty"`
+	// Taints repel Pods that do not tolerate them.
+	Taints []Taint `json:"taints,omitempty"`
 }
 
 // NodeStatus is reported by the kubelet.
@@ -146,7 +148,33 @@ type PodSpec struct {
 	NodeName                      string `json:"nodeName,omitempty"`
 	// HostNetwork runs the Pod in the node's network namespace.
 	HostNetwork bool `json:"hostNetwork,omitempty"`
+	// Tolerations let the Pod run on nodes with matching taints.
+	Tolerations []Toleration `json:"tolerations,omitempty"`
 }
+
+// Annotations of static Pods and their mirror Pods.
+const (
+	// AnnotationConfigMirror marks a mirror Pod; its value is the static
+	// Pod's hash.
+	AnnotationConfigMirror = "kubernetes.io/config.mirror"
+	// AnnotationConfigSource is where a Pod came from: "api" or "file".
+	AnnotationConfigSource = "kubernetes.io/config.source"
+	// AnnotationConfigHash is the static Pod's hash (its UID).
+	AnnotationConfigHash = "kubernetes.io/config.hash"
+)
+
+// IsMirrorPod reports whether p mirrors a static Pod.
+func IsMirrorPod(p *Pod) bool {
+	_, ok := p.Annotations[AnnotationConfigMirror]
+	return ok
+}
+
+// Image pull policies.
+const (
+	PullAlways       = "Always"
+	PullIfNotPresent = "IfNotPresent"
+	PullNever        = "Never"
+)
 
 // Volume is a named directory available to the Pod's containers; exactly
 // one source is set.
@@ -202,14 +230,16 @@ const (
 
 // Container is one process image in a Pod.
 type Container struct {
-	Name         string               `json:"name"`
-	Image        string               `json:"image"`
-	Command      []string             `json:"command,omitempty"`
-	Args         []string             `json:"args,omitempty"`
-	Env          []EnvVar             `json:"env,omitempty"`
-	Ports        []ContainerPort      `json:"ports,omitempty"`
-	Resources    ResourceRequirements `json:"resources,omitzero"`
-	VolumeMounts []VolumeMount        `json:"volumeMounts,omitempty"`
+	Name  string `json:"name"`
+	Image string `json:"image"`
+	// ImagePullPolicy is Always, IfNotPresent or Never.
+	ImagePullPolicy string               `json:"imagePullPolicy,omitempty"`
+	Command         []string             `json:"command,omitempty"`
+	Args            []string             `json:"args,omitempty"`
+	Env             []EnvVar             `json:"env,omitempty"`
+	Ports           []ContainerPort      `json:"ports,omitempty"`
+	Resources       ResourceRequirements `json:"resources,omitzero"`
+	VolumeMounts    []VolumeMount        `json:"volumeMounts,omitempty"`
 	// LivenessProbe failures restart the container.
 	LivenessProbe *Probe `json:"livenessProbe,omitempty"`
 	// ReadinessProbe failures take the container (and Pod) out of service.

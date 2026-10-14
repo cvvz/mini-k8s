@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,7 +86,7 @@ func (s *Scheduler) schedule(ctx context.Context, key string) error {
 	if !ok || !pending(pod) {
 		return nil
 	}
-	node, reason := s.pickNode(time.Now())
+	node, reason := s.pickNode(pod, time.Now())
 	if node == "" {
 		s.markUnschedulable(ctx, pod, reason)
 		s.queue.AddAfter(key, retryInterval)
@@ -104,7 +105,7 @@ func (s *Scheduler) schedule(ctx context.Context, key string) error {
 	return nil
 }
 
-func (s *Scheduler) pickNode(now time.Time) (string, string) {
+func (s *Scheduler) pickNode(pod *corev1.Pod, now time.Time) (string, string) {
 	load := map[string]int{}
 	bound := map[string]bool{}
 	for _, p := range s.pods.List("", nil) {
@@ -124,13 +125,18 @@ func (s *Scheduler) pickNode(now time.Time) (string, string) {
 	s.mu.Unlock()
 	nodes := s.nodes.List("", nil)
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
-	best, notReady, cordoned := "", 0, 0
+	best := ""
+	rejected := map[string]int{} // reason -> nodes
 	for _, n := range nodes {
+		if taint, ok := corev1.UntoleratedTaint(n.Spec.Taints, pod.Spec.Tolerations); ok {
+			rejected["had untolerated taint "+taint.String()]++
+			continue
+		}
 		switch {
 		case !corev1.IsNodeReady(n, now):
-			notReady++
+			rejected["were not ready"]++
 		case n.Spec.Unschedulable:
-			cordoned++
+			rejected["were unschedulable"]++
 		case best == "" || load[n.Name] < load[best]:
 			best = n.Name
 		}
@@ -138,7 +144,22 @@ func (s *Scheduler) pickNode(now time.Time) (string, string) {
 	if best != "" {
 		return best, ""
 	}
-	return "", fmt.Sprintf("0/%d nodes are available: %d node(s) were not ready, %d node(s) were unschedulable", len(nodes), notReady, cordoned)
+	return "", unschedulableMessage(len(nodes), rejected)
+}
+
+// unschedulableMessage explains why no node fits, like the Kubernetes
+// scheduler: "0/3 nodes are available: 1 node(s) had untolerated taint
+// {node-role.kubernetes.io/control-plane: }, 2 node(s) were unschedulable."
+func unschedulableMessage(total int, rejected map[string]int) string {
+	reasons := make([]string, 0, len(rejected))
+	for reason, n := range rejected {
+		reasons = append(reasons, fmt.Sprintf("%d node(s) %s", n, reason))
+	}
+	sort.Strings(reasons)
+	if len(reasons) == 0 {
+		return fmt.Sprintf("0/%d nodes are available.", total)
+	}
+	return fmt.Sprintf("0/%d nodes are available: %s.", total, strings.Join(reasons, ", "))
 }
 
 func (s *Scheduler) markUnschedulable(ctx context.Context, pod *corev1.Pod, reason string) {

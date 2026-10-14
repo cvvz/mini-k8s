@@ -19,7 +19,7 @@ spec:
   initContainers:
   - name: wait-for-api            # runs to completion before the containers start
     image: mini-k8s:local
-    command: ["/mini", "fetch", "http://apiserver:8080/healthz"]
+    command: ["/mini", "fetch", "http://control-plane:8080/healthz"]
   containers:
   - name: web
     image: mini-k8s:local

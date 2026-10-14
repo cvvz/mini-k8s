@@ -102,13 +102,20 @@ func (s *Server) authenticate(r *http.Request) bool {
 
 // ServeHTTP routes a request.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !s.authenticate(r) {
+	// Health checks are public, as in Kubernetes, so probes need no token.
+	public := r.Method == http.MethodGet && (r.URL.Path == "/healthz" || r.URL.Path == "/livez" || r.URL.Path == "/readyz")
+	if !public && !s.authenticate(r) {
 		writeError(w, newStatus(http.StatusUnauthorized, metav1.ReasonUnauthorized, "Unauthorized"))
 		return
 	}
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	switch path {
-	case "/healthz", "/readyz", "/livez":
+	case "/livez":
+		// The process is alive; a broken etcd must not get it restarted.
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ok"))
+		return
+	case "/healthz", "/readyz":
 		if err := s.cfg.Store.Health(r.Context()); err != nil {
 			writeError(w, newStatus(http.StatusServiceUnavailable, metav1.ReasonServiceUnavail, "etcd unavailable: %v", err))
 			return

@@ -394,3 +394,30 @@ func TestContainersStoppedByProbesRestartEvenAfterExitingZero(t *testing.T) {
 		}
 	}
 }
+
+func TestImagePullPolicies(t *testing.T) {
+	f, m, now := newTestManager(t)
+	pod := testPod()
+	pod.Spec.Containers[0].Image, pod.Spec.Containers[0].ImagePullPolicy = "local:1", corev1.PullNever
+	syncOnce(m, pod)
+	if w := pod.Status.ContainerStatuses[0].State.Waiting; w == nil || w.Reason != ReasonErrImageNeverPull || f.pulls != 0 ||
+		w.Message != `Container image "local:1" is not present with pull policy of Never` {
+		t.Fatalf("Never must not pull: %+v pulls=%d", pod.Status.ContainerStatuses[0], f.pulls)
+	}
+	f.mu.Lock()
+	f.images["local:1"] = true // e.g. kk image load
+	f.mu.Unlock()
+	syncOnce(m, pod) // no backoff: starts on the next sync
+	if pod.Status.ContainerStatuses[0].State.Running == nil {
+		t.Fatalf("Never with the image present: %+v", pod.Status.ContainerStatuses[0])
+	}
+
+	always := testPod()
+	always.UID = "uid-2"
+	always.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+	*now = now.Add(time.Minute)
+	syncOnce(m, always)
+	if f.pulls != 1 || always.Status.ContainerStatuses[0].State.Running == nil {
+		t.Fatalf("Always pulls even a present image: pulls=%d", f.pulls)
+	}
+}
