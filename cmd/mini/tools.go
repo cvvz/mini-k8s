@@ -60,3 +60,17 @@ func runAlloc(args []string) int {
 	runtime.KeepAlive(held)
 	return 0
 }
+
+// runWrite writes TEXT and a newline to FILE, like `echo TEXT > FILE`:
+// `mini write /data/greeting hello`.
+func runWrite(args []string) int {
+	if len(args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: mini write FILE TEXT")
+		return 2
+	}
+	if err := os.WriteFile(args[0], []byte(args[1]+"\n"), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}

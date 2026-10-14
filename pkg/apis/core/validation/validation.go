@@ -4,6 +4,8 @@ package validation
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	"mini-k8s/pkg/labels"
@@ -21,9 +23,11 @@ func ValidatePodSpec(path string, spec *corev1.PodSpec) []string {
 	default:
 		errs = append(errs, fmt.Sprintf(`%s.restartPolicy: Unsupported value: %q: supported values: "Always", "OnFailure", "Never"`, path, spec.RestartPolicy))
 	}
+	volumes, verrs := validateVolumes(path+".volumes", spec.Volumes)
+	errs = append(errs, verrs...)
 	names := map[string]bool{}
-	errs = append(errs, validateContainers(path+".initContainers", spec.InitContainers, names, true)...)
-	errs = append(errs, validateContainers(path+".containers", spec.Containers, names, false)...)
+	errs = append(errs, validateContainers(path+".initContainers", spec.InitContainers, names, true, volumes)...)
+	errs = append(errs, validateContainers(path+".containers", spec.Containers, names, false, volumes)...)
 	if g := spec.TerminationGracePeriodSeconds; g != nil && *g < 0 {
 		errs = append(errs, path+".terminationGracePeriodSeconds: Invalid value: must be >= 0")
 	}
@@ -36,7 +40,7 @@ func ValidatePodSpec(path string, spec *corev1.PodSpec) []string {
 // validateContainers validates a container list; names must be unique
 // across init and regular containers, so seen is shared between the calls.
 // Init containers run to completion and may not have probes.
-func validateContainers(path string, containers []corev1.Container, seen map[string]bool, init bool) []string {
+func validateContainers(path string, containers []corev1.Container, seen map[string]bool, init bool, volumes map[string]bool) []string {
 	var errs []string
 	for i, c := range containers {
 		p := fmt.Sprintf("%s[%d]", path, i)
@@ -63,6 +67,19 @@ func validateContainers(path string, containers []corev1.Container, seen map[str
 			}
 		}
 		errs = append(errs, validateResources(p+".resources", c.Resources)...)
+		mountPaths := map[string]bool{}
+		for j, m := range c.VolumeMounts {
+			mp := fmt.Sprintf("%s.volumeMounts[%d]", p, j)
+			if !volumes[m.Name] {
+				errs = append(errs, fmt.Sprintf("%s.name: Not found: %q", mp, m.Name))
+			}
+			if !strings.HasPrefix(m.MountPath, "/") {
+				errs = append(errs, fmt.Sprintf("%s.mountPath: Invalid value: %q: must be an absolute path", mp, m.MountPath))
+			} else if mountPaths[cleanPath(m.MountPath)] {
+				errs = append(errs, fmt.Sprintf("%s.mountPath: Invalid value: %q: must be unique", mp, m.MountPath))
+			}
+			mountPaths[cleanPath(m.MountPath)] = true
+		}
 		for _, probe := range []struct {
 			name  string
 			probe *corev1.Probe
@@ -80,6 +97,48 @@ func validateContainers(path string, containers []corev1.Container, seen map[str
 	}
 	return errs
 }
+
+// validateVolumes checks names and sources and returns the volume names.
+func validateVolumes(path string, volumes []corev1.Volume) (map[string]bool, []string) {
+	var errs []string
+	names := map[string]bool{}
+	for i, v := range volumes {
+		p := fmt.Sprintf("%s[%d]", path, i)
+		if !validation.IsDNS1123Label(v.Name) {
+			errs = append(errs, p+".name: Invalid value: must be a DNS label")
+		} else if names[v.Name] {
+			errs = append(errs, fmt.Sprintf("%s.name: Duplicate value: %q", p, v.Name))
+		}
+		names[v.Name] = true
+		sources := 0
+		if e := v.EmptyDir; e != nil {
+			sources++
+			if e.Medium != "" && e.Medium != corev1.StorageMediumMemory {
+				errs = append(errs, fmt.Sprintf(`%s.emptyDir.medium: Unsupported value: %q: supported values: "", "Memory"`, p, e.Medium))
+			}
+		}
+		if h := v.HostPath; h != nil {
+			sources++
+			if !strings.HasPrefix(h.Path, "/") {
+				errs = append(errs, fmt.Sprintf("%s.hostPath.path: Invalid value: %q: must be an absolute path", p, h.Path))
+			}
+			if h.Type != nil {
+				switch *h.Type {
+				case "", corev1.HostPathDirectoryOrCreate, corev1.HostPathDirectory, corev1.HostPathFileOrCreate, corev1.HostPathFile:
+				default:
+					errs = append(errs, fmt.Sprintf(`%s.hostPath.type: Unsupported value: %q: supported values: "", "DirectoryOrCreate", "Directory", "FileOrCreate", "File"`, p, *h.Type))
+				}
+			}
+		}
+		if sources != 1 {
+			errs = append(errs, p+": Required value: must specify exactly one of emptyDir, hostPath")
+		}
+	}
+	return names, errs
+}
+
+// cleanPath normalises a mount path for duplicate detection.
+func cleanPath(p string) string { return filepath.Clean(p) }
 
 // validateResources allows cpu and memory, with requests at most the limits.
 func validateResources(path string, r corev1.ResourceRequirements) []string {

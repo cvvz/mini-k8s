@@ -28,7 +28,8 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
 - **Pod**：多个容器共享同一网络命名空间；init 容器按顺序逐个运行至成功；`restartPolicy`
   Always/OnFailure/Never，终态 Succeeded/Failed 与 Initialized/ContainersReady/Ready 条件按
   Kubernetes kubelet 的规则计算；liveness、readiness、startup 探针（httpGet、tcpSocket、exec）；
-  CPU 与内存的 requests/limits 经 cgroup 生效（超限 `OOMKilled`）及 QoS 等级；`kk exec` 在容器内执行命令。
+  CPU 与内存的 requests/limits 经 cgroup 生效（超限 `OOMKilled`）及 QoS 等级；`emptyDir`（磁盘或内存）与
+  `hostPath` 卷；`hostNetwork`；`kk exec` 在容器内执行命令。
 - **kubelet**：节点注册与心跳；每个 Pod 一个 worker；带退避的重启（CrashLoopBackOff）；
   镜像拉取失败上报（ErrImagePull/ImagePullBackOff）；节点重启后重建沙箱；
   日志（支持 follow/tail/`--previous`）；清理孤儿沙箱。
@@ -238,9 +239,11 @@ kk apply -n team -f examples/hello.yaml  # 在另一个命名空间部署（不�
 kk get pods -A                           # 跨命名空间查看
 kk delete namespace team                 # 级联删除其中所有资源
 
-kk apply -f examples/init-and-sidecar.yaml   # init 容器 + 共享网络的两个容器
+kk apply -f examples/init-and-sidecar.yaml   # init 容器 + 共享网络与卷的两个容器
 kk get pod web-with-sidecar              # 先 Init:0/1，之后 2/2 Running
 kk exec web-with-sidecar -c sidecar -- /mini fetch http://127.0.0.1:8080/
+kk exec web-with-sidecar -c sidecar -- /mini write /shared/note "written by the sidecar"
+kk exec web-with-sidecar -c web -- /mini cat /shared/note
 
 docker exec mini-k8s-worker-1-1 crictl ps    # 像登录真实机器一样查看节点内部
 ```
@@ -276,7 +279,7 @@ kk image load my-app:v1
 | --- | --- | --- |
 | Namespace | `v1` | 创建、删除（Terminating → 清空内容 → 删除）。启动时自动创建 `default`、`kube-system`。 |
 | Node | `v1` | 由 kubelet 注册并心跳，上报 `capacity`/`allocatable`（cpu、memory、pods）；`spec.podCIDR` 由 node IPAM 一次性分配；`spec.unschedulable` 会被调度器遵守。 |
-| Pod | `v1` | `containers`（一个或多个）与 `initContainers`：`name`、`image`、`command`、`args`、`env`、`ports`、`resources`（cpu、memory）、`livenessProbe`/`readinessProbe`/`startupProbe`（init 容器不可用）；`restartPolicy`（Always、OnFailure、Never）；`terminationGracePeriodSeconds`；`nodeName`。创建后 spec 不可变。子资源 `log` 与 `exec`。 |
+| Pod | `v1` | `containers`（一个或多个）与 `initContainers`：`name`、`image`、`command`、`args`、`env`、`ports`、`resources`（cpu、memory）、`livenessProbe`/`readinessProbe`/`startupProbe`（init 容器不可用）、`volumeMounts`；`volumes`（`emptyDir` 支持 `medium`/`sizeLimit`，`hostPath` 支持 `type`）；`hostNetwork`；`restartPolicy`（Always、OnFailure、Never）；`terminationGracePeriodSeconds`；`nodeName`。创建后 spec 不可变。子资源 `log` 与 `exec`。 |
 | Deployment | `apps/v1` | `replicas`（默认 1）、`selector`（matchLabels/matchExpressions，创建后不可变）、`template`（`restartPolicy` 必须为 Always）。模板变化时按 Recreate 策略替换 Pod。 |
 | Service | `v1` | 整个集群一个 HTTP 网关 Service：`selector`，一个 `port: 80`，`targetPort`。 |
 | Event | `v1` | 由组件记录，可查询；1 小时后过期。 |
@@ -287,7 +290,7 @@ kk image load my-app:v1
 
 ## 当前限制（后续里程碑会解决）
 
-- Pod 还没有卷、ConfigMap 和 Secret；调度器不考虑资源请求（资源感知调度在 M7）。`kk exec` 把命令执行完再返回输出，
+- 还没有 ConfigMap、Secret 和持久卷（M8）；不支持 `subPath` 与 `hostPort`；调度器不考虑资源请求（资源感知调度在 M7）。`kk exec` 把命令执行完再返回输出，
   不支持交互式会话（stdin/tty），与 Kubernetes 的流式 exec 不同。
 - Deployment 直接管理 Pod，没有 ReplicaSet，也没有滚动更新和回滚。
 - 只有一个 HTTP 网关 Service，没有 ClusterIP、集群 DNS、NodePort 和 Ingress
@@ -370,7 +373,7 @@ unset MINI_TOKEN
 | M2 | kind 式节点：节点内 containerd、kubelet 经 CRI 管理 Pod、自研 CNI（host-gw 跨节点路由） | ✅ |
 | M3a | Pod：多容器、init 容器、重启策略与终态、`kk exec` | ✅ |
 | M3b | Pod：liveness/readiness/startup 探针、资源 requests 与 limits、QoS、节点容量 | ✅ |
-| M3c | Pod：卷（emptyDir、hostPath）、hostNetwork | 计划中 |
+| M3c | Pod：卷（emptyDir、hostPath）、hostNetwork | ✅ |
 | M4 | 控制面自托管：control-plane 节点、static/mirror Pod，etcd 与控制面组件运行在 kube-system | 计划中 |
 | M5 | ReplicaSet、滚动更新与回滚 | 计划中 |
 | M6 | ClusterIP、Endpoints、iptables kube-proxy、DNS、NodePort、Ingress | 计划中 |
@@ -381,6 +384,7 @@ unset MINI_TOKEN
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M3c 卷与主机网络计划](docs/superpowers/plans/2026-10-15-m3c-volumes-hostnetwork.md)
 - [M3b 探针与资源计划](docs/superpowers/plans/2026-10-15-m3b-probes-resources.md)
 - [M3a 多容器 Pod 计划](docs/superpowers/plans/2026-10-15-m3a-multi-container.md)
 - [M2 kind 式节点计划](docs/superpowers/plans/2026-10-15-m2-kind-nodes.md)

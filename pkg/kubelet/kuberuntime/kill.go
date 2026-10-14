@@ -54,8 +54,12 @@ func (m *Manager) KillPod(ctx context.Context, pod *corev1.Pod, grace int64) err
 		}
 	}
 	if len(errs) == 0 {
-		// containerd leaves log files behind; removing them is the kubelet's job.
+		// containerd leaves log files and volumes behind; removing them is
+		// the kubelet's job.
 		if err := os.RemoveAll(m.PodLogDir(pod)); err != nil {
+			errs = append(errs, err)
+		}
+		if err := m.removePodDir(pod.UID); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -102,18 +106,32 @@ func (m *Manager) killedByProbe(id string) bool {
 	return ok
 }
 
-// Cleanup removes sandboxes and log directories of Pods that are not in keep
-// (by UID). Sandboxes without Pod metadata (not created by a kubelet) are left
-// alone.
-func (m *Manager) Cleanup(ctx context.Context, keep map[string]bool) error {
+// Cleanup removes the sandboxes, volumes and log directories of Pods that
+// keep does not return (by UID). Sandboxes without Pod metadata (not created
+// by a kubelet) are left alone.
+//
+// Everything is listed before keep is called: a Pod whose sandbox or
+// directory exists at listing time is either in the later keep set or really
+// gone, so a Pod that arrives meanwhile never loses its data.
+func (m *Manager) Cleanup(ctx context.Context, keep func() map[string]bool) error {
 	resp, err := m.runtime.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{})
 	if err != nil {
 		return err
 	}
 	var errs []error
+	// Pod directories are named by UID, log directories <namespace>_<name>_<uid>.
+	podDirs, err := os.ReadDir(m.PodsDir)
+	if err != nil && !os.IsNotExist(err) {
+		errs = append(errs, err)
+	}
+	logDirs, err := os.ReadDir(m.PodLogsDir)
+	if err != nil && !os.IsNotExist(err) {
+		errs = append(errs, err)
+	}
+	kept := keep()
 	for _, sb := range resp.Items {
 		uid := sb.Labels[LabelPodUID]
-		if uid == "" || keep[uid] {
+		if uid == "" || kept[uid] {
 			continue
 		}
 		if err := m.removeSandbox(ctx, sb.Id); err != nil {
@@ -122,14 +140,16 @@ func (m *Manager) Cleanup(ctx context.Context, keep map[string]bool) error {
 		}
 		m.forget(uid)
 	}
-	// Log directories are named <namespace>_<name>_<uid>.
-	entries, err := os.ReadDir(m.PodLogsDir)
-	if err != nil && !os.IsNotExist(err) {
-		errs = append(errs, err)
+	for _, e := range podDirs {
+		if e.IsDir() && !kept[e.Name()] {
+			if err := m.removePodDir(e.Name()); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	}
-	for _, e := range entries {
+	for _, e := range logDirs {
 		i := strings.LastIndexByte(e.Name(), '_')
-		if !e.IsDir() || i < 0 || keep[e.Name()[i+1:]] {
+		if !e.IsDir() || i < 0 || kept[e.Name()[i+1:]] {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(m.PodLogsDir, e.Name())); err != nil {

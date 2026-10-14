@@ -42,7 +42,7 @@ const Version = "mini-kubelet/v2"
 type Runtime interface {
 	SyncPod(ctx context.Context, pod *corev1.Pod) corev1.PodStatus
 	KillPod(ctx context.Context, pod *corev1.Pod, grace int64) error
-	Cleanup(ctx context.Context, keep map[string]bool) error
+	Cleanup(ctx context.Context, keep func() map[string]bool) error
 	Logs(ctx context.Context, pod *corev1.Pod, container string, o kuberuntime.LogOptions, w io.Writer) error
 	Exec(ctx context.Context, pod *corev1.Pod, container string, cmd []string, timeout time.Duration) (*corev1.PodExecResult, error)
 	StopContainer(ctx context.Context, pod *corev1.Pod, containerID string, grace int64) error
@@ -253,6 +253,9 @@ func (k *Kubelet) syncPod(ctx context.Context, pod *corev1.Pod) {
 		return
 	}
 	status := k.runtime.SyncPod(ctx, pod)
+	if pod.Spec.HostNetwork {
+		status.PodIP = k.cfg.Address // the node's network namespace
+	}
 	k.probes.Sync(pod, status)
 	status.HostIP = k.cfg.Address
 	if status.StartTime == nil {
@@ -293,6 +296,7 @@ func (k *Kubelet) recordContainerTransitions(pod *corev1.Pod, before, after []co
 			case kuberuntime.ReasonCrashLoopBackOff:
 				k.recorder.Eventf(pod, corev1.EventTypeWarning, "BackOff", "Back-off restarting failed container %s", cs.Name)
 			case kuberuntime.ReasonErrImagePull, kuberuntime.ReasonImagePullBackOff, kuberuntime.ReasonCreateContainerError,
+				kuberuntime.ReasonCreateContainerConfigError,
 				kuberuntime.ReasonRunContainerError, kuberuntime.ReasonCreatePodSandboxError:
 				k.recorder.Eventf(pod, corev1.EventTypeWarning, "Failed", "%s: %s", cs.State.Waiting.Reason, cs.State.Waiting.Message)
 			}
@@ -330,10 +334,20 @@ func (k *Kubelet) terminate(ctx context.Context, pod *corev1.Pod) {
 	}
 }
 
+// cleanupOrphans removes what belongs to Pods that are neither in the API
+// nor still being handled by a worker.
 func (k *Kubelet) cleanupOrphans(ctx context.Context) {
-	keep := map[string]bool{}
-	for _, p := range k.pods.List("", nil) {
-		keep[p.UID] = true
+	keep := func() map[string]bool {
+		uids := map[string]bool{}
+		for _, p := range k.pods.List("", nil) {
+			uids[p.UID] = true
+		}
+		k.mu.Lock()
+		for uid := range k.workers {
+			uids[uid] = true
+		}
+		k.mu.Unlock()
+		return uids
 	}
 	if err := k.runtime.Cleanup(ctx, keep); err != nil {
 		log.Printf("kubelet: cleanup: %v", err)

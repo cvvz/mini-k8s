@@ -260,6 +260,8 @@ func newTestManager(t *testing.T) (*fakeCRI, *Manager, *time.Time) {
 	f := newFakeCRI()
 	m := NewManager(f, f)
 	m.PodLogsDir = t.TempDir()
+	m.PodsDir = filepath.Join(t.TempDir(), "pods")
+	m.Mounter = &fakeMounter{mounted: map[string]int64{}}
 	now := time.Now()
 	m.now = func() time.Time { return now }
 	return f, m, &now
@@ -434,7 +436,7 @@ func TestKillPodAndCleanup(t *testing.T) {
 	gone := testPod()
 	gone.UID, gone.Name = "uid-9", "deleted-while-node-was-down"
 	staleLog := touchLog(t, m, gone, "app", 0)
-	if err := m.Cleanup(context.Background(), map[string]bool{"uid-1": true}); err != nil {
+	if err := m.Cleanup(context.Background(), func() map[string]bool { return map[string]bool{"uid-1": true} }); err != nil {
 		t.Fatal(err)
 	}
 	if s, _ := f.count(); s != 2 {
