@@ -1,8 +1,10 @@
 package mini
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +18,16 @@ func TestAPIRejectsUnauthenticatedRequestsBeforeStorage(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 401 {
 		t.Fatalf("got %d", resp.StatusCode)
+	}
+}
+
+func TestServiceSingletonError(t *testing.T) {
+	if err := serviceSingletonError("", "web"); err != nil {
+		t.Fatalf("first Service rejected: %v", err)
+	}
+	err := serviceSingletonError("web", "other")
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "only one Service is supported") || !strings.Contains(err.Error(), `"web"`) {
+		t.Fatalf("unclear second Service error: %v", err)
 	}
 }
 

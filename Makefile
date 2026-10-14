@@ -1,7 +1,7 @@
 GO ?= go
 GOARCH ?= $(shell $(GO) env GOHOSTARCH)
 
-.PHONY: build prepare-etcd test
+.PHONY: build prepare-etcd test vet e2e
 build:
 	mkdir -p bin
 	$(GO) build -o bin/kk ./cmd/kk
@@ -28,3 +28,10 @@ prepare-etcd:
 
 test:
 	$(GO) test ./...
+
+vet:
+	$(GO) vet ./...
+
+# Mutates the running project cluster (scale, kill, restart, down/up); see README.
+e2e:
+	MINI_E2E=1 $(GO) test ./internal/mini -run '^TestLiveCluster$$' -count=1 -v -timeout 5m

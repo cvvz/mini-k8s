@@ -73,10 +73,6 @@ func execute(ctx context.Context, args []string) (result error) {
 }
 
 func main() {
-	if err := os.Setenv("PATH", "/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:"+os.Getenv("PATH")); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := execute(ctx, os.Args[1:]); err != nil {

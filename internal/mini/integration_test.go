@@ -69,6 +69,17 @@ func TestLiveCluster(t *testing.T) {
 		ns, err := c.List(ctx, "Node")
 		return err == nil && len(ns) == 2 && ChooseNode(ns, nil, time.Now()) != ""
 	})
+	// Start from a clean slate so reruns do not inherit Pod placement from earlier runs.
+	for _, kind := range []string{"Deployment", "Service"} {
+		if r, err := c.Get(ctx, kind, "web"); err == nil {
+			if err := c.Delete(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+		} else if !errors.Is(err, ErrNotFound) {
+			t.Fatal(err)
+		}
+	}
+	wait("previous demo removed", func() bool { return podsRunning(0) })
 	cli("apply", "-f", "examples/demo.yaml")
 	wait("two real Pods running", func() bool { return podsRunning(2) })
 	ps, err := c.List(ctx, "Pod")
