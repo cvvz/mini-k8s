@@ -37,7 +37,7 @@ services:
     depends_on: [apiserver]
   controller:
     <<: *common
-    command: [controller]
+    command: [controller-manager]
     depends_on: [apiserver]
   worker-1:
     <<: *common

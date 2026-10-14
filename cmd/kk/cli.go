@@ -4,288 +4,575 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
-	"os"
-	"regexp"
+	"net/http"
+	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
+	"time"
 
-	"mini-k8s/internal/mini"
+	"mini-k8s/internal/api"
+	"mini-k8s/internal/client"
 )
 
-const usage = `Usage:
-  kk cluster up|status|down
-  kk apply -f FILE
-  kk delete -f FILE
-  kk delete pod|deployment|service NAME
-  kk get nodes|pods|deployments|services [NAME] [-o json]
-  kk describe pod NAME
-  kk logs POD
-  kk scale deployment NAME --replicas N
-
-Run from the project root or use the project's bin/kk executable.
-`
+// Version is the kk client version.
+const Version = "v2.0.0-mini"
 
 type app struct {
-	client *mini.Client
-	out    io.Writer
+	client        *client.Client
+	out           io.Writer
+	in            io.Reader
+	namespace     string
+	explicitNS    bool
+	allNamespaces bool
+	now           func() time.Time
 }
 
-var resourceName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-
-func (a app) run(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return errors.New(usage)
+func newApp(c *client.Client, out io.Writer, in io.Reader, a args) *app {
+	return &app{
+		client: c, out: out, in: in,
+		namespace: a.value("namespace", api.NamespaceDefault), explicitNS: len(a.values["namespace"]) > 0,
+		allNamespaces: a.boolean("all-namespaces", false), now: time.Now,
 	}
-	switch args[0] {
-	case "delete":
-		if len(args) == 3 && !strings.HasPrefix(args[1], "-") {
-			kind, err := mini.Kind(args[1])
-			if err != nil {
-				return err
-			}
-			if err := a.remove(ctx, kind, args[2]); err != nil {
-				return fmt.Errorf("%s/%s: %w", kind, args[2], err)
-			}
-			_, err = fmt.Fprintf(a.out, "%s/%s deleted\n", kind, args[2])
-			return err
-		}
-		fallthrough
-	case "apply":
-		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
-		flags.SetOutput(io.Discard)
-		file := flags.String("f", "", "manifest file")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		if *file == "" || flags.NArg() != 0 {
-			return fmt.Errorf("usage: kk %s -f FILE", args[0])
-		}
-		f, err := os.Open(*file)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		resources, err := readManifests(f)
-		if err != nil {
-			return err
-		}
-		for _, resource := range resources {
-			action := "deleted"
-			if args[0] == "apply" {
-				action, err = a.apply(ctx, resource)
-			} else {
-				err = a.remove(ctx, resource.Kind, resource.Metadata.Name)
-			}
-			if err != nil {
-				return fmt.Errorf("%s/%s: %w", resource.Kind, resource.Metadata.Name, err)
-			}
-			if _, err := fmt.Fprintf(a.out, "%s/%s %s\n", resource.Kind, resource.Metadata.Name, action); err != nil {
-				return err
-			}
-		}
-		return nil
+}
+
+func (a *app) run(ctx context.Context, command string, p args) error {
+	switch command {
 	case "get":
-		return a.get(ctx, args[1:])
+		return a.get(ctx, p)
 	case "describe":
-		if len(args) != 3 {
-			return errors.New("usage: kk describe pod NAME")
+		return a.describe(ctx, p)
+	case "apply":
+		return a.applyFiles(ctx, p, false)
+	case "create":
+		if len(p.positional) >= 1 && (p.positional[0] == "namespace" || p.positional[0] == "ns") {
+			return a.createNamespace(ctx, p)
 		}
-		kind, err := mini.Kind(args[1])
-		if err != nil || kind != "Pod" {
-			return errors.New("describe supports only pod")
-		}
-		if err := checkName(args[2]); err != nil {
-			return err
-		}
-		resource, err := a.client.Get(ctx, kind, args[2])
-		if err != nil {
-			return err
-		}
-		return writeJSON(a.out, resource)
+		return a.applyFiles(ctx, p, true)
+	case "delete":
+		return a.delete(ctx, p)
 	case "logs":
-		if len(args) != 2 {
-			return errors.New("usage: kk logs POD")
-		}
-		if err := checkName(args[1]); err != nil {
-			return err
-		}
-		return a.client.Logs(ctx, args[1], a.out)
+		return a.logs(ctx, p)
 	case "scale":
-		return a.scale(ctx, args[1:])
-	default:
-		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
+		return a.scale(ctx, p)
+	case "api-resources":
+		return a.apiResources(ctx)
+	case "version":
+		return a.version(ctx)
 	}
+	return fmt.Errorf("unknown command %q", command)
 }
 
-func checkName(name string) error {
-	if !resourceName.MatchString(name) {
-		return fmt.Errorf("invalid resource name %q: expected a DNS label", name)
+// target is a resource type with optional names.
+type target struct {
+	res   api.ResourceInfo
+	names []string
+}
+
+func lookupResource(name string) (api.ResourceInfo, error) {
+	res, ok := api.Lookup(name)
+	if !ok {
+		return res, fmt.Errorf("the server doesn't have a resource type %q", name)
+	}
+	return res, nil
+}
+
+// parseTargets accepts "TYPE[,TYPE] [NAME...]" or "TYPE/NAME...".
+func parseTargets(pos []string) ([]target, error) {
+	if len(pos) == 0 {
+		return nil, errors.New("you must specify the type of resource; run kk api-resources for a list")
+	}
+	if strings.Contains(pos[0], "/") {
+		var out []target
+		for _, p := range pos {
+			typ, name, ok := strings.Cut(p, "/")
+			if !ok || name == "" {
+				return nil, fmt.Errorf("there is no need to specify a resource type as a separate argument when passing arguments in resource/name form: %q", p)
+			}
+			res, err := lookupResource(typ)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, target{res: res, names: []string{name}})
+		}
+		return out, nil
+	}
+	types := strings.Split(pos[0], ",")
+	if len(types) > 1 && len(pos) > 1 {
+		return nil, errors.New("names cannot be combined with multiple resource types; use TYPE/NAME")
+	}
+	var out []target
+	for _, typ := range types {
+		res, err := lookupResource(typ)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, target{res: res, names: pos[1:]})
+	}
+	return out, nil
+}
+
+// ns returns the namespace for requests on res ("" = cluster-scoped or all).
+func (a *app) ns(res api.ResourceInfo, forList bool) string {
+	if !res.Namespaced || (forList && a.allNamespaces) {
+		return ""
+	}
+	return a.namespace
+}
+
+func (a *app) getObject(ctx context.Context, res api.ResourceInfo, ns, name string) (api.Object, error) {
+	obj := res.New()
+	err := a.client.Do(ctx, http.MethodGet, res.Path(ns, name), nil, "", nil, obj)
+	return obj, err
+}
+
+func (a *app) listObjects(ctx context.Context, res api.ResourceInfo, ns string, opts client.ListOptions) ([]api.Object, string, error) {
+	var raw struct {
+		Metadata api.ListMeta      `json:"metadata"`
+		Items    []json.RawMessage `json:"items"`
+	}
+	if err := a.client.Do(ctx, http.MethodGet, res.Path(ns, ""), opts.Query(), "", nil, &raw); err != nil {
+		return nil, "", err
+	}
+	objs := make([]api.Object, 0, len(raw.Items))
+	for _, item := range raw.Items {
+		obj := res.New()
+		if err := json.Unmarshal(item, obj); err != nil {
+			return nil, "", err
+		}
+		objs = append(objs, obj)
+	}
+	sort.SliceStable(objs, func(i, j int) bool {
+		mi, mj := objs[i].GetObjectMeta(), objs[j].GetObjectMeta()
+		if mi.Namespace != mj.Namespace {
+			return mi.Namespace < mj.Namespace
+		}
+		return mi.Name < mj.Name
+	})
+	return objs, raw.Metadata.ResourceVersion, nil
+}
+
+func (a *app) get(ctx context.Context, p args) error {
+	targets, err := parseTargets(p.positional)
+	if err != nil {
+		return err
+	}
+	output := p.value("output", "")
+	switch output {
+	case "", "wide", "json", "yaml", "name":
+	default:
+		return fmt.Errorf("unsupported output format %q (use wide, json, yaml or name)", output)
+	}
+	opts := client.ListOptions{LabelSelector: p.value("selector", ""), FieldSelector: p.value("field-selector", "")}
+	if p.boolean("watch", false) {
+		return a.getAndWatch(ctx, targets, opts, output)
+	}
+	var all []api.Object
+	for i, t := range targets {
+		var objs []api.Object
+		if len(t.names) > 0 {
+			for _, name := range t.names {
+				obj, err := a.getObject(ctx, t.res, a.ns(t.res, false), name)
+				if err != nil {
+					return err
+				}
+				objs = append(objs, obj)
+			}
+		} else {
+			if objs, _, err = a.listObjects(ctx, t.res, a.ns(t.res, true), opts); err != nil {
+				return err
+			}
+		}
+		if output == "json" || output == "yaml" {
+			all = append(all, objs...)
+			continue
+		}
+		if i > 0 {
+			fmt.Fprintln(a.out)
+		}
+		if err := a.printObjects(t.res, objs, output); err != nil {
+			return err
+		}
+	}
+	if output == "json" || output == "yaml" {
+		var v any = all
+		if len(targets) == 1 && len(targets[0].names) == 1 {
+			v = all[0]
+		} else {
+			v = map[string]any{"apiVersion": "v1", "kind": "List", "items": all}
+		}
+		return writeStructured(a.out, v, output)
 	}
 	return nil
 }
 
-func (a app) remove(ctx context.Context, kind, name string) error {
-	if kind == "Node" {
-		return errors.New("Nodes are managed by workers")
-	}
-	if err := checkName(name); err != nil {
-		return err
-	}
-	current, err := a.client.Get(ctx, kind, name)
-	if err != nil {
-		return err
-	}
-	return a.client.Delete(ctx, current)
-}
-
-func (a app) apply(ctx context.Context, resource mini.Resource) (string, error) {
-	current, err := a.client.Get(ctx, resource.Kind, resource.Metadata.Name)
-	if errors.Is(err, mini.ErrNotFound) {
-		_, err = a.client.Create(ctx, resource)
-		return "created", err
-	}
-	if err != nil {
-		return "", err
-	}
-	if err := mini.CheckUpdate(current, resource); err != nil {
-		return "", err
-	}
-	// Keep all server-owned fields and the optimistic concurrency version.
-	current.Spec = resource.Spec
-	if err := a.client.Update(ctx, current, false); err != nil {
-		return "", err
-	}
-	return "configured", nil
-}
-
-func (a app) get(ctx context.Context, args []string) error {
-	var positional []string
-	output := ""
-	for i := 0; i < len(args); i++ {
-		switch {
-		case args[i] == "-o":
-			i++
-			if i == len(args) {
-				return errors.New("-o requires json")
-			}
-			output = args[i]
-		case strings.HasPrefix(args[i], "-o="):
-			output = strings.TrimPrefix(args[i], "-o=")
-		case strings.HasPrefix(args[i], "-"):
-			return fmt.Errorf("unknown flag %s", args[i])
-		default:
-			positional = append(positional, args[i])
+func (a *app) printObjects(res api.ResourceInfo, objs []api.Object, output string) error {
+	if output == "name" {
+		for _, obj := range objs {
+			fmt.Fprintln(a.out, qualifiedName(res)+"/"+obj.GetObjectMeta().Name)
 		}
+		return nil
 	}
-	if len(positional) < 1 || len(positional) > 2 || output != "" && output != "json" {
-		return errors.New("usage: kk get KIND [NAME] [-o json]")
-	}
-	kind, err := mini.Kind(positional[0])
-	if err != nil {
-		return err
-	}
-	if len(positional) == 2 {
-		if err := checkName(positional[1]); err != nil {
+	if len(objs) == 0 {
+		if res.Namespaced && !a.allNamespaces {
+			_, err := fmt.Fprintf(a.out, "No resources found in %s namespace.\n", a.namespace)
 			return err
 		}
-		resource, err := a.client.Get(ctx, kind, positional[1])
+		_, err := fmt.Fprintln(a.out, "No resources found")
+		return err
+	}
+	return printTable(a.out, res, objs, tableOptions{wide: output == "wide", withNamespace: a.allNamespaces && res.Namespaced, header: true, now: a.now()})
+}
+
+// getAndWatch prints the current state of one resource type (optionally one
+// named object) and then streams its changes, like kubectl get -w.
+func (a *app) getAndWatch(ctx context.Context, targets []target, opts client.ListOptions, output string) error {
+	if len(targets) != 1 || len(targets[0].names) > 1 {
+		return errors.New("watch needs a single resource type and at most one name")
+	}
+	t := targets[0]
+	if len(t.names) == 1 {
+		// Report NotFound like a plain get, then narrow the watch to the object.
+		if _, err := a.getObject(ctx, t.res, a.ns(t.res, false), t.names[0]); err != nil {
+			return err
+		}
+		byName := "metadata.name=" + t.names[0]
+		if opts.FieldSelector != "" {
+			byName = opts.FieldSelector + "," + byName
+		}
+		opts.FieldSelector = byName
+	}
+	objs, rv, err := a.listObjects(ctx, t.res, a.ns(t.res, len(t.names) == 0), opts)
+	if err != nil {
+		return err
+	}
+	if output == "json" || output == "yaml" {
+		for _, obj := range objs {
+			if err := writeWatchObject(a.out, obj, output); err != nil {
+				return err
+			}
+		}
+	} else if err := a.printObjects(t.res, objs, output); err != nil {
+		return err
+	}
+	return a.watch(ctx, t.res, len(t.names) == 0, opts, rv, output)
+}
+
+func writeWatchObject(w io.Writer, obj api.Object, output string) error {
+	if output == "yaml" {
+		if _, err := fmt.Fprintln(w, "---"); err != nil {
+			return err
+		}
+	}
+	return writeStructured(w, obj, output)
+}
+
+func (a *app) watch(ctx context.Context, res api.ResourceInfo, forList bool, opts client.ListOptions, rv, output string) error {
+	for {
+		q := opts
+		q.ResourceVersion = rv
+		values := q.Query()
+		values.Set("watch", "true")
+		resp, err := a.client.Request(ctx, http.MethodGet, res.Path(a.ns(res, forList), ""), values, "", nil, true)
 		if err != nil {
 			return err
 		}
-		if output == "json" {
-			return writeJSON(a.out, resource)
+		dec := json.NewDecoder(resp.Body)
+		for {
+			var ev api.WatchEvent
+			if err := dec.Decode(&ev); err != nil {
+				resp.Body.Close()
+				if ctx.Err() != nil {
+					return nil
+				}
+				break // server timeout: re-establish from the last resourceVersion
+			}
+			if ev.Type == api.EventError {
+				resp.Body.Close()
+				return fmt.Errorf("watch: %s", ev.Object)
+			}
+			obj := res.New()
+			if err := json.Unmarshal(ev.Object, obj); err != nil {
+				resp.Body.Close()
+				return err
+			}
+			rv = obj.GetObjectMeta().ResourceVersion
+			switch output {
+			case "name":
+				fmt.Fprintln(a.out, qualifiedName(res)+"/"+obj.GetObjectMeta().Name)
+				continue
+			case "json", "yaml":
+				if err := writeWatchObject(a.out, obj, output); err != nil {
+					resp.Body.Close()
+					return err
+				}
+				continue
+			}
+			if err := printTable(a.out, res, []api.Object{obj}, tableOptions{wide: output == "wide", withNamespace: a.allNamespaces && res.Namespaced, now: a.now(), eventType: ev.Type}); err != nil {
+				resp.Body.Close()
+				return err
+			}
 		}
-		return printResources(a.out, []mini.Resource{resource})
 	}
-	resources, err := a.client.List(ctx, kind)
-	if err != nil {
-		return err
-	}
-	if resources == nil {
-		resources = []mini.Resource{}
-	}
-	if output == "json" {
-		return writeJSON(a.out, resources)
-	}
-	return printResources(a.out, resources)
 }
 
-func (a app) scale(ctx context.Context, args []string) error {
-	if len(args) < 3 {
-		return errors.New("usage: kk scale deployment NAME --replicas N")
+// qualifiedName returns "pod" or "deployment.apps", as kubectl prints.
+func qualifiedName(res api.ResourceInfo) string {
+	if res.Group == "" {
+		return res.Singular
 	}
-	kind, err := mini.Kind(args[0])
-	if err != nil || kind != "Deployment" {
-		return errors.New("scale supports only deployment")
-	}
-	if err := checkName(args[1]); err != nil {
-		return err
-	}
-	flags := flag.NewFlagSet("scale", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	replicas := flags.Int("replicas", -1, "desired replicas")
-	if err := flags.Parse(args[2:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 || *replicas < 0 || *replicas > 20 {
-		return errors.New("--replicas must be explicit and between 0 and 20")
-	}
-	resource, err := a.client.Get(ctx, kind, args[1])
+	return res.Singular + "." + res.Group
+}
+
+func (a *app) describe(ctx context.Context, p args) error {
+	targets, err := parseTargets(p.positional)
 	if err != nil {
 		return err
 	}
-	old := resource
-	var spec mini.DeploymentSpec
-	if err := mini.Strict(resource.Spec, &spec); err != nil {
+	first := true
+	for _, t := range targets {
+		var objs []api.Object
+		if len(t.names) == 0 {
+			if objs, _, err = a.listObjects(ctx, t.res, a.ns(t.res, true), client.ListOptions{}); err != nil {
+				return err
+			}
+		}
+		for _, name := range t.names {
+			obj, err := a.getObject(ctx, t.res, a.ns(t.res, false), name)
+			if err != nil {
+				return err
+			}
+			objs = append(objs, obj)
+		}
+		for _, obj := range objs {
+			if !first {
+				fmt.Fprintln(a.out)
+			}
+			first = false
+			if err := a.describeObject(ctx, t.res, obj); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (a *app) createNamespace(ctx context.Context, p args) error {
+	if len(p.positional) != 2 {
+		return errors.New("usage: kk create namespace NAME")
+	}
+	ns := &api.Namespace{ObjectMeta: api.ObjectMeta{Name: p.positional[1]}}
+	if _, err := client.Namespaces(a.client).Create(ctx, ns); err != nil {
 		return err
 	}
-	spec.Replicas = replicas
-	resource.Spec, err = json.Marshal(spec)
-	if err != nil {
-		return err
-	}
-	if err := mini.Validate(&resource); err != nil {
-		return err
-	}
-	if err := mini.CheckUpdate(old, resource); err != nil {
-		return err
-	}
-	if err := a.client.Update(ctx, resource, false); err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(a.out, "Deployment/%s scaled to %d\n", resource.Metadata.Name, *replicas)
+	_, err := fmt.Fprintf(a.out, "namespace/%s created\n", ns.Name)
 	return err
 }
 
-func writeJSON(out io.Writer, value any) error {
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(value)
-}
-
-func printResources(out io.Writer, resources []mini.Resource) error {
-	table := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(table, "KIND\tNAME\tPHASE\tNODE\tREPLICAS"); err != nil {
-		return err
-	}
-	for _, resource := range resources {
-		replicas := "-"
-		if resource.Kind == "Deployment" {
-			var spec mini.DeploymentSpec
-			if err := mini.Strict(resource.Spec, &spec); err != nil {
-				return err
-			}
-			if spec.Replicas != nil {
-				replicas = strconv.Itoa(*spec.Replicas)
-			}
+func (a *app) delete(ctx context.Context, p args) error {
+	opts := &api.DeleteOptions{}
+	if g := p.value("grace-period", ""); g != "" {
+		n, err := strconv.ParseInt(g, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid --grace-period %q", g)
 		}
-		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n", resource.Kind, resource.Metadata.Name, resource.Status.Phase, resource.Status.NodeName, replicas); err != nil {
+		if n >= 0 {
+			opts.GracePeriodSeconds = &n
+		}
+	}
+	if p.boolean("force", false) {
+		opts.GracePeriodSeconds = api.Int64(0)
+	}
+	switch c := strings.ToLower(p.value("cascade", "background")); c {
+	case "background", "true":
+		policy := api.DeletePropagationBackground
+		opts.PropagationPolicy = &policy
+	case "foreground":
+		policy := api.DeletePropagationForeground
+		opts.PropagationPolicy = &policy
+	case "orphan", "false":
+		policy := api.DeletePropagationOrphan
+		opts.PropagationPolicy = &policy
+	default:
+		return fmt.Errorf("invalid --cascade %q (use background, foreground or orphan)", c)
+	}
+	type victim struct {
+		res       api.ResourceInfo
+		namespace string
+		name      string
+	}
+	var victims []victim
+	if files := p.values["filename"]; len(files) > 0 {
+		docs, err := a.readDocuments(files)
+		if err != nil {
 			return err
 		}
+		for _, d := range docs {
+			victims = append(victims, victim{d.res, d.namespace, d.name})
+		}
+	} else {
+		targets, err := parseTargets(p.positional)
+		if err != nil {
+			return err
+		}
+		selector := p.value("selector", "")
+		for _, t := range targets {
+			if len(t.names) == 0 {
+				if selector == "" && !p.boolean("all", false) {
+					return fmt.Errorf("resource(s) were provided, but no name was specified; use a name, -l SELECTOR or --all")
+				}
+				objs, _, err := a.listObjects(ctx, t.res, a.ns(t.res, false), client.ListOptions{LabelSelector: selector})
+				if err != nil {
+					return err
+				}
+				for _, obj := range objs {
+					victims = append(victims, victim{t.res, obj.GetObjectMeta().Namespace, obj.GetObjectMeta().Name})
+				}
+			}
+			for _, name := range t.names {
+				victims = append(victims, victim{t.res, a.ns(t.res, false), name})
+			}
+		}
 	}
-	return table.Flush()
+	ignoreNotFound := p.boolean("ignore-not-found", false)
+	var deleted []victim
+	for _, v := range victims {
+		if v.res.Resource == api.Nodes.Resource {
+			return errors.New("nodes are registered by their kubelets and cannot be deleted with kk")
+		}
+		err := a.client.Do(ctx, http.MethodDelete, v.res.Path(v.namespace, v.name), nil, "", opts, nil)
+		if client.IsNotFound(err) && ignoreNotFound {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(a.out, "%s %q deleted\n", qualifiedName(v.res), v.name)
+		deleted = append(deleted, v)
+	}
+	if !p.boolean("wait", true) {
+		return nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	for _, v := range deleted {
+		for {
+			_, err := a.getObject(waitCtx, v.res, v.namespace, v.name)
+			if client.IsNotFound(err) {
+				break
+			}
+			if waitCtx.Err() != nil {
+				return fmt.Errorf("timed out waiting for %s %q to be deleted", qualifiedName(v.res), v.name)
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	return nil
+}
+
+func (a *app) logs(ctx context.Context, p args) error {
+	if len(p.positional) != 1 {
+		return errors.New("usage: kk logs POD [-c CONTAINER] [-f] [--tail N]")
+	}
+	name := strings.TrimPrefix(strings.TrimPrefix(p.positional[0], "pod/"), "pods/")
+	tail := 0
+	if t := p.value("tail", ""); t != "" {
+		n, err := strconv.Atoi(t)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid --tail %q", t)
+		}
+		tail = n
+	}
+	stream, err := a.client.PodLogs(ctx, a.namespace, name, client.LogOptions{
+		Container: p.value("container", ""), Follow: p.boolean("follow", false), TailLines: tail})
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+	_, err = io.Copy(a.out, stream)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
+}
+
+func (a *app) scale(ctx context.Context, p args) error {
+	pos := p.positional
+	if len(pos) == 1 && strings.Contains(pos[0], "/") {
+		typ, name, _ := strings.Cut(pos[0], "/")
+		pos = []string{typ, name}
+	}
+	if len(pos) != 2 {
+		return errors.New("usage: kk scale deployment NAME --replicas N")
+	}
+	res, err := lookupResource(pos[0])
+	if err != nil {
+		return err
+	}
+	if res.Resource != api.Deployments.Resource {
+		return fmt.Errorf("scale is not supported for %s", res.Resource)
+	}
+	replicas, err := strconv.Atoi(p.value("replicas", ""))
+	if err != nil || replicas < 0 {
+		return errors.New("--replicas must be a non-negative integer")
+	}
+	patch := map[string]any{"spec": map[string]any{"replicas": replicas}}
+	if err := a.client.Do(ctx, http.MethodPatch, res.Path(a.namespace, pos[1]), nil, "application/merge-patch+json", patch, nil); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(a.out, "%s/%s scaled\n", qualifiedName(res), pos[1])
+	return err
+}
+
+func (a *app) apiResources(ctx context.Context) error {
+	var groups struct {
+		Groups []struct {
+			PreferredVersion struct {
+				GroupVersion string `json:"groupVersion"`
+			} `json:"preferredVersion"`
+		} `json:"groups"`
+	}
+	if err := a.client.Do(ctx, http.MethodGet, "/apis", nil, "", nil, &groups); err != nil {
+		return err
+	}
+	paths := []string{"/api/v1"}
+	for _, g := range groups.Groups {
+		paths = append(paths, "/apis/"+g.PreferredVersion.GroupVersion)
+	}
+	tw := newTabWriter(a.out)
+	fmt.Fprintln(tw, "NAME\tSHORTNAMES\tAPIVERSION\tNAMESPACED\tKIND")
+	for _, path := range paths {
+		var list struct {
+			GroupVersion string `json:"groupVersion"`
+			Resources    []struct {
+				Name       string   `json:"name"`
+				Namespaced bool     `json:"namespaced"`
+				Kind       string   `json:"kind"`
+				ShortNames []string `json:"shortNames"`
+			} `json:"resources"`
+		}
+		if err := a.client.Do(ctx, http.MethodGet, path, nil, "", nil, &list); err != nil {
+			return err
+		}
+		for _, r := range list.Resources {
+			if strings.Contains(r.Name, "/") {
+				continue
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\n", r.Name, strings.Join(r.ShortNames, ","), list.GroupVersion, r.Namespaced, r.Kind)
+		}
+	}
+	return tw.Flush()
+}
+
+func (a *app) version(ctx context.Context) error {
+	fmt.Fprintf(a.out, "Client Version: %s\n", Version)
+	var v struct {
+		GitVersion string `json:"gitVersion"`
+	}
+	if err := a.client.Do(ctx, http.MethodGet, "/version", nil, "", nil, &v); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(a.out, "Server Version: %s\n", v.GitVersion)
+	return err
 }

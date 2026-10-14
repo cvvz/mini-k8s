@@ -1,3 +1,4 @@
+// Command kk is the mini-k8s command-line client.
 package main
 
 import (
@@ -8,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"mini-k8s/internal/mini"
+	"mini-k8s/internal/client"
 )
 
 func apiURL() string {
@@ -18,65 +19,79 @@ func apiURL() string {
 	return "http://127.0.0.1:18000"
 }
 
-func execute(ctx context.Context, args []string) (result error) {
-	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
-		_, err := fmt.Fprint(os.Stdout, usage)
-		return err
-	}
-	if len(args) == 0 {
+const usage = `kk controls a mini-k8s cluster.
+
+Cluster lifecycle (run from the project root or via its bin/kk):
+  kk cluster up|status|down
+
+Resources:
+  kk get TYPE[,TYPE...] [NAME...] [-o wide|json|yaml|name] [-l SELECTOR] [--field-selector F] [-w]
+  kk describe TYPE NAME
+  kk apply -f FILE|DIR|-          create or update (validated with a dry run first)
+  kk create -f FILE|DIR|-
+  kk create namespace NAME
+  kk delete -f FILE | TYPE NAME... | TYPE -l SELECTOR | TYPE --all
+            [--grace-period N] [--force] [--cascade background|foreground|orphan] [--wait=false]
+  kk logs POD [-c CONTAINER] [-f] [--tail N]
+  kk scale deployment NAME --replicas N
+  kk api-resources
+  kk version
+
+Global flags:
+  -n, --namespace NS     namespace (default "default")
+  -A, --all-namespaces   list across all namespaces
+
+TYPE accepts kubectl-style names: pods/pod/po, deployments/deploy, services/svc,
+nodes/no, namespaces/ns, events/ev. TYPE/NAME is also accepted.
+`
+
+func execute(ctx context.Context, argv []string) error {
+	command := findCommand(argv)
+	if command == "" || command == "help" {
+		if len(argv) > 0 && (argv[0] == "help" || argv[0] == "-h" || argv[0] == "--help") {
+			_, err := fmt.Fprint(os.Stdout, usage)
+			return err
+		}
 		return errors.New(usage)
 	}
+	specs, ok := commandFlags[command]
+	if !ok {
+		return fmt.Errorf("unknown command %q\n\n%s", command, usage)
+	}
+	parsed, err := parseArgs(argv, append(append([]flagSpec{}, globalFlags...), specs...))
+	if err != nil {
+		return err
+	}
+	parsed.positional = parsed.positional[1:] // drop the command itself
 	root, err := projectRoot()
 	if err != nil {
 		return err
 	}
-	isCluster := args[0] == "cluster"
-	if isCluster && (len(args) != 2 || args[1] != "up" && args[1] != "status" && args[1] != "down") {
-		return errors.New("usage: kk cluster up|status|down")
+	if command == "cluster" {
+		return runCluster(ctx, root, parsed)
 	}
-	token, err := loadToken(root, isCluster && args[1] == "up")
+	token, err := loadToken(root, false)
 	if err != nil {
 		return err
 	}
-	client := mini.NewClient(apiURL(), token)
-	if !isCluster {
-		return (app{client: client, out: os.Stdout}).run(ctx, args)
+	a := newApp(client.New(apiURL(), token), os.Stdout, os.Stdin, parsed)
+	return a.run(ctx, command, parsed)
+}
+
+// formatError renders API errors like kubectl does.
+func formatError(err error) string {
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && apiErr.Status.Reason != "" {
+		return fmt.Sprintf("Error from server (%s): %s", apiErr.Status.Reason, apiErr.Status.Message)
 	}
-	if args[1] == "status" {
-		if err := client.Health(ctx); err != nil {
-			return fmt.Errorf("API unhealthy: %w", err)
-		}
-		if _, err := fmt.Fprintln(os.Stdout, "API healthy"); err != nil {
-			return err
-		}
-		return (app{client: client, out: os.Stdout}).run(ctx, []string{"get", "nodes"})
-	}
-	c, err := newCluster(ctx, root, token, os.Stdout)
-	if err != nil {
-		return err
-	}
-	if c.cleanup != nil {
-		defer func() {
-			if err := c.cleanup(); err != nil {
-				result = errors.Join(result, fmt.Errorf("clean up temporary Docker config: %w", err))
-			}
-		}()
-	}
-	if args[1] == "up" {
-		return c.up(ctx)
-	}
-	if err := c.down(ctx); err != nil {
-		return err
-	}
-	_, err = fmt.Fprintln(os.Stdout, "mini-k8s stopped; etcd volume and token preserved")
-	return err
+	return "kk: " + err.Error()
 }
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := execute(ctx, os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "kk:", err)
+		fmt.Fprintln(os.Stderr, formatError(err))
 		os.Exit(1)
 	}
 }

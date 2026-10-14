@@ -4,10 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"encoding/json"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,24 +13,17 @@ import (
 	"testing"
 	"time"
 
-	"mini-k8s/internal/mini"
+	"mini-k8s/internal/api"
+	"mini-k8s/internal/client"
 )
 
 func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
-			_, _ = w.Write([]byte("{}"))
-			return
-		}
-		_ = json.NewEncoder(w).Encode([]mini.Resource{
-			{Metadata: mini.Metadata{Name: "worker-1"}, Status: mini.Status{Phase: "Ready", Heartbeat: time.Now()}},
-			{Metadata: mini.Metadata{Name: "worker-2"}, Status: mini.Status{Phase: "Ready", Heartbeat: time.Now()}},
-		})
-	}))
-	defer server.Close()
+	server := fakeNodeServer(t, "test-token", func() []api.Node {
+		return []api.Node{readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
+	})
 	var calls [][]string
 	c := cluster{
-		client: mini.NewClient(server.URL, "test-token"),
+		client: client.New(server.URL, "test-token"),
 		out:    io.Discard,
 		run: func(_ context.Context, name string, args ...string) (string, error) {
 			calls = append(calls, append([]string{name}, args...))

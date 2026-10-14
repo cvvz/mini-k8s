@@ -15,12 +15,16 @@ import (
 	"strings"
 	"time"
 
-	"mini-k8s/internal/mini"
+	"mini-k8s/internal/api"
+	"mini-k8s/internal/client"
 )
+
+// workerNames are the logical nodes Compose starts.
+var workerNames = []string{"worker-1", "worker-2"}
 
 type cluster struct {
 	run     func(context.Context, string, ...string) (string, error)
-	client  *mini.Client
+	client  *client.Client
 	out     io.Writer
 	cleanup func() error
 }
@@ -219,7 +223,7 @@ func newCluster(ctx context.Context, root, token string, out io.Writer) (cluster
 		}
 		return cluster{}, err
 	}
-	return cluster{run: run, client: mini.NewClient(apiURL(), token), out: out, cleanup: cleanup}, nil
+	return cluster{run: run, client: client.New(apiURL(), token), out: out, cleanup: cleanup}, nil
 }
 
 func (c cluster) up(ctx context.Context) error {
@@ -256,20 +260,25 @@ func (c cluster) waitReady(ctx context.Context) error {
 	for {
 		last = c.client.Health(ctx)
 		if last == nil {
-			nodes, err := c.client.List(ctx, "Node")
+			nodes, err := client.Nodes(c.client).List(ctx, client.ListOptions{})
 			last = err
 			if err == nil {
 				ready := map[string]bool{}
-				for _, node := range nodes {
-					age := time.Since(node.Status.Heartbeat)
-					if node.Status.Phase == "Ready" && age >= -5*time.Second && age <= 15*time.Second {
-						ready[node.Metadata.Name] = true
+				for i := range nodes.Items {
+					if api.IsNodeReady(&nodes.Items[i], time.Now()) {
+						ready[nodes.Items[i].Name] = true
 					}
 				}
-				if ready["worker-1"] && ready["worker-2"] {
+				missing := []string{}
+				for _, w := range workerNames {
+					if !ready[w] {
+						missing = append(missing, w)
+					}
+				}
+				if len(missing) == 0 {
 					return nil
 				}
-				last = errors.New("waiting for fresh Ready heartbeats from worker-1 and worker-2")
+				last = fmt.Errorf("waiting for fresh Ready heartbeats from %s", strings.Join(missing, ", "))
 			}
 		}
 		select {
@@ -294,5 +303,46 @@ func (c cluster) down(ctx context.Context) error {
 		}
 	}
 	_, err = c.run(ctx, "docker", "compose", "down")
+	return err
+}
+
+// runCluster implements `kk cluster up|status|down`.
+func runCluster(ctx context.Context, root string, a args) (result error) {
+	if len(a.positional) != 1 || (a.positional[0] != "up" && a.positional[0] != "status" && a.positional[0] != "down") {
+		return errors.New("usage: kk cluster up|status|down")
+	}
+	sub := a.positional[0]
+	token, err := loadToken(root, sub == "up")
+	if err != nil {
+		return err
+	}
+	if sub == "status" {
+		c := client.New(apiURL(), token)
+		if err := c.Health(ctx); err != nil {
+			return fmt.Errorf("API unhealthy: %w", err)
+		}
+		if _, err := fmt.Fprintln(os.Stdout, "API healthy"); err != nil {
+			return err
+		}
+		return newApp(c, os.Stdout, os.Stdin, args{}).run(ctx, "get", args{positional: []string{"nodes"}, values: map[string][]string{}, bools: map[string]bool{}})
+	}
+	c, err := newCluster(ctx, root, token, os.Stdout)
+	if err != nil {
+		return err
+	}
+	if c.cleanup != nil {
+		defer func() {
+			if err := c.cleanup(); err != nil {
+				result = errors.Join(result, fmt.Errorf("clean up temporary Docker config: %w", err))
+			}
+		}()
+	}
+	if sub == "up" {
+		return c.up(ctx)
+	}
+	if err := c.down(ctx); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(os.Stdout, "mini-k8s stopped; etcd volume and token preserved")
 	return err
 }

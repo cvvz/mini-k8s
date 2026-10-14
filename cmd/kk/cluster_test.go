@@ -2,10 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,7 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"mini-k8s/internal/mini"
+	"mini-k8s/internal/api"
+	"mini-k8s/internal/client"
 )
 
 func TestTokenCreationAndReuse(t *testing.T) {
@@ -110,31 +108,23 @@ func TestProjectRootRejectsUnrelatedComposeProject(t *testing.T) {
 func TestReadinessRequiresAuthenticatedHealthAndBothFreshWorkers(t *testing.T) {
 	for _, scenario := range []string{"ready", "unauthorized", "stale", "one-worker", "wrong-worker"} {
 		t.Run(scenario, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "Bearer secret" || scenario == "unauthorized" {
-					http.Error(w, "unauthorized", 401)
-					return
-				}
-				if r.URL.Path == "/healthz" {
-					_, _ = w.Write([]byte("{}"))
-					return
-				}
-				nodes := []mini.Resource{
-					{Kind: "Node", Metadata: mini.Metadata{Name: "worker-1"}, Status: mini.Status{Phase: "Ready", Heartbeat: time.Now()}},
-					{Kind: "Node", Metadata: mini.Metadata{Name: "worker-2"}, Status: mini.Status{Phase: "Ready", Heartbeat: time.Now()}},
-				}
+			token := "secret"
+			if scenario == "unauthorized" {
+				token = "other"
+			}
+			server := fakeNodeServer(t, token, func() []api.Node {
+				nodes := []api.Node{readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
 				switch scenario {
 				case "stale":
-					nodes[1].Status.Heartbeat = time.Now().Add(-time.Minute)
+					nodes[1] = readyNode("worker-2", time.Now().Add(-time.Minute))
 				case "one-worker":
 					nodes = nodes[:1]
 				case "wrong-worker":
-					nodes[1].Metadata.Name = "other"
+					nodes[1].Name = "other"
 				}
-				_ = json.NewEncoder(w).Encode(nodes)
-			}))
-			defer server.Close()
-			c := cluster{client: mini.NewClient(server.URL, "secret")}
+				return nodes
+			})
+			c := cluster{client: client.New(server.URL, "secret")}
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 			err := c.waitReady(ctx)
