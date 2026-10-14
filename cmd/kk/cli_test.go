@@ -265,11 +265,30 @@ func TestPodStatusReasonAndAges(t *testing.T) {
 	}
 }
 
-func TestDemoManifestIsValid(t *testing.T) {
+// TestExamplesFollowTheREADME replays the README walkthrough: the demo in the
+// default namespace, then the Service-less example in a second namespace.
+func TestExamplesFollowTheREADME(t *testing.T) {
 	c := testenv.New(t)
-	out, err := kk(t, c, "", "apply", "-f", filepath.Join("..", "..", "examples", "demo.yaml"))
+	example := func(name string) string { return filepath.Join("..", "..", "examples", name) }
+	out, err := kk(t, c, "", "apply", "-f", example("demo.yaml"))
 	if err != nil || !strings.Contains(out, "deployment.apps/web created") || !strings.Contains(out, "service/web created") {
 		t.Fatalf("%q %v", out, err)
+	}
+	if _, err := kk(t, c, "", "create", "namespace", "team"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err = kk(t, c, "", "apply", "-n", "team", "-f", example("hello.yaml")); err != nil || out != "deployment.apps/hello created\n" {
+		t.Fatalf("hello.yaml in a second namespace: %q %v", out, err)
+	}
+}
+
+func TestYAMLUsesTwoSpaceIndent(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeStructured(&buf, map[string]any{"spec": map[string]any{"replicas": 2}}, "yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != "spec:\n  replicas: 2\n" {
+		t.Fatalf("yaml output: %q", buf.String())
 	}
 }
 

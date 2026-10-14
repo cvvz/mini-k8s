@@ -94,10 +94,23 @@ client-go 或任何 Kubernetes 组件的实现代码。
 | 本地 Docker 访问权限 | 当前用户能访问本地 Unix socket；不接受 TCP、SSH 或远程 Docker endpoint。 |
 | 空闲端口 | API 使用 `127.0.0.1:18000`，网关使用 `127.0.0.1:18080`。 |
 
-已在 Ubuntu 24.04（WSL2，x86_64）、Docker Engine 29.9、Compose v5.6、Go 1.27 上完成
-端到端验证。rootless Docker 不属于已验证配置。
+| 环境 | 状态 |
+| --- | --- |
+| Ubuntu 24.04（WSL2，x86_64），WSL 内安装的原生 Docker Engine 29.9、Compose v5.6、Go 1.27 | ✅ 已完成端到端验证，包括全新 clone 后按本文操作 |
+| 其他 Linux 发行版（x86_64/arm64）、rootful Docker | 预期可用，未逐一验证。开启 SELinux enforcing 的系统（如 Fedora、RHEL）可能拒绝容器访问挂载进来的 Docker socket |
+| WSL2 + Docker Desktop 的 WSL 集成 | 未验证 |
+| macOS + Docker Desktop | v1 曾验证，v2 尚未重新验证；组件测试依赖的 `bin/etcd` 是 Linux 二进制，在 macOS 上这些测试会自动跳过 |
+| rootless Docker、原生 Windows | 不支持 |
 
-每个 Docker Engine 只支持一套本项目集群。宿主机构建架构必须与 Linux 容器架构一致。
+在 WSL 中使用时，请把仓库 clone 到 WSL 的 Linux 文件系统（如 `~/`），不要放在 Windows
+盘符挂载目录下：那里的构建慢得多，文件权限语义也不同。
+
+首次运行需要联网：Go 模块（`proxy.golang.org`，可用 `GOPROXY` 指定镜像）和 etcd 二进制
+（`storage.googleapis.com`）。示例应用复用本地构建的镜像，不需要从镜像仓库拉取。
+
+每个 Docker Engine 只支持一套本项目集群：Compose 项目名、网络名、数据卷名和发布端口都是
+固定的。在另一个目录重新 clone 并启动，接管的仍是同一套集群和同一份 etcd 数据（重置方法见
+第 5 步）。宿主机构建架构必须与 Linux 容器架构一致。
 
 > **仅用于可信的本地实验。** kubelet 挂载 Docker socket，具有较高的 Docker 主机权限。
 > API 使用共享 bearer token，没有 TLS 或 RBAC。不要对外暴露，也不要运行不可信的工作负载。
@@ -144,11 +157,12 @@ worker-2   Ready    worker   5s    mini-kubelet/v2
 ```sh
 ./bin/kk apply -f examples/demo.yaml
 ./bin/kk get deployments,pods,services -o wide
-curl --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/
+curl -sS --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/
 ```
 
 [示例](examples/demo.yaml)创建一个两副本的 Deployment 和一个 Service。网关会把请求
 轮询转发到就绪的 Pod，响应形如 `hello from web-997d7b744-f8shs`（Pod 名即主机名）。
+Pod 刚创建时网关可能短暂返回 `503`，上面的 curl 会自动重试。
 
 ### 4. 观察与操作
 
@@ -164,7 +178,8 @@ kk delete pod POD_NAME                   # 优雅终止，Deployment 会补建�
 kk delete pod POD_NAME --force           # 立即从 API 删除
 
 kk create namespace team
-kk apply -n team -f examples/demo.yaml   # 命名空间隔离（网关仍只服务一个 Service）
+kk apply -n team -f examples/hello.yaml  # 在另一个命名空间部署（不含 Service）
+kk get pods -A                           # 跨命名空间查看
 kk delete namespace team                 # 级联删除其中所有资源
 ```
 
@@ -177,6 +192,14 @@ kk delete namespace team                 # 级联删除其中所有资源
 该命令先停止协调组件，再清理本项目的业务容器并停止 Compose，**保留 etcd 数据卷和 token**。
 之后执行 `cluster up` 会恢复保存的资源。若想彻底移除示例，先执行
 `kk delete -f examples/demo.yaml` 再停止集群。
+
+若要**从零开始**（丢弃集群中的所有资源），在停止集群后删除 etcd 数据卷：
+
+```sh
+./bin/kk cluster down
+docker volume rm mini-k8s_etcd-data
+./bin/kk cluster up
+```
 
 ## 支持范围
 
@@ -222,7 +245,14 @@ make e2e E2E_FOCUS='sig-apps'     # 按名称运行子集
 ```
 
 **只在可重建的本项目实验集群上运行。** Disruptive 用例会重启控制面并执行
-`cluster down/up`。网关类用例要求集群中没有其他 Service，否则会跳过。
+`cluster down/up`。网关目前只服务一个 Service，网关类用例要求集群中没有其他 Service，
+否则会跳过。如果按 Quick Start 部署了示例，先删除它再跑完整套件：
+
+```sh
+./bin/kk delete -f examples/demo.yaml
+make e2e
+```
+
 每个新功能都必须附带 e2e 用例。
 
 ## 常见问题
@@ -237,6 +267,9 @@ make e2e E2E_FOCUS='sig-apps'     # 按名称运行子集
 | 网关返回 `503` | 等待 Pod 就绪，检查 Service 的 selector、targetPort 和节点心跳。 |
 | `Error from server (Invalid)` | 按报错中的字段路径修改清单；未知字段同样会被拒绝。 |
 | 端口或项目名冲突 | 释放端口或停止冲突项目；只修改 `MINI_API` 不会改变 Compose 端口映射。 |
+| `only one Service is supported` | 网关目前只服务一个 Service；在其他命名空间使用 `examples/hello.yaml` 这类不含 Service 的清单。 |
+| 新 clone 的集群里有旧资源 | 同一个 Docker Engine 上只有一套集群和一份 etcd 数据；按第 5 步删除 `mini-k8s_etcd-data` 数据卷即可重置。 |
+| worker 日志中出现访问 `/var/run/docker.sock` 被拒绝 | 确认当前用户能访问 Docker；SELinux enforcing 的系统可能阻止容器访问挂载的 socket。 |
 
 首次启动会生成权限为 `0600` 的 `.mini-k8s/token`，不要泄露或在集群运行中删除。
 手动使用 Compose 排障时需要设置 `kk` 通常会自动提供的环境变量（不要打印 token）：
