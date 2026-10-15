@@ -17,7 +17,13 @@ import (
 	"mini-k8s/pkg/client"
 )
 
+// Scaling from three workers to two: worker-3 (already gone from the API,
+// so not drained) loses its container and disk; other volumes stay.
 func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".mini-k8s"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	server := fakeNodeServer(t, "test-token", func() []corev1.Node {
 		return []corev1.Node{readyNode("control-plane", time.Now()), readyNode("worker-1", time.Now()), readyNode("worker-2", time.Now())}
 	})
@@ -27,14 +33,19 @@ func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
 		out:    io.Discard,
 		run: func(_ context.Context, name string, args ...string) (string, error) {
 			calls = append(calls, append([]string{name}, args...))
+			if len(args) > 1 && args[0] == "volume" && args[1] == "ls" {
+				return "mini-k8s_control-plane-var\nmini-k8s_worker-2-var\nmini-k8s_worker-3-var\nmini-k8s_worker-3-data\n", nil
+			}
 			return "", nil
 		},
 		pipe: func(_ context.Context, from, to []string) (string, error) {
 			calls = append(calls, append(append(append([]string{}, from...), "|"), to...))
 			return "", nil
 		},
+		root:    root,
+		workers: 3,
 	}
-	if err := c.up(context.Background()); err != nil {
+	if err := c.up(context.Background(), 2); err != nil {
 		t.Fatal(err)
 	}
 	load := func(node string, extra ...string) []string {
@@ -51,7 +62,9 @@ func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
 		{"docker", "build", "-t", "mini-k8s-node:local", "-f", "build/images/node/Dockerfile", "."},
 		{"docker", "build", "-t", "mini-k8s-kube-proxy:local", "-f", "build/images/kube-proxy/Dockerfile", "."},
 		{"docker", "build", "-t", "mini-k8s-etcd:3.5.17", "-f", "build/images/etcd/Dockerfile", "."},
-		{"docker", "compose", "up", "-d", "--pull", "never", "--remove-orphans"},
+		{"docker", "compose", "-f", "compose.yaml", "-f", ".mini-k8s/compose.workers.yaml", "up", "-d", "--pull", "never", "--remove-orphans"},
+		{"docker", "volume", "ls", "-q", "--filter", "label=com.docker.compose.project=mini-k8s"},
+		{"docker", "volume", "rm", "--force", "mini-k8s_worker-3-var"},
 		load("control-plane", "mini-k8s-etcd:3.5.17"),
 		ps("control-plane"),
 		load("worker-1"),
@@ -61,6 +74,9 @@ func TestClusterUpBuildsLocalImagesWithoutComposePull(t *testing.T) {
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("startup must build every image, never pull, and preload node images: %#v", calls)
+	}
+	if n, err := loadWorkers(root); err != nil || n != 2 {
+		t.Fatalf("the new worker count must be recorded: %d %v", n, err)
 	}
 }
 

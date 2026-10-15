@@ -2,6 +2,9 @@
 package lifecycle
 
 import (
+	"net"
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -63,6 +66,56 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 		lost := f.WaitForPod(ctx, "reboot-never", "fails", func(p *corev1.Pod) bool { return p.Status.Phase == corev1.PodFailed })
 		Expect(lost.Status.ContainerStatuses[0].State.Terminated.Reason).To(Equal("ContainerStatusUnknown"))
 		Expect(framework.PodContainers(ctx, lost.UID, true)).To(BeEmpty())
+	})
+
+	It("should add a worker with kk cluster up --workers and drain it away again", func(ctx SpecContext) {
+		scaledBack := false
+		DeferCleanup(func(ctx SpecContext) {
+			if !scaledBack {
+				framework.KK(ctx, "cluster", "up", "--workers", "2")
+			}
+		})
+		By("scaling out to three workers")
+		out := framework.KK(ctx, "cluster", "up", "--workers", "3")
+		Expect(out).To(ContainSubstring("nodes control-plane, worker-1, worker-2, worker-3 Ready"))
+		node, err := client.Nodes(f.Client).Get(ctx, "worker-3")
+		framework.ExpectNoError(err)
+		Expect(corev1.IsNodeReady(node)).To(BeTrue())
+		Expect(node.Labels).To(HaveKeyWithValue(corev1.LabelHostname, "worker-3"))
+		_, podCIDR, err := net.ParseCIDR(node.Spec.PodCIDR)
+		framework.ExpectNoError(err)
+
+		By("running a Pod that prefers the new worker and reaching it from worker-1")
+		labels := map[string]string{"app": "newcomer"}
+		d := framework.NewDeployment("newcomer", 1, labels, framework.DemoContainer())
+		d.PodSpec()["affinity"] = map[string]any{"nodeAffinity": map[string]any{"preferredDuringSchedulingIgnoredDuringExecution": []any{
+			map[string]any{"weight": 100, "preference": map[string]any{"matchExpressions": []any{
+				map[string]any{"key": corev1.LabelHostname, "operator": "In", "values": []any{"worker-3"}}}}}}}}
+		probe := framework.NewPod("probe", map[string]string{"app": "probe"}, framework.DemoContainer())
+		probe.Spec()["nodeName"] = "worker-1"
+		f.Apply(ctx, d, probe)
+		pod := f.WaitForRunningPods(ctx, labels, 1)[0]
+		Expect(pod.Spec.NodeName).To(Equal("worker-3"))
+		Expect(podCIDR.Contains(net.ParseIP(pod.Status.PodIP))).To(BeTrue(), "Pod IP %s outside %s", pod.Status.PodIP, podCIDR)
+		src := f.WaitForRunningPods(ctx, map[string]string{"app": "probe"}, 1)[0]
+		Eventually(ctx, func() (string, error) {
+			return framework.ExecInPod(ctx, src, "/mini", "fetch", "http://"+pod.Status.PodIP+":8080/newcomer")
+		}).WithTimeout(30 * time.Second).Should(HavePrefix("200\n"))
+
+		By("scaling back to two workers, which drains worker-3 first")
+		out = framework.KK(ctx, "cluster", "up", "--workers", "2")
+		scaledBack = true
+		Expect(out).To(ContainSubstring("Draining worker-3"))
+		Expect(out).To(ContainSubstring("evicting pod " + f.Namespace + "/" + pod.Name))
+		Expect(out).To(ContainSubstring("Deleting node worker-3"))
+		_, err = client.Nodes(f.Client).Get(ctx, "worker-3")
+		Expect(client.IsNotFound(err)).To(BeTrue(), "the Node object must be deleted: %v", err)
+		Expect(framework.Docker(ctx, "ps", "-aq", "--filter", "name=^mini-k8s-worker-3-1$")).To(BeEmpty())
+		Expect(framework.Docker(ctx, "volume", "ls", "-q", "--filter", "name=^mini-k8s_worker-3-var$")).To(BeEmpty())
+		moved := f.WaitForRunningPods(ctx, labels, 1)[0]
+		Expect(moved.UID).NotTo(Equal(pod.UID))
+		Expect(moved.Spec.NodeName).To(BeElementOf("worker-1", "worker-2"))
+		framework.ExpectDefaultNodes(ctx)
 	})
 
 	It("should remove workloads on cluster down and restore them on cluster up", func(ctx SpecContext) {

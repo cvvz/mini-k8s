@@ -22,7 +22,8 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   删除 Namespace 时级联清空其中的资源。
 - **控制面**：Informer + WorkQueue 事件驱动；Deployment 与 ReplicaSet 控制器（RollingUpdate 按
   `maxSurge`/`maxUnavailable` 滚动或 Recreate、修订历史、回滚、暂停/恢复、带进度期限的
-  Available/Progressing 条件）；Endpoints 控制器；GC 控制器；Namespace 控制器。
+  Available/Progressing 条件）；Endpoints 控制器；GC 控制器；Namespace 控制器；Pod 垃圾回收
+  （绑定在已删除节点上的 Pod 被标为失败并删除）。
 - **调度器**：kube-scheduler 式框架。Filter 插件检查节点是否被 cordon、污点、`nodeSelector` 与节点亲和、
   资源请求是否超出 allocatable、Pod 亲和/反亲和；Score 插件（权重同 kube-scheduler）偏好分配最少的节点、
   打散同一 controller 的副本、遵循偏好亲和与 PreferNoSchedule 污点。不可调度的 Pod 带 kube-scheduler 的信息
@@ -37,6 +38,7 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   worker；组件崩溃后由 kubelet 重启。
 - **kind 式节点**：每个节点是一个运行自己 containerd 的特权容器；kubelet 通过 **CRI**
   管理 Pod（每个 Pod 先建沙箱，再建容器）；只有运行时、Pod 网络和沙箱镜像都就绪时节点才 Ready。
+  `kk cluster up --workers N` 运行 1 到 10 个 worker；被移除的 worker 先 drain。
 - **Pod**：多个容器共享同一网络命名空间；init 容器按顺序逐个运行至成功；`restartPolicy`
   Always/OnFailure/Never，终态 Succeeded/Failed 与 Initialized/ContainersReady/Ready 条件按
   Kubernetes kubelet 的规则计算；liveness、readiness、startup 探针（httpGet、tcpSocket、exec）；
@@ -100,7 +102,8 @@ flowchart TB
 
 图例：
 
-- 每个方框是一个扮演“机器”的特权 Docker 容器，三者共享 Docker 网络 `mini-k8s`。
+- 每个方框是一个扮演“机器”的特权 Docker 容器，它们共享 Docker 网络 `mini-k8s`。默认两个 worker；
+  `kk cluster up --workers N` 会增加 worker-3 及以后的节点（或只保留 worker-1）。
 - control-plane 节点的 kubelet 以 static Pod 运行 etcd、API Server、Controller Manager、调度器和
   Ingress 控制器；该节点的污点让业务 Pod 只调度到 worker。每个节点（包括 control-plane）都运行 kube-proxy；
   集群 DNS（`kube-dns`，`10.96.0.10`）以普通 Pod 运行在 worker 上。
@@ -110,11 +113,11 @@ flowchart TB
   路由直接互访；ClusterIP（`10.96.0.0/12`）只以 kube-proxy 的 iptables 规则存在于每个节点中，
   NodePort 在每个节点的地址上应答。
 
-所有组件都是同一个二进制 `mini` 的不同角色。Docker Compose 只启动三个节点容器（与
+所有组件都是同一个二进制 `mini` 的不同角色。Docker Compose 只启动节点容器（与
 [kind](https://kind.sigs.k8s.io) 的节点相同）；与 kubeadm 一样，每个 kubelet 在 API 还不存在时就从清单目录拉起
 自己的 static Pod（[build/manifests/control-plane](build/manifests/control-plane)，worker 上是
 [build/manifests/node](build/manifests/node)）。Pod 运行在节点内的 containerd 中，因此宿主机的
-`docker ps` 只能看到三个节点。
+`docker ps` 只能看到这些节点。
 
 ## 自研与复用的组件
 
@@ -144,7 +147,7 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 | 组件 | 用途 | 状态 |
 | --- | --- | --- |
 | [etcd](https://etcd.io) v3.5.17 | 唯一的状态存储（通过 v3 JSON gateway 访问）；作为 control-plane 节点的 static Pod 运行 | 已使用 |
-| Docker Engine + Compose | 运行三个节点容器（相当于“机器”）；不直接运行 Pod 或控制面 | 已使用 |
+| Docker Engine + Compose | 运行节点容器（相当于“机器”）；不直接运行 Pod 或控制面 | 已使用 |
 | [containerd](https://containerd.io) + [runc](https://github.com/opencontainers/runc) | 节点内的容器运行时（Ubuntu 软件包）；containerd 内置的 CRI 插件是 CRI 服务端，kubelet 是客户端 | 已使用 |
 | [crictl](https://github.com/kubernetes-sigs/cri-tools) | 节点镜像中的调试工具（`crictl ps`），e2e 测试也用它 | 已使用 |
 | Ubuntu 24.04 基础镜像、iptables、iproute2 | 节点容器与 kube-proxy 镜像（iptables/conntrack 工具）的操作系统环境 | 已使用 |
@@ -216,7 +219,7 @@ make build
 
 `cluster up` 会构建组件、准备 etcd（首次运行时用宿主机 curl 从 `storage.googleapis.com`
 下载 v3.5.17）、从 `build/images/` 构建五个镜像（组件、节点、pause、etcd、kube-proxy；节点镜像
-首次构建约需一分钟）、启动三个节点容器、把镜像导入每个节点的 containerd（随后 control-plane 节点的
+首次构建约需一分钟）、启动节点容器（默认三个）、把镜像导入每个节点的 containerd（随后 control-plane 节点的
 kubelet 以 static Pod 启动 etcd、API Server、Controller Manager、调度器和 Ingress 控制器，每个节点
 启动 kube-proxy），之后最多等待两分钟，直到 API 健康、所有节点都有新鲜的 Ready 心跳，最后像 kubeadm
 安装 CoreDNS 一样 apply 集群 DNS 插件（[build/manifests/addons](build/manifests/addons)）。
@@ -236,6 +239,18 @@ worker-2        Ready    worker          20s   mini-kubelet/v2
 ./bin/kk get pods -n kube-system
 ./bin/kk logs -n kube-system kube-apiserver-control-plane
 ```
+
+要增加或减少 worker，传入 `--workers N`（1 到 10）；之后的 `cluster up` 与 `cluster down` 沿用这个数量
+（记录在 `.mini-k8s/workers` 中）：
+
+```sh
+./bin/kk cluster up --workers 3   # 增加 worker-3：worker-1 的副本，有自己的磁盘
+./bin/kk cluster up --workers 2   # 先 drain worker-3，再删除它的容器、磁盘和 Node 对象
+```
+
+新增的 worker 定义在 `cluster up` 生成的 Compose 文件中（`.mini-k8s/compose.workers.yaml`，extends
+`compose.yaml` 的 `worker-1`）。集群停止时缩容无法 drain：集群起来后删除这些 Node 对象，Pod 垃圾回收在
+40 秒后删除留在其上的 Pod，由它们的控制器在别处重建。
 
 ### 3. 部署示例
 
@@ -352,7 +367,7 @@ kk image load my-app:v1
 
 ## 当前限制（后续里程碑会解决）
 
-- 还没有 ConfigMap、Secret 和持久卷（M8）；不支持 `subPath` 与 `hostPort`；调度器不考虑资源请求（资源感知调度在 M7）。`kk exec` 把命令执行完再返回输出，
+- 还没有 ConfigMap、Secret 和持久卷（M8）；不支持 `subPath` 与 `hostPort`。`kk exec` 把命令执行完再返回输出，
   不支持交互式会话（stdin/tty），与 Kubernetes 的流式 exec 不同。
 - 滚动更新过程中修改 `replicas` 不做按比例扩缩；ReplicaSet 不收养孤儿 Pod。`kk apply` 是 merge patch：
   把 Deployment 改成 `Recreate` 时需要在清单中写 `rollingUpdate: null`。
@@ -362,7 +377,7 @@ kk image load my-app:v1
   从所在节点读取 API token。
 - 调度器没有抢占、优先级与 `topologySpreadConstraints`（副本默认打散）；没有 PodDisruptionBudget（驱逐总是成功）。心跳比 Kubernetes
   默认值快：每 2 秒续约 Lease，15 秒没有续约的节点即为 Unknown。
-- 固定一个 control-plane 节点和两个 worker 节点（写在 `compose.yaml` 中）；节点是共享宿主机内核的容器。
+- 一个 control-plane 节点（无高可用），最多 10 个 worker；节点是共享宿主机内核的容器。e2e 套件要求默认的两个 worker。
 - 没有 DaemonSet、Job、CronJob、StatefulSet、HPA、RBAC 和控制面高可用。
 
 ## 开发与测试
@@ -386,9 +401,9 @@ make e2e-quick                    # 跳过 Disruptive 用例
 make e2e E2E_FOCUS='sig-apps'     # 按名称运行子集
 ```
 
-**只在可重建的本项目实验集群上运行。** Disruptive 用例会重启 control-plane 节点、一个控制面组件
-和一个 worker，停止一个 worker 约一分钟，对 worker 执行 cordon、drain 与 taint，清空某个节点上 kube-proxy 的规则，并执行
-`cluster down/up`。用例使用各自的命名空间和 Ingress host，Quick Start 部署的示例可以保留。
+**只在可重建、使用默认两个 worker 的本项目实验集群上运行。** Disruptive 用例会重启 control-plane 节点、
+一个控制面组件和一个 worker，停止一个 worker 约一分钟，对 worker 执行 cordon、drain 与 taint，清空某个节点上
+kube-proxy 的规则，执行 `cluster down/up`，并扩到三个 worker 再缩回。用例使用各自的命名空间和 Ingress host，Quick Start 部署的示例可以保留。
 
 每个新功能都必须附带 e2e 用例。
 
@@ -444,13 +459,14 @@ unset MINI_TOKEN
 | M6b | 集群 DNS、headless 与 ExternalName Service、`kubernetes` Service、Pod 的 DNS 配置与 Service 环境变量 | ✅ |
 | M7a | 节点租约与生命周期、基于污点的驱逐、Eviction API、cordon/drain/taint | ✅ |
 | M7b | 调度框架：资源适配、nodeSelector 与亲和性、Pod 亲和/反亲和、打散 | ✅ |
-| M7c | 更多 worker（`kk cluster up --workers N`） | 计划中 |
+| M7c | 更多 worker（`kk cluster up --workers N`）、Pod 垃圾回收 | ✅ |
 | M8 | ConfigMap、Secret、卷、PVC | 计划中 |
 | M9 | DaemonSet、Job、CronJob、StatefulSet | 计划中 |
 
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M7c worker 扩缩计划](docs/superpowers/plans/2026-10-15-m7c-worker-scaling.md)
 - [M7b 调度框架计划](docs/superpowers/plans/2026-10-15-m7b-scheduling-framework.md)
 - [M7a 节点生命周期计划](docs/superpowers/plans/2026-10-15-m7a-node-lifecycle.md)
 - [M6b 集群 DNS 计划](docs/superpowers/plans/2026-10-15-m6b-cluster-dns.md)

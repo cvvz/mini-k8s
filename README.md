@@ -27,7 +27,8 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **Control plane**: event-driven informers and work queues; Deployment and ReplicaSet
   controllers (RollingUpdate with `maxSurge`/`maxUnavailable` or Recreate, revision
   history, rollback, pause/resume, Available/Progressing conditions with a progress
-  deadline); Endpoints controller; garbage collector; namespace controller.
+  deadline); Endpoints controller; garbage collector; namespace controller; Pod garbage
+  collector (Pods bound to a deleted node are failed and deleted).
 - **Scheduler**: a kube-scheduler-style framework. Filter plugins check cordoned nodes,
   taints, `nodeSelector` and node affinity, resource requests against allocatable, and pod
   affinity/anti-affinity. Score plugins (with kube-scheduler's weights) prefer the least
@@ -49,6 +50,7 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **Nodes like kind**: each node is a privileged container running its own containerd;
   the kubelet manages Pods over **CRI** (a sandbox per Pod, then its container);
   Ready only when the runtime, the Pod network and the sandbox image are ready.
+  `kk cluster up --workers N` runs 1 to 10 workers; workers that go away are drained first.
 - **Pods**: several containers sharing one network namespace; init containers that run
   one after another to completion; `restartPolicy` Always/OnFailure/Never with the
   Succeeded/Failed phases and the Initialized/ContainersReady/Ready conditions computed
@@ -120,8 +122,9 @@ flowchart TB
 
 How to read it:
 
-- Each box is a privileged Docker container that plays a machine; the three share the
-  Docker network `mini-k8s`.
+- Each box is a privileged Docker container that plays a machine; they share the Docker
+  network `mini-k8s`. Two workers is the default; `kk cluster up --workers N` adds
+  worker-3 and up (or keeps only worker-1).
 - The control-plane node's kubelet runs etcd, the API server, the controller manager, the
   scheduler and the Ingress controller as static Pods; the node's taint keeps workloads on
   the workers. Every node (the control-plane one too) also runs kube-proxy; the cluster
@@ -135,11 +138,11 @@ How to read it:
   answer on every node's address.
 
 Every component is a role of the single `mini` binary. Docker Compose only starts the
-three node containers (like [kind](https://kind.sigs.k8s.io) nodes); as with kubeadm, each
+node containers (like [kind](https://kind.sigs.k8s.io) nodes); as with kubeadm, each
 kubelet starts its static Pods from a manifest directory before the API exists
 ([build/manifests/control-plane](build/manifests/control-plane),
 [build/manifests/node](build/manifests/node) on the workers). Pods run in the nodes'
-containerd, so the host's `docker ps` shows only the three nodes.
+containerd, so the host's `docker ps` shows only the nodes.
 
 ## What is built here and what is reused
 
@@ -170,7 +173,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | Component | Use | Status |
 | --- | --- | --- |
 | [etcd](https://etcd.io) v3.5.17 | The only state store (accessed through its v3 JSON gateway); a static Pod of the control-plane node | in use |
-| Docker Engine + Compose | Hosts the three node containers (the "machines"); never runs Pods or the control plane directly | in use |
+| Docker Engine + Compose | Hosts the node containers (the "machines"); never runs Pods or the control plane directly | in use |
 | [containerd](https://containerd.io) + [runc](https://github.com/opencontainers/runc) | Container runtime inside each node (Ubuntu packages); containerd's built-in CRI plugin is the CRI server, the kubelet is the client | in use |
 | [crictl](https://github.com/kubernetes-sigs/cri-tools) | Debugging tool in the node image (`crictl ps`), used by e2e tests | in use |
 | Ubuntu 24.04 base image, iptables, iproute2 | Operating environment of the node containers and of the kube-proxy image (iptables/conntrack tools) | in use |
@@ -247,7 +250,7 @@ make build
 `cluster up` builds the components, prepares etcd (on first use it downloads v3.5.17
 from `storage.googleapis.com` with host-side curl), builds five images from
 `build/images/` (components, node, pause, etcd and kube-proxy; the node image takes about a
-minute the first time), starts the three node containers, loads the images into each
+minute the first time), starts the node containers (three by default), loads the images into each
 node's containerd (the control-plane node's kubelet then starts etcd, the API server, the
 controller manager, the scheduler and the Ingress controller as static Pods, and every
 node starts kube-proxy), waits up to two minutes for a healthy API and fresh Ready
@@ -269,6 +272,20 @@ control plane is visible like in kubeadm clusters:
 ./bin/kk get pods -n kube-system
 ./bin/kk logs -n kube-system kube-apiserver-control-plane
 ```
+
+To run more or fewer workers, pass `--workers N` (1 to 10); later `cluster up` and
+`cluster down` keep that count (it is recorded in `.mini-k8s/workers`):
+
+```sh
+./bin/kk cluster up --workers 3   # adds worker-3, a copy of worker-1 with its own disk
+./bin/kk cluster up --workers 2   # drains worker-3, then removes its container, disk and Node
+```
+
+Extra workers are defined in a Compose file that `cluster up` generates
+(`.mini-k8s/compose.workers.yaml`, extending `worker-1` of `compose.yaml`). When the cluster
+is stopped, removed workers cannot be drained: their Node objects are deleted once the
+cluster is up, and the Pod garbage collector deletes the Pods left on them after 40 s, so
+their controllers recreate them elsewhere.
 
 ### 3. Deploy the example
 
@@ -391,8 +408,7 @@ still not a cross-resource transaction.
 
 ## Current limitations (addressed by upcoming milestones)
 
-- No ConfigMaps, Secrets or persistent volumes yet (M8); no `subPath` or `hostPort`; the
-  scheduler ignores resource requests (resource-aware scheduling is M7). `kk exec` runs a
+- No ConfigMaps, Secrets or persistent volumes yet (M8); no `subPath` or `hostPort`. `kk exec` runs a
   command to completion and returns its output; there is no interactive session (stdin/tty),
   unlike Kubernetes' streaming exec.
 - Rollouts do not scale proportionally when `replicas` changes mid-rollout, and ReplicaSets
@@ -403,8 +419,8 @@ still not a cross-resource transaction.
   reachable from the Linux host at the nodes' addresses (as in kind), not on `127.0.0.1`.
   The API, the `kubernetes` Service (port 443) and the Ingress controller speak plain HTTP;
   there are no ServiceAccounts, so the DNS add-on reads the API token from its node.
-- One control-plane node and two workers, fixed in `compose.yaml`; nodes are containers
-  sharing the host kernel.
+- One control-plane node (no HA) and at most 10 workers; nodes are containers sharing the
+  host kernel. The e2e suite expects the default two workers.
 - No scheduler preemption, priorities or `topologySpreadConstraints` (replicas spread by
   default); no PodDisruptionBudgets (evictions always succeed). Heartbeats are faster than Kubernetes' defaults: Leases are
   renewed every 2 s and a node is Unknown after 15 s without one.
@@ -432,10 +448,10 @@ make e2e-quick                    # skip specs labelled Disruptive
 make e2e E2E_FOCUS='sig-apps'     # run a subset by name
 ```
 
-**Run them only against a disposable project cluster.** Disruptive specs restart the
-control-plane node, a control-plane component and a worker, stop a worker for a minute,
-cordon, drain and taint the workers, flush kube-proxy's rules on a node and run
-`cluster down/up`. Specs use their own
+**Run them only against a disposable project cluster** with the default two workers.
+Disruptive specs restart the control-plane node, a control-plane component and a worker,
+stop a worker for a minute, cordon, drain and taint the workers, flush kube-proxy's rules
+on a node, run `cluster down/up` and scale to three workers and back. Specs use their own
 namespaces and Ingress hosts, so the quick-start example may stay deployed.
 
 Every new feature ships with e2e specs.
@@ -493,13 +509,14 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M6b | Cluster DNS, headless and ExternalName Services, the `kubernetes` Service, Pod DNS configuration and Service environment variables | ✅ |
 | M7a | Node leases and lifecycle, taint-based eviction, eviction API, cordon/drain/taint | ✅ |
 | M7b | Scheduling framework: resource fit, node selectors and affinity, pod (anti-)affinity, spreading | ✅ |
-| M7c | More workers (`kk cluster up --workers N`) | planned |
+| M7c | More workers (`kk cluster up --workers N`), Pod garbage collector | ✅ |
 | M8 | ConfigMaps, Secrets, volumes, PVCs | planned |
 | M9 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M7c worker scaling plan (Chinese)](docs/superpowers/plans/2026-10-15-m7c-worker-scaling.md)
 - [M7b scheduling framework plan (Chinese)](docs/superpowers/plans/2026-10-15-m7b-scheduling-framework.md)
 - [M7a node lifecycle plan (Chinese)](docs/superpowers/plans/2026-10-15-m7a-node-lifecycle.md)
 - [M6b cluster DNS plan (Chinese)](docs/superpowers/plans/2026-10-15-m6b-cluster-dns.md)

@@ -8,11 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/test/integration/framework"
 )
@@ -54,6 +58,7 @@ func TestDockerEndpointOnlyLocalUnix(t *testing.T) {
 }
 
 func TestClusterDownStopsNodesAndReconcilersFirst(t *testing.T) {
+	compose := []string{"docker", "compose", "-f", "compose.yaml", "-f", ".mini-k8s/compose.workers.yaml"}
 	for _, volumes := range []bool{false, true} {
 		var calls [][]string
 		c := cluster{
@@ -61,21 +66,169 @@ func TestClusterDownStopsNodesAndReconcilersFirst(t *testing.T) {
 				calls = append(calls, append([]string{name}, args...))
 				return "", nil
 			},
+			workers: 3,
 		}
 		if err := c.down(context.Background(), volumes); err != nil {
 			t.Fatal(err)
 		}
-		down := []string{"docker", "compose", "down", "--remove-orphans"}
+		down := append(append([]string{}, compose...), "down", "--remove-orphans")
 		if volumes {
 			down = append(down, "--volumes")
 		}
 		want := [][]string{
-			{"docker", "compose", "stop", "worker-1", "worker-2"},
+			append(append([]string{}, compose...), "stop", "worker-1", "worker-2", "worker-3"),
 			down,
 		}
 		if !reflect.DeepEqual(calls, want) {
 			t.Fatalf("volumes=%v: unsafe down sequence: %#v", volumes, calls)
 		}
+	}
+}
+
+func TestWorkerCountIsRecordedAndValidated(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".mini-k8s"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := loadWorkers(root); err != nil || n != 2 {
+		t.Fatalf("default: %d %v", n, err)
+	}
+	c := cluster{root: root}
+	if err := c.setWorkers(4, false); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := loadWorkers(root); n != 2 {
+		t.Fatal("regenerating the override must not change the recorded count")
+	}
+	if err := c.setWorkers(4, true); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := loadWorkers(root); err != nil || n != 4 {
+		t.Fatalf("recorded: %d %v", n, err)
+	}
+	override, err := os.ReadFile(filepath.Join(root, ".mini-k8s", "compose.workers.yaml"))
+	if err != nil || string(override) != workersOverride(4) {
+		t.Fatalf("override: %v\n%s", err, override)
+	}
+	for _, bad := range []string{"0", "11", "-1", "two", ""} {
+		if _, err := parseWorkers(bad); err == nil {
+			t.Errorf("accepted %q workers", bad)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mini-k8s", "workers"), []byte("zero\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadWorkers(root); err == nil || !strings.Contains(err.Error(), ".mini-k8s/workers") {
+		t.Fatalf("a corrupt count must be reported: %v", err)
+	}
+	if err := runCluster(context.Background(), root, args{positional: []string{"down"}, values: map[string][]string{"workers": {"3"}}}); err == nil ||
+		err.Error() != "--workers applies to kk cluster up" {
+		t.Fatalf("--workers on down: %v", err)
+	}
+	if err := runCluster(context.Background(), root, args{positional: []string{"up"}, values: map[string][]string{"workers": {"11"}}}); err == nil ||
+		!strings.Contains(err.Error(), "must be 1 to 10") {
+		t.Fatalf("--workers 11: %v", err)
+	}
+	for k, name := range map[int]string{3: "worker-3", 10: "worker-10"} {
+		if got, ok := workerIndex(name); !ok || got != k {
+			t.Errorf("workerIndex(%s) = %d %v", name, got, ok)
+		}
+	}
+	for _, name := range []string{"worker-03", "worker-0", "worker-", "control-plane", "worker-1x"} {
+		if _, ok := workerIndex(name); ok {
+			t.Errorf("%s is not a worker name", name)
+		}
+	}
+}
+
+func TestWorkersOverride(t *testing.T) {
+	type service struct {
+		Extends struct {
+			File    string `yaml:"file"`
+			Service string `yaml:"service"`
+		} `yaml:"extends"`
+		Hostname    string            `yaml:"hostname"`
+		Environment map[string]string `yaml:"environment"`
+		Volumes     []string          `yaml:"volumes"`
+		Deploy      struct {
+			Replicas *int `yaml:"replicas"`
+		} `yaml:"deploy"`
+	}
+	parse := func(n int) (map[string]service, map[string]any) {
+		t.Helper()
+		var doc struct {
+			Services map[string]service `yaml:"services"`
+			Volumes  map[string]any     `yaml:"volumes"`
+		}
+		if err := yaml.Unmarshal([]byte(workersOverride(n)), &doc); err != nil {
+			t.Fatalf("%d workers: %v\n%s", n, err, workersOverride(n))
+		}
+		return doc.Services, doc.Volumes
+	}
+	if services, volumes := parse(2); len(services) != 0 || len(volumes) != 0 {
+		t.Fatalf("two workers is compose.yaml as is: %v %v", services, volumes)
+	}
+	services, _ := parse(1)
+	if r := services["worker-2"].Deploy.Replicas; len(services) != 1 || r == nil || *r != 0 {
+		t.Fatalf("one worker scales worker-2 to zero: %+v", services)
+	}
+	services, volumes := parse(4)
+	if len(services) != 2 || len(volumes) != 2 {
+		t.Fatalf("four workers add worker-3 and worker-4: %+v %v", services, volumes)
+	}
+	for _, name := range []string{"worker-3", "worker-4"} {
+		s := services[name]
+		if s.Extends.File != "compose.yaml" || s.Extends.Service != "worker-1" || s.Hostname != name ||
+			s.Environment["MINI_NODE"] != name || !reflect.DeepEqual(s.Volumes, []string{name + "-var:/var"}) {
+			t.Errorf("%s: %+v", name, s)
+		}
+		if _, ok := volumes[name+"-var"]; !ok {
+			t.Errorf("volume %s-var is not declared", name)
+		}
+	}
+}
+
+func TestDeleteRemovedNodesOnlyDeletesWorkersAboveTheCount(t *testing.T) {
+	c := cluster{client: framework.StartTestServer(t), out: io.Discard, workers: 2}
+	ctx := context.Background()
+	names := []string{"control-plane", "worker-1", "worker-2", "worker-3", "worker-10", "worker-03", "ghost"}
+	for _, name := range names {
+		if _, err := client.Nodes(c.client).Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.deleteRemovedNodes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	list, err := client.Nodes(c.client).List(ctx, client.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, n := range list.Items {
+		left = append(left, n.Name)
+	}
+	sort.Strings(left)
+	if want := []string{"control-plane", "ghost", "worker-03", "worker-1", "worker-2"}; !reflect.DeepEqual(left, want) {
+		t.Fatalf("nodes left: %v", left)
+	}
+}
+
+func TestDrainWithoutAnAPIGoesOn(t *testing.T) {
+	var out bytes.Buffer
+	c := cluster{client: client.New("http://127.0.0.1:1", "secret"), out: &out, workers: 3}
+	if err := c.drainRemovedWorkers(context.Background(), 3); err != nil || out.Len() != 0 {
+		t.Fatalf("not scaling down: %v %q", err, out.String())
+	}
+	if err := c.drainRemovedWorkers(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), "Not draining the workers above 2: the API is unavailable") {
+		t.Fatalf("output: %q", out.String())
+	}
+	got := removedWorkers([]string{"worker-10", "control-plane", "worker-1", "worker-3", "worker-2", "worker-03"}, 2)
+	if want := []string{"worker-3", "worker-10"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("removed workers: %v", got)
 	}
 }
 
@@ -93,7 +246,7 @@ func TestLoadImagesPipesDockerSaveIntoEveryNodeAndRetries(t *testing.T) {
 			return "", nil
 		},
 	}
-	if err := c.loadImages(context.Background(), []string{"app:v1"}, workerNames...); err != nil {
+	if err := c.loadImages(context.Background(), []string{"app:v1"}, workerNames(2)...); err != nil {
 		t.Fatal(err)
 	}
 	load := func(node string) []string {
@@ -170,7 +323,7 @@ func TestReadinessRequiresAuthenticatedHealthAndAllFreshNodes(t *testing.T) {
 				}
 				return nodes
 			})
-			c := cluster{client: client.New(server.URL, "secret")}
+			c := cluster{client: client.New(server.URL, "secret"), workers: 2}
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 			err := c.waitReady(ctx, time.Now().Add(-10*time.Second))
