@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -29,6 +30,9 @@ type Framework struct {
 func NewDefaultFramework(baseName string) *Framework {
 	f := &Framework{BaseName: baseName}
 	ginkgo.BeforeEach(func(ctx ginkgo.SpecContext) {
+		if r := ginkgo.CurrentSpecReport(); slices.Contains(r.Labels(), "Disruptive") && !r.IsSerial {
+			ginkgo.Fail("Disruptive specs must be Serial: specs running in parallel would see the disruption")
+		}
 		f.Client = client.New(TestContext.APIURL, TestContext.Token)
 		f.Namespace = f.CreateNamespace(ctx, "")
 	})
@@ -90,8 +94,14 @@ func SIGDescribe(sig, text string, args ...any) bool {
 	return ginkgo.Describe(fmt.Sprintf("[sig-%s] %s", sig, text), args...)
 }
 
-// WithDisruptive marks specs that restart or stop cluster components.
+// WithDisruptive marks specs that restart or stop cluster components. Such
+// specs must also be Serial; the framework fails them otherwise.
 func WithDisruptive() ginkgo.Labels { return ginkgo.Label("Disruptive") }
+
+// WithSlow marks specs that wait half a minute or more for time to pass
+// (cron schedules, metrics windows, autoscaling). A parallel run starts them
+// first, so they overlap the many short specs instead of stretching its end.
+func WithSlow() []any { return []any{ginkgo.Label("Slow"), ginkgo.SpecPriority(1)} }
 
 // ExpectNoError fails the spec with context when err is not nil.
 func ExpectNoError(err error, explain ...any) {

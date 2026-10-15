@@ -454,12 +454,15 @@ go test -race ./...
 缺失时这些测试自动跳过。
 
 端到端测试是仿照 Kubernetes `test/e2e` 的 Ginkgo v2 套件（见
-[test/e2e/README.md](test/e2e/README.md)），每个用例在独立命名空间中运行，结束后删除：
+[test/e2e/README.md](test/e2e/README.md)），每个用例在独立命名空间中运行，结束后删除。
+默认由 4 个 Ginkgo 进程并行执行，标记为 Serial 的用例最后单独运行，全套约 13 分钟。
+除按领域划分的用例外，`[sig-scenarios]` 用例像真实应用那样把多项功能串起来验证。
 
 ```sh
 make e2e                          # 全部用例，包括 Disruptive 用例
 make e2e-quick                    # 跳过 Disruptive 用例
 make e2e E2E_FOCUS='sig-apps'     # 按名称运行子集
+make e2e E2E_PROCS=1              # 逐个串行执行
 ```
 
 **只在可重建、使用默认两个 worker 的本项目实验集群上运行。** Disruptive 用例会重启 control-plane 节点、

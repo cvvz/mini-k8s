@@ -269,7 +269,8 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
   对存储、Watch、删除语义、控制器做黑盒验证。
 - 端到端测试：仿照 Kubernetes `test/e2e` 的 Ginkgo v2 + Gomega 套件（`test/e2e`），
   `framework` 包提供 TestContext、按 spec 清理的 Framework、等待与诊断工具；用例按
-  `[sig-*]` 分包，破坏性用例带 `Disruptive` 标签并串行执行。**每个功能必须附带 e2e 用例**，
+  `[sig-*]` 分包，`[sig-scenarios]` 收录跨功能场景。用例默认由多个 Ginkgo 进程并行执行，
+  破坏性用例带 `Disruptive` 标签且必须是 `Serial`（最后单独运行）。**每个功能必须附带 e2e 用例**，
   合入前在 WSL 中 `make e2e` 全绿。
 - 所有测试在 Linux（WSL2）执行：`go vet ./...`、`go test -race ./...`、`make e2e`。
 
@@ -302,7 +303,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M10b ✅ | HPA（autoscaling/v2）、scale 子资源、`kk autoscale`（落地记录见 §12.15） |
 | M10c ✅ | Leader Election（controller-manager、scheduler，落地记录见 §12.16） |
 | M10d ✅ | ServiceAccount、bound token、RBAC 授权、impersonation（落地记录见 §12.17） |
-| 之后 | 补充复杂场景 e2e、提速 e2e 框架、full e2e 集中修复 |
+| E2E-2 ✅ | e2e 并行执行、跨功能场景用例、full e2e 集中修复（落地记录见 §12.18） |
 
 ### 12.1 M1 落地记录与过渡态
 
@@ -672,6 +673,25 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
   - 聚合 ClusterRole。
   - `ca.crt`（API 为明文 HTTP）。
   - 控制面组件与插件改用各自的身份（仍用集群 token）。
+
+### 12.18 e2e 并行与场景用例落地记录
+
+按[实施计划](../plans/2026-10-15-e2e-parallel-scenarios.md)落地。要点：
+
+- **并行**：
+  - `make e2e` 改用 `go tool ginkgo --procs=$(E2E_PROCS)`（默认 4，版本由 go.mod 的 `tool` 指令固定）。
+  - 原有 146 个 spec 从 1390 秒降到 647 秒；加上 6 个场景后 152 个 spec 用时 772 秒。
+  - 其中 Serial 用例约 480 秒（扩缩 worker、PodGC 的 40 秒隔离期、节点失联等真实等待），是剩余时间的大头。
+- **约束**：
+  - 框架拒绝未标 Serial 的 Disruptive 用例；审查时补上了漏标的"metrics-server 停机"用例。
+  - `framework.WithSlow()`（`Slow` 标签 + `SpecPriority`）让长用例优先调度。
+- **场景**（`test/e2e/scenarios`）：
+  - 应用栈（配置、StatefulSet 存储、DNS、Ingress、零失败重启、删除命名空间回收 PV）。
+  - 批处理流水线（Indexed Job、共享 PVC、TTL、汇总 Job）。
+  - 多租户（SA + RBAC、ClusterRoleBinding 放开再收回、删除 SA 后 token 失效）。
+  - 发布失败与回滚（progress deadline、undo 保留旧 Pod）。
+  - CronJob 并发策略（Forbid 跳过、Replace 替换）。
+  - 节点故障（无状态迁移、StatefulSet at-most-one、本地卷等节点恢复）。
 
 ## 13. 非目标
 

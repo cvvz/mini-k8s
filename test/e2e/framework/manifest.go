@@ -132,6 +132,27 @@ func NewService(name string, selector map[string]string, targetPort int) Object 
 	}
 }
 
+// IngressPath is one path rule of an Ingress manifest.
+func IngressPath(path, pathType, service string, port int) map[string]any {
+	return map[string]any{"path": path, "pathType": pathType,
+		"backend": map[string]any{"service": map[string]any{"name": service, "port": map[string]any{"number": port}}}}
+}
+
+// NewIngress builds an Ingress with one rule for host (every host when
+// empty).
+func NewIngress(name, host string, paths ...map[string]any) Object {
+	list := make([]any, len(paths))
+	for i, p := range paths {
+		list[i] = p
+	}
+	rule := map[string]any{"http": map[string]any{"paths": list}}
+	if host != "" {
+		rule["host"] = host
+	}
+	return Object{"apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+		"metadata": map[string]any{"name": name}, "spec": map[string]any{"rules": []any{rule}}}
+}
+
 // Spec returns the object's spec map for in-place edits.
 func (o Object) Spec() map[string]any { s, _ := o["spec"].(map[string]any); return s }
 

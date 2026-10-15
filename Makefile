@@ -33,17 +33,20 @@ vet:
 	$(GO) vet ./...
 
 # Ginkgo e2e suite against the running project cluster; see test/e2e/README.md.
-# E2E_LABELS is a Ginkgo label filter (e.g. '!Disruptive'), E2E_FOCUS a spec regex.
-E2E_ARGS := -ginkgo.v
+# E2E_LABELS is a Ginkgo label filter (e.g. '!Disruptive'), E2E_FOCUS a spec
+# regex. E2E_PROCS Ginkgo processes run the specs in parallel; Serial specs
+# run on their own once the others are done.
+E2E_PROCS ?= 4
+E2E_ARGS := -v --procs=$(E2E_PROCS) --timeout=30m
 ifneq ($(E2E_LABELS),)
-E2E_ARGS += -ginkgo.label-filter='$(E2E_LABELS)'
+E2E_ARGS += --label-filter='$(E2E_LABELS)'
 endif
 ifneq ($(E2E_FOCUS),)
-E2E_ARGS += -ginkgo.focus='$(E2E_FOCUS)'
+E2E_ARGS += --focus='$(E2E_FOCUS)'
 endif
 
 e2e:
-	MINI_E2E=1 $(GO) test ./test/e2e -count=1 -timeout 30m -v -args $(E2E_ARGS)
+	MINI_E2E=1 $(GO) tool ginkgo $(E2E_ARGS) ./test/e2e
 
 # Non-disruptive specs only: never restarts or stops cluster components.
 e2e-quick:
