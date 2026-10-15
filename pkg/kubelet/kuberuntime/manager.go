@@ -17,6 +17,8 @@ import (
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/volume"
 )
 
 // CRI labels identifying the objects of a Pod (the keys Kubernetes uses).
@@ -55,6 +57,16 @@ type Manager struct {
 	// Env returns the variables every container of a Pod gets (the Service
 	// links); the container's own variables override them.
 	Env func(pod *corev1.Pod) []corev1.EnvVar
+	// Objects provides the ConfigMaps and Secrets of env and volumes (the
+	// kubelet's informer caches).
+	Objects volume.ObjectSource
+	// NodeIP is status.hostIP for the downward API (and status.podIP of
+	// host-network Pods).
+	NodeIP string
+	// Allocatable stands in for unset limits in resourceFieldRef values.
+	Allocatable corev1.ResourceList
+	// Recorder receives the FailedMount events.
+	Recorder Recorder
 	// ClusterDomain names Pods in the kubelet-managed /etc/hosts.
 	ClusterDomain string
 	// PodLogsDir is the root of Pod log directories.
@@ -75,7 +87,9 @@ type Manager struct {
 	// probeKilled maps containers stopped after a failed liveness or startup
 	// probe to their Pod UID; they restart even after exiting 0.
 	probeKilled map[string]string
-	tmpfs       map[string]bool // mounted emptyDir directories
+	tmpfs       map[string]bool // mounted tmpfs volume directories
+	// mountFailures paces the FailedMount events of each Pod by UID.
+	mountFailures map[string]backoff
 }
 
 type backoff struct {
@@ -101,7 +115,7 @@ func NewManager(runtime runtimeapi.RuntimeServiceClient, images runtimeapi.Image
 	return &Manager{runtime: runtime, images: images, PodLogsDir: DefaultPodLogsDir, PodsDir: DefaultPodsDir,
 		Mounter: SystemMounter{}, now: time.Now,
 		restarts: map[string]backoff{}, pulls: map[string]backoff{}, sandboxRuns: map[string]backoff{},
-		probeKilled: map[string]string{}, tmpfs: map[string]bool{}}
+		probeKilled: map[string]string{}, tmpfs: map[string]bool{}, mountFailures: map[string]backoff{}}
 }
 
 // Version reports the runtime as "containerd://2.2.1".
@@ -188,42 +202,35 @@ func (m *Manager) sandboxConfig(pod *corev1.Pod, attempt uint32) *runtimeapi.Pod
 }
 
 // containerExtras is what a container gets beyond its spec: the
-// kubelet-managed /etc/hosts and the Service environment variables.
+// kubelet-managed /etc/hosts and its resolved environment (see
+// containerEnv).
 type containerExtras struct {
 	hostsFile string
 	env       []corev1.EnvVar
 }
 
-// containerConfig describes one instance of c; volumes maps the Pod's volume
-// names to their node paths.
-func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32, volumes map[string]string, extras containerExtras) *runtimeapi.ContainerConfig {
+// containerConfig describes one instance of c with the Pod's volumes.
+func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32, volumes mountedVolumes, extras containerExtras) *runtimeapi.ContainerConfig {
 	labels := podLabels(pod)
 	labels[LabelContainerName] = c.Name
+	command, args := expandCommand(c, extras.env)
 	cfg := &runtimeapi.ContainerConfig{
 		Metadata: &runtimeapi.ContainerMetadata{Name: c.Name, Attempt: attempt},
 		Image:    &runtimeapi.ImageSpec{Image: c.Image},
-		Command:  c.Command,
-		Args:     c.Args,
+		Command:  command,
+		Args:     args,
 		Labels:   labels,
 		LogPath:  fmt.Sprintf("%s/%d.log", c.Name, attempt),
 		Linux: &runtimeapi.LinuxContainerConfig{Resources: linuxResources(c.Resources),
 			SecurityContext: securityContext(pod, c)},
 	}
-	own := map[string]bool{}
-	for _, e := range c.Env {
-		own[e.Name] = true
-	}
 	for _, e := range extras.env {
-		if !own[e.Name] {
-			cfg.Envs = append(cfg.Envs, &runtimeapi.KeyValue{Key: e.Name, Value: []byte(e.Value)})
-		}
-	}
-	for _, e := range c.Env {
 		cfg.Envs = append(cfg.Envs, &runtimeapi.KeyValue{Key: e.Name, Value: []byte(e.Value)})
 	}
 	mounted := map[string]bool{}
 	for _, vm := range c.VolumeMounts {
-		cfg.Mounts = append(cfg.Mounts, &runtimeapi.Mount{ContainerPath: vm.MountPath, HostPath: volumes[vm.Name], Readonly: vm.ReadOnly})
+		cfg.Mounts = append(cfg.Mounts, &runtimeapi.Mount{ContainerPath: vm.MountPath, HostPath: volumes.paths[vm.Name],
+			Readonly: vm.ReadOnly || volumes.readOnly[vm.Name]})
 		mounted[filepath.Clean(vm.MountPath)] = true
 	}
 	if extras.hostsFile != "" && !mounted["/etc/hosts"] {
@@ -330,6 +337,39 @@ func (m *Manager) containers(ctx context.Context, uid, name string) ([]*runtimea
 		return items[i].CreatedAt > items[j].CreatedAt
 	})
 	return items, nil
+}
+
+// Recorder emits Events (the kubelet's event recorder).
+type Recorder interface {
+	Eventf(obj metav1.Object, eventType, reason, format string, args ...any)
+}
+
+// reportMountFailure records a FailedMount event for a volume error when it
+// first appears or changes, and then after doubling intervals of up to two
+// minutes, like the retries of the kubelet's volume manager.
+func (m *Manager) reportMountFailure(pod *corev1.Pod, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		delete(m.mountFailures, pod.UID)
+		return
+	}
+	prev, seen := m.mountFailures[pod.UID]
+	if seen && prev.err.Error() == err.Error() && m.now().Before(prev.next) {
+		return
+	}
+	if !seen || prev.err.Error() != err.Error() {
+		prev = backoff{}
+	}
+	if prev.attempts < 8 {
+		prev.attempts++
+	}
+	delay := min(time.Second<<(prev.attempts-1), 2*time.Minute)
+	prev.delay, prev.next, prev.err = delay, m.now().Add(delay), err
+	m.mountFailures[pod.UID] = prev
+	if m.Recorder != nil {
+		m.Recorder.Eventf(pod, corev1.EventTypeWarning, "FailedMount", "%s", err.Error())
+	}
 }
 
 func (m *Manager) postpone(prev backoff, err error) backoff {

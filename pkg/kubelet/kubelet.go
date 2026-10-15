@@ -81,8 +81,12 @@ type Kubelet struct {
 	pods     *informers.Informer[corev1.Pod, *corev1.Pod]
 	nodes    *informers.Informer[corev1.Node, *corev1.Node]
 	services *informers.Informer[corev1.Service, *corev1.Service]
-	network  chan struct{}
-	probes   *prober.Manager
+	// configMaps and secrets feed env and volumes; changes wake the Pods
+	// through the regular resync.
+	configMaps *informers.Informer[corev1.ConfigMap, *corev1.ConfigMap]
+	secrets    *informers.Informer[corev1.Secret, *corev1.Secret]
+	network    chan struct{}
+	probes     *prober.Manager
 
 	mu      sync.Mutex
 	workers map[string]chan struct{} // by Pod UID
@@ -120,6 +124,8 @@ func New(c *client.Client, rt Runtime, recorder *record.Recorder, cfg Config) *K
 		}
 	}
 	k.services = informers.New(client.Services(c, ""), client.ListOptions{}, 0)
+	k.configMaps = informers.New(client.ConfigMaps(c, ""), client.ListOptions{}, 0)
+	k.secrets = informers.New(client.Secrets(c, ""), client.ListOptions{}, 0)
 	k.nodes = informers.New(client.Nodes(c), client.ListOptions{}, 0)
 	k.nodes.AddHandler(informers.Handler[*corev1.Node]{
 		OnAdd: func(*corev1.Node) { poke() }, OnUpdate: func(_, _ *corev1.Node) { poke() }, OnDelete: func(*corev1.Node) { poke() },
@@ -153,12 +159,15 @@ func (k *Kubelet) Run(ctx context.Context) {
 	go k.networkLoop(ctx)
 	go k.pods.Run(ctx)
 	go k.services.Run(ctx)
+	go k.configMaps.Run(ctx)
+	go k.secrets.Run(ctx)
 	// Static Pods run without the API, which may itself be one of them.
 	if k.cfg.StaticPodPath != "" {
 		go k.staticLoop(ctx)
 	}
-	// Containers get the variables of the Services that exist when they start.
-	if !informers.WaitForSync(ctx, k.pods.HasSynced, k.services.HasSynced) {
+	// Containers get the variables of the Services that exist when they
+	// start, and the ConfigMaps and Secrets they refer to.
+	if !informers.WaitForSync(ctx, k.pods.HasSynced, k.services.HasSynced, k.configMaps.HasSynced, k.secrets.HasSynced) {
 		return
 	}
 	poll := time.NewTicker(time.Second)
@@ -511,6 +520,16 @@ func containerStatus(list []corev1.ContainerStatus, name string) *corev1.Contain
 		}
 	}
 	return nil
+}
+
+// ConfigMap returns a ConfigMap from the kubelet's cache.
+func (k *Kubelet) ConfigMap(namespace, name string) (*corev1.ConfigMap, bool) {
+	return k.configMaps.Get(namespace, name)
+}
+
+// Secret returns a Secret from the kubelet's cache.
+func (k *Kubelet) Secret(namespace, name string) (*corev1.Secret, bool) {
+	return k.secrets.Get(namespace, name)
 }
 
 // ServiceEnv returns the Service environment variables of a Pod's containers.

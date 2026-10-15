@@ -117,8 +117,8 @@ func TestValidateVolumesAndMounts(t *testing.T) {
 		mutate func(*corev1.PodSpec)
 		want   string
 	}{
-		"no source":      {func(s *corev1.PodSpec) { s.Volumes[0].EmptyDir = nil }, "spec.volumes[0]: Required value: must specify exactly one of emptyDir, hostPath"},
-		"two sources":    {func(s *corev1.PodSpec) { s.Volumes[0].HostPath = &corev1.HostPathVolumeSource{Path: "/x"} }, "must specify exactly one of emptyDir, hostPath"},
+		"no source":      {func(s *corev1.PodSpec) { s.Volumes[0].EmptyDir = nil }, "spec.volumes[0]: Required value: must specify a volume type"},
+		"two sources":    {func(s *corev1.PodSpec) { s.Volumes[0].HostPath = &corev1.HostPathVolumeSource{Path: "/x"} }, "spec.volumes[0].hostPath: Forbidden: may not specify more than 1 volume type"},
 		"duplicate name": {func(s *corev1.PodSpec) { s.Volumes = append(s.Volumes, s.Volumes[0]) }, `spec.volumes[1].name: Duplicate value: "data"`},
 		"bad medium":     {func(s *corev1.PodSpec) { s.Volumes[0].EmptyDir.Medium = "Disk" }, `spec.volumes[0].emptyDir.medium: Unsupported value: "Disk"`},
 		"relative host path": {func(s *corev1.PodSpec) {

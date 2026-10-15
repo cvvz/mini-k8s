@@ -5,7 +5,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"syscall"
 
 	"mini-k8s/pkg/api/resource"
@@ -58,6 +60,42 @@ func runAlloc(args []string) int {
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	<-signals
 	runtime.KeepAlive(held)
+	return 0
+}
+
+// runEnv prints the environment sorted, like `env | sort`: `mini env`.
+func runEnv() int {
+	vars := os.Environ()
+	sort.Strings(vars)
+	for _, v := range vars {
+		fmt.Println(v)
+	}
+	return 0
+}
+
+// runLs lists a directory, including dot entries, with the targets of
+// symbolic links and a slash after directories: `mini ls /etc/config`.
+func runLs(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: mini ls DIR")
+		return 2
+	}
+	entries, err := os.ReadDir(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	for _, e := range entries {
+		switch {
+		case e.Type()&os.ModeSymlink != 0:
+			target, _ := os.Readlink(filepath.Join(args[0], e.Name()))
+			fmt.Printf("%s -> %s\n", e.Name(), target)
+		case e.IsDir():
+			fmt.Println(e.Name() + "/")
+		default:
+			fmt.Println(e.Name())
+		}
+	}
 	return 0
 }
 

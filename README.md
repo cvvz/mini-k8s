@@ -58,6 +58,13 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   tcpSocket, exec); CPU and memory requests/limits enforced through cgroups (`OOMKilled`)
   and QoS classes; `emptyDir` (disk or memory) and `hostPath` volumes; `hostNetwork`;
   `kk exec` runs commands in containers.
+- **Configuration**: ConfigMaps and Secrets (`stringData`, typed Secrets, immutability);
+  containers take variables from them (`valueFrom`, `envFrom`), from Pod fields and from their
+  own requests and limits (the downward API), with `$(VAR)` references expanded in values,
+  commands and arguments; configMap, secret, downwardAPI and projected volumes are written
+  atomically (`..data` switched by a rename), mounted read-only (secrets in memory) and follow
+  changes to their sources. A missing ConfigMap or Secret keeps the Pod waiting
+  (`CreateContainerConfigError`, or `ContainerCreating` with `FailedMount` events) until it exists.
 - **kubelet**: node registration, Lease renewal and status reports; static Pods from a manifest directory
   with mirror Pods; one worker per Pod; restarts with backoff (CrashLoopBackOff);
   `imagePullPolicy` and image pull errors (ErrImagePull/ImagePullBackOff); sandbox
@@ -87,7 +94,8 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **kk**: `get` (`-o wide|json|yaml|name`, `-l`, `--field-selector`, `-A`, `-w`),
   `describe`, `apply`/`create` (server-side dry run of the whole batch first), `delete`
   (`--grace-period`, `--force`, `--cascade`), `logs -f/-p/-c`, `exec`, `scale`, `rollout status|history|undo|pause|resume|restart`, `cordon`/`uncordon`/`drain`/`taint`, `label`, `api-resources`,
-  `version`, cluster lifecycle and `image load` (copy local images into the nodes).
+  `version`, `create configmap|secret generic|secret tls`, cluster lifecycle and `image load` (copy
+  local images into the nodes).
 
 ```mermaid
 flowchart TB
@@ -341,6 +349,14 @@ kk taint nodes worker-2 dedicated-                  # remove it again
 kk label nodes worker-2 disk=ssd         # Pods with nodeSelector disk: ssd now land on worker-2
 kk scale deployment web --replicas 4     # replicas spread: two per worker
 
+kk apply -f examples/config.yaml         # a ConfigMap and a Secret as variables and files
+kk exec config-demo -- /mini env         # GREETING=hello, MESSAGE=hello from config-demo, SECRET_password=…
+kk exec config-demo -- /mini ls /etc/config      # greeting -> ..data/greeting: files switched atomically
+kk label pod config-demo tier=web --overwrite    # /etc/podinfo/labels follows within seconds,
+kk exec config-demo -- /mini cat /etc/podinfo/labels    # as do the files of an edited ConfigMap
+kk create secret generic db --from-literal=password=s3cr3t   # or --from-file=[KEY=]PATH
+kk describe secret db                    # shows sizes, never values
+
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # another namespace, exposed by a NodePort Service
 kk get svc -n team hello                 # PORT(S) shows 80:NODE_PORT/TCP
@@ -392,7 +408,9 @@ into the nodes), also delete the volumes:
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
 | Node | `v1` | Registered by kubelets with `capacity`/`allocatable` (cpu, memory, pods) and role labels; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` and `spec.taints` (NoSchedule, PreferNoSchedule, NoExecute with `timeAdded`) are honoured by the scheduler and the taint-eviction controller; the control-plane node is tainted `node-role.kubernetes.io/control-plane:NoSchedule`; lost nodes become `Unknown` with the `node.kubernetes.io/unreachable` taints. |
 | Lease | `coordination.k8s.io/v1` | `holderIdentity`, `leaseDurationSeconds`, `renewTime`; each kubelet renews `kube-node-lease/<node>`. |
-| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`); `hostNetwork`; `hostname`, `subdomain`; `dnsPolicy` (ClusterFirst, ClusterFirstWithHostNet, Default, None) and `dnsConfig`; `enableServiceLinks`; `tolerations`; `nodeSelector`; `affinity` (`nodeAffinity`, `podAffinity`, `podAntiAffinity`, required and preferred; `topologyKey`); scheduling accounts for `resources.requests`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
+| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env` (`value` with `$(VAR)` references, or `valueFrom` `configMapKeyRef`, `secretKeyRef`, `fieldRef`, `resourceFieldRef`), `envFrom` (`configMapRef`, `secretRef`, `prefix`), `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`, `configMap`, `secret`, `downwardAPI`, `projected`, with `items`, `defaultMode`, `optional`); `hostNetwork`; `hostname`, `subdomain`; `dnsPolicy` (ClusterFirst, ClusterFirstWithHostNet, Default, None) and `dnsConfig`; `enableServiceLinks`; `tolerations`; `nodeSelector`; `affinity` (`nodeAffinity`, `podAffinity`, `podAntiAffinity`, required and preferred; `topologyKey`); scheduling accounts for `resources.requests`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
+| ConfigMap | `v1` | `data`, `binaryData` (keys `[-._a-zA-Z0-9]+`, 1 MiB in total), `immutable`. |
+| Secret | `v1` | `data` (base64), write-only `stringData` merged into it, `type` (default `Opaque`, immutable; `kubernetes.io/tls`, `basic-auth`, `ssh-auth` and `dockerconfigjson` must have their keys), `immutable`; selectable by `type`. |
 | Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always), `strategy` (RollingUpdate with `maxSurge`/`maxUnavailable`, 25% each by default, or Recreate), `minReadySeconds`, `revisionHistoryLimit` (10), `paused`, `progressDeadlineSeconds` (600). Each template version runs as a ReplicaSet; annotations `deployment.kubernetes.io/revision` and `kubernetes.io/change-cause`. |
 | ReplicaSet | `apps/v1` | `replicas`, `selector` (immutable), `template`, `minReadySeconds`; usually owned by a Deployment. |
 | Service | `v1` | `type` ClusterIP (default), NodePort or ExternalName (`externalName`); `selector` (optional: without one, write the Endpoints yourself); `ports` (`name`, `port`, `targetPort` number or container port name, `protocol` TCP/UDP, `nodePort` from 30000-32767); `clusterIP` (allocated from `10.96.0.0/12` unless given; `None` for a headless Service; immutable); `publishNotReadyAddresses`; `sessionAffinity` None/ClientIP with `sessionAffinityConfig.clientIP.timeoutSeconds`. `default/kubernetes` (`10.96.0.1`, `443/TCP`) is kept by the API server. |
@@ -408,7 +426,8 @@ still not a cross-resource transaction.
 
 ## Current limitations (addressed by upcoming milestones)
 
-- No ConfigMaps, Secrets or persistent volumes yet (M8); no `subPath` or `hostPort`. `kk exec` runs a
+- No persistent volumes yet (M8b); no `subPath`, `hostPort`, service accounts or projected
+  service account tokens. `kk exec` runs a
   command to completion and returns its output; there is no interactive session (stdin/tty),
   unlike Kubernetes' streaming exec.
 - Rollouts do not scale proportionally when `replicas` changes mid-rollout, and ReplicaSets
@@ -510,12 +529,14 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M7a | Node leases and lifecycle, taint-based eviction, eviction API, cordon/drain/taint | ✅ |
 | M7b | Scheduling framework: resource fit, node selectors and affinity, pod (anti-)affinity, spreading | ✅ |
 | M7c | More workers (`kk cluster up --workers N`), Pod garbage collector | ✅ |
-| M8 | ConfigMaps, Secrets, volumes, PVCs | planned |
+| M8a | ConfigMaps, Secrets, `valueFrom`/`envFrom`, downward API, projected volumes | ✅ |
+| M8b | PersistentVolumes and claims with dynamic provisioning | planned |
 | M9 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M8a ConfigMaps and Secrets plan (Chinese)](docs/superpowers/plans/2026-10-15-m8a-configmap-secret.md)
 - [M7c worker scaling plan (Chinese)](docs/superpowers/plans/2026-10-15-m7c-worker-scaling.md)
 - [M7b scheduling framework plan (Chinese)](docs/superpowers/plans/2026-10-15-m7b-scheduling-framework.md)
 - [M7a node lifecycle plan (Chinese)](docs/superpowers/plans/2026-10-15-m7a-node-lifecycle.md)

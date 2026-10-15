@@ -224,8 +224,12 @@ type Volume struct {
 
 // VolumeSource is where a volume's data lives.
 type VolumeSource struct {
-	EmptyDir *EmptyDirVolumeSource `json:"emptyDir,omitempty"`
-	HostPath *HostPathVolumeSource `json:"hostPath,omitempty"`
+	EmptyDir    *EmptyDirVolumeSource    `json:"emptyDir,omitempty"`
+	HostPath    *HostPathVolumeSource    `json:"hostPath,omitempty"`
+	ConfigMap   *ConfigMapVolumeSource   `json:"configMap,omitempty"`
+	Secret      *SecretVolumeSource      `json:"secret,omitempty"`
+	DownwardAPI *DownwardAPIVolumeSource `json:"downwardAPI,omitempty"`
+	Projected   *ProjectedVolumeSource   `json:"projected,omitempty"`
 }
 
 // EmptyDirVolumeSource is a directory that lives as long as the Pod on its node.
@@ -276,6 +280,7 @@ type Container struct {
 	Command         []string             `json:"command,omitempty"`
 	Args            []string             `json:"args,omitempty"`
 	Env             []EnvVar             `json:"env,omitempty"`
+	EnvFrom         []EnvFromSource      `json:"envFrom,omitempty"`
 	Ports           []ContainerPort      `json:"ports,omitempty"`
 	Resources       ResourceRequirements `json:"resources,omitzero"`
 	VolumeMounts    []VolumeMount        `json:"volumeMounts,omitempty"`
@@ -364,10 +369,12 @@ type TCPSocketAction struct {
 	Host string             `json:"host,omitempty"`
 }
 
-// EnvVar is a literal environment variable.
+// EnvVar is an environment variable: a literal value, in which $(VAR)
+// references expand, or a value taken from elsewhere.
 type EnvVar struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
+	Name      string        `json:"name"`
+	Value     string        `json:"value,omitempty"`
+	ValueFrom *EnvVarSource `json:"valueFrom,omitempty"`
 }
 
 // ContainerPort documents a port the container listens on.

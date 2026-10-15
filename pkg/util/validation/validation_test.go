@@ -16,7 +16,21 @@ func TestNames(t *testing.T) {
 			t.Errorf("IsDNS1123Subdomain(%q) != %v", s, want)
 		}
 	}
-	if !IsEnvVarName("MY_VAR.1") || IsEnvVarName("1VAR") {
-		t.Error("IsEnvVarName")
+	// Kubernetes 1.34 relaxed environment variable names.
+	for _, ok := range []string{"MY_VAR.1", "1VAR", "a-b", "has space", "~"} {
+		if errs := IsRelaxedEnvVarName(ok); len(errs) != 0 {
+			t.Errorf("IsRelaxedEnvVarName(%q): %v", ok, errs)
+		}
+	}
+	for _, bad := range []string{"", "a=b", "tab\there", "café"} {
+		if len(IsRelaxedEnvVarName(bad)) == 0 {
+			t.Errorf("IsRelaxedEnvVarName(%q) accepted", bad)
+		}
+	}
+	for key, want := range map[string]int{"key.name": 0, "KEY_NAME": 0, "a-b": 0, "a/b": 1, "has space": 1, ".": 1, "..": 1,
+		"..x": 1, strings.Repeat("a", 254): 1, "": 1} {
+		if got := IsConfigMapKey(key); len(got) != want {
+			t.Errorf("IsConfigMapKey(%q) = %v", key, got)
+		}
 	}
 }

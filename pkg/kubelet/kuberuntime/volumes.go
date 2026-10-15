@@ -7,13 +7,15 @@ import (
 	"path/filepath"
 
 	corev1 "mini-k8s/pkg/apis/core/v1"
+	"mini-k8s/pkg/volume"
 )
 
 // DefaultPodsDir holds per-Pod kubelet data such as emptyDir volumes (on the
 // node container's persistent /var).
 const DefaultPodsDir = "/var/lib/kubelet/pods"
 
-// Mounter mounts tmpfs for memory-backed emptyDir volumes.
+// Mounter mounts tmpfs for memory-backed emptyDir volumes and the volumes
+// that live in memory (secrets, the downward API, projected volumes).
 type Mounter interface {
 	MountTmpfs(dir string, sizeBytes int64) error
 	Unmount(dir string) error
@@ -27,47 +29,95 @@ func (m *Manager) emptyDirPath(uid, name string) string {
 	return filepath.Join(m.podDir(uid), "volumes", "kubernetes.io~empty-dir", name)
 }
 
-// setupVolumes prepares the Pod's volumes and returns their node paths by
-// volume name. emptyDir directories are created once and survive container
-// and node restarts; memory-backed ones are tmpfs mounts. hostPath volumes
-// are checked (or created) according to their type.
-func (m *Manager) setupVolumes(pod *corev1.Pod) (map[string]string, error) {
-	paths := map[string]string{}
+// mountedVolumes are the node paths of a Pod's volumes by name, and which
+// of them are always mounted read-only.
+type mountedVolumes struct {
+	paths    map[string]string
+	readOnly map[string]bool
+}
+
+// setupVolumes prepares the Pod's volumes. emptyDir directories are created
+// once and survive container and node restarts; memory-backed ones are
+// tmpfs mounts. hostPath volumes are checked (or created) according to
+// their type. configMap, secret, downwardAPI and projected volumes get
+// their files written atomically on every call, so changes reach running
+// containers; they are mounted read-only, and all but configMap volumes
+// live on a tmpfs. Errors are worded like the kubelet's FailedMount events.
+func (m *Manager) setupVolumes(pod *corev1.Pod) (mountedVolumes, error) {
+	vols := mountedVolumes{paths: map[string]string{}, readOnly: map[string]bool{}}
+	failed := func(name string, err error) (mountedVolumes, error) {
+		return vols, fmt.Errorf("MountVolume.SetUp failed for volume %q : %w", name, err)
+	}
 	for _, v := range pod.Spec.Volumes {
 		switch {
 		case v.EmptyDir != nil:
 			dir := m.emptyDirPath(pod.UID, v.Name)
 			if err := os.MkdirAll(dir, 0o777); err != nil {
-				return nil, fmt.Errorf("MountVolume.SetUp failed for volume %q: %w", v.Name, err)
+				return failed(v.Name, err)
 			}
 			if err := os.Chmod(dir, 0o777); err != nil { // any container user may write, as in Kubernetes
-				return nil, fmt.Errorf("MountVolume.SetUp failed for volume %q: %w", v.Name, err)
+				return failed(v.Name, err)
 			}
 			if v.EmptyDir.Medium == corev1.StorageMediumMemory {
-				if err := m.mountTmpfs(dir, v.EmptyDir); err != nil {
-					return nil, fmt.Errorf("MountVolume.SetUp failed for volume %q: %w", v.Name, err)
+				size := int64(0)
+				if v.EmptyDir.SizeLimit != nil {
+					size = v.EmptyDir.SizeLimit.Value()
+				}
+				if err := m.mountTmpfs(dir, size); err != nil {
+					return failed(v.Name, err)
 				}
 			}
-			paths[v.Name] = dir
+			vols.paths[v.Name] = dir
 		case v.HostPath != nil:
 			if err := checkHostPath(v.HostPath); err != nil {
-				return nil, fmt.Errorf("MountVolume.SetUp failed for volume %q: %w", v.Name, err)
+				return failed(v.Name, err)
 			}
-			paths[v.Name] = v.HostPath.Path
+			vols.paths[v.Name] = v.HostPath.Path
+		default:
+			src := volume.Source{Pod: pod, Objects: m.Objects, Allocatable: m.Allocatable}
+			if m.Objects == nil {
+				src.Objects = noObjects{}
+			}
+			payload, ok, err := src.Payload(v.VolumeSource)
+			if !ok {
+				continue
+			}
+			if err != nil {
+				return failed(v.Name, err)
+			}
+			dir := filepath.Join(m.podDir(pod.UID), "volumes", volume.PluginDir(v.VolumeSource), v.Name)
+			if err := os.MkdirAll(dir, 0o777); err != nil {
+				return failed(v.Name, err)
+			}
+			if volume.OnTmpfs(v.VolumeSource) {
+				if err := m.mountTmpfs(dir, 0); err != nil {
+					return failed(v.Name, err)
+				}
+			} else if err := os.Chmod(dir, 0o777); err != nil {
+				return failed(v.Name, err)
+			}
+			if _, err := volume.Write(dir, payload); err != nil {
+				return failed(v.Name, err)
+			}
+			vols.paths[v.Name], vols.readOnly[v.Name] = dir, true
 		}
 	}
-	return paths, nil
+	return vols, nil
 }
 
-func (m *Manager) mountTmpfs(dir string, e *corev1.EmptyDirVolumeSource) error {
+// noObjects finds nothing (a runtime without an API, as in tests).
+type noObjects struct{}
+
+func (noObjects) ConfigMap(string, string) (*corev1.ConfigMap, bool) { return nil, false }
+func (noObjects) Secret(string, string) (*corev1.Secret, bool)       { return nil, false }
+
+// mountTmpfs mounts a tmpfs of size bytes (0: the kernel default) on dir
+// once.
+func (m *Manager) mountTmpfs(dir string, size int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.tmpfs[dir] {
 		return nil
-	}
-	size := int64(0)
-	if e.SizeLimit != nil {
-		size = e.SizeLimit.Value()
 	}
 	if err := m.Mounter.MountTmpfs(dir, size); err != nil {
 		return err

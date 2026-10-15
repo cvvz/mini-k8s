@@ -41,7 +41,7 @@ var components = map[string]component{
 }
 
 func usage() string {
-	names := []string{"demo", "pause", "fetch URL", "lookup [-t TYPE] NAME", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE"}
+	names := []string{"demo", "pause", "fetch URL", "lookup [-t TYPE] NAME", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE", "env", "ls DIR"}
 	for name := range components {
 		names = append(names, name)
 	}
@@ -82,6 +82,10 @@ func main() {
 		os.Exit(runWrite(os.Args[2:]))
 	case "alloc":
 		os.Exit(runAlloc(os.Args[2:]))
+	case "env":
+		os.Exit(runEnv())
+	case "ls":
+		os.Exit(runLs(os.Args[2:]))
 	}
 	run, ok := components[os.Args[1]]
 	if !ok || len(os.Args) != 2 {

@@ -43,11 +43,16 @@ func (m *Manager) SyncPod(ctx context.Context, pod *corev1.Pod) corev1.PodStatus
 	// Volumes are prepared before containers start; a failure only keeps new
 	// containers from starting.
 	r.volumes, r.volumeErr = m.setupVolumes(pod)
+	m.reportMountFailure(pod, r.volumeErr)
 	if r.volumeErr == nil {
 		r.extras.hostsFile, r.volumeErr = m.ensureHostsFile(pod, ip)
 	}
 	if m.Env != nil {
-		r.extras.env = m.Env(pod)
+		r.serviceEnv = m.Env(pod)
+	}
+	r.ip = ip
+	if pod.Spec.HostNetwork {
+		r.ip = m.NodeIP
 	}
 	if r.containersStarted() {
 		// Init containers finished before any container was created in this
@@ -77,9 +82,12 @@ type podRun struct {
 	pod       *corev1.Pod
 	sandboxID string
 	sandbox   *runtimeapi.PodSandboxConfig
-	volumes   map[string]string // node paths by volume name
+	volumes   mountedVolumes
 	volumeErr error
 	extras    containerExtras
+	// serviceEnv holds the Service variables, ip the Pod's IP.
+	serviceEnv []corev1.EnvVar
+	ip         string
 }
 
 // outcome is a container's situation after one sync step.
@@ -295,7 +303,9 @@ func (r *podRun) currentStatus(name string) *runtimeapi.ContainerStatus {
 func (r *podRun) start(c corev1.Container, cs *corev1.ContainerStatus, attempt uint32, key string) outcome {
 	m, ctx := r.m, r.ctx
 	if r.volumeErr != nil {
-		cs.State = waitingState(ReasonCreateContainerConfigError, r.volumeErr.Error())
+		// Like the kubelet: the Pod waits for its volumes, which the
+		// FailedMount events explain.
+		cs.State = waitingState(ReasonContainerCreating, "")
 		return outcomeWaiting
 	}
 	if c.ImagePullPolicy == corev1.PullNever {
@@ -313,8 +323,14 @@ func (r *podRun) start(c corev1.Container, cs *corev1.ContainerStatus, attempt u
 		cs.State = waitingState(reason, err.Error())
 		return outcomeWaiting
 	}
+	extras := r.extras
+	var err error
+	if extras.env, err = m.containerEnv(r.pod, c, r.serviceEnv, r.ip); err != nil {
+		cs.State = waitingState(ReasonCreateContainerConfigError, err.Error())
+		return outcomeWaiting
+	}
 	created, err := m.runtime.CreateContainer(ctx, &runtimeapi.CreateContainerRequest{
-		PodSandboxId: r.sandboxID, Config: containerConfig(r.pod, c, attempt, r.volumes, r.extras), SandboxConfig: r.sandbox})
+		PodSandboxId: r.sandboxID, Config: containerConfig(r.pod, c, attempt, r.volumes, extras), SandboxConfig: r.sandbox})
 	if err != nil {
 		cs.State = waitingState(ReasonCreateContainerError, err.Error())
 		return outcomeWaiting

@@ -83,6 +83,10 @@ var (
 		ShortNames: []string{"ep"}, New: func() metav1.Object { return &corev1.Endpoints{} }}
 	Events = ResourceInfo{Version: "v1", Resource: "events", Singular: "event", Kind: "Event", Namespaced: true,
 		ShortNames: []string{"ev"}, New: func() metav1.Object { return &corev1.Event{} }}
+	ConfigMaps = ResourceInfo{Version: "v1", Resource: "configmaps", Singular: "configmap", Kind: "ConfigMap", Namespaced: true,
+		ShortNames: []string{"cm"}, New: func() metav1.Object { return &corev1.ConfigMap{} }}
+	Secrets = ResourceInfo{Version: "v1", Resource: "secrets", Singular: "secret", Kind: "Secret", Namespaced: true,
+		New: func() metav1.Object { return &corev1.Secret{} }}
 	Deployments = ResourceInfo{Group: "apps", Version: "v1", Resource: "deployments", Singular: "deployment", Kind: "Deployment",
 		Namespaced: true, ShortNames: []string{"deploy"}, HasStatus: true, New: func() metav1.Object { return &appsv1.Deployment{} }}
 	ReplicaSets = ResourceInfo{Group: "apps", Version: "v1", Resource: "replicasets", Singular: "replicaset", Kind: "ReplicaSet",
@@ -94,7 +98,8 @@ var (
 )
 
 // All lists every registered resource in discovery order.
-var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, Deployments, ReplicaSets, Ingresses, Leases}
+var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, ConfigMaps, Secrets, Deployments, ReplicaSets,
+	Ingresses, Leases}
 
 // Lookup resolves a user-supplied name: plural, singular, short name, kind
 // (case-insensitive) or "plural.group".

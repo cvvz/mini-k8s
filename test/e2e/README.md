@@ -40,6 +40,8 @@ test/e2e/
 ├── apps/              # [sig-apps] 工作负载控制器
 ├── network/           # [sig-network] Pod 网络、Service、kube-proxy、集群 DNS 与 Ingress
 ├── node/              # [sig-node] Node 与 kubelet
+├── scheduling/        # [sig-scheduling] 调度器
+├── storage/           # [sig-storage] ConfigMap、Secret、downward API 与投射卷
 └── lifecycle/         # [sig-cluster-lifecycle] 控制面重启、down/up（Disruptive）
 ```
 

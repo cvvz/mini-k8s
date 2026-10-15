@@ -48,6 +48,51 @@ func SetDefaultsPodSpec(spec *PodSpec) {
 			for _, p := range []*Probe{c.LivenessProbe, c.ReadinessProbe, c.StartupProbe} {
 				setDefaultsProbe(p)
 			}
+			for j := range c.Env {
+				if from := c.Env[j].ValueFrom; from != nil {
+					setDefaultsFieldRef(from.FieldRef)
+				}
+			}
+		}
+	}
+	for i := range spec.Volumes {
+		setDefaultsVolume(&spec.Volumes[i].VolumeSource)
+	}
+}
+
+func setDefaultsFieldRef(f *ObjectFieldSelector) {
+	if f != nil && f.APIVersion == "" {
+		f.APIVersion = "v1"
+	}
+}
+
+// setDefaultsVolume gives projected files the default mode 0644 and field
+// references the v1 API version, as Kubernetes does.
+func setDefaultsVolume(v *VolumeSource) {
+	mode := func(m **int32) {
+		if *m == nil {
+			*m = ptr.To(ProjectedDefaultMode)
+		}
+	}
+	downward := func(items []DownwardAPIVolumeFile) {
+		for i := range items {
+			setDefaultsFieldRef(items[i].FieldRef)
+		}
+	}
+	switch {
+	case v.ConfigMap != nil:
+		mode(&v.ConfigMap.DefaultMode)
+	case v.Secret != nil:
+		mode(&v.Secret.DefaultMode)
+	case v.DownwardAPI != nil:
+		mode(&v.DownwardAPI.DefaultMode)
+		downward(v.DownwardAPI.Items)
+	case v.Projected != nil:
+		mode(&v.Projected.DefaultMode)
+		for _, s := range v.Projected.Sources {
+			if s.DownwardAPI != nil {
+				downward(s.DownwardAPI.Items)
+			}
 		}
 	}
 }

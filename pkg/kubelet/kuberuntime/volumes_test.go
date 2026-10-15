@@ -2,6 +2,7 @@ package kuberuntime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"mini-k8s/pkg/api/resource"
 	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
 )
 
 type fakeMounter struct {
@@ -47,10 +49,11 @@ func TestSetupVolumes(t *testing.T) {
 		{Name: "data", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: filepath.Join(host, "data"), Type: ptrTo("DirectoryOrCreate")}}},
 		{Name: "socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: filepath.Join(host, "run", "x.sock"), Type: ptrTo("FileOrCreate")}}},
 	}
-	paths, err := m.setupVolumes(pod)
+	vols, err := m.setupVolumes(pod)
 	if err != nil {
 		t.Fatal(err)
 	}
+	paths := vols.paths
 	scratch := filepath.Join(m.PodsDir, "uid-1", "volumes", "kubernetes.io~empty-dir", "scratch")
 	if info, err := os.Stat(scratch); err != nil || paths["scratch"] != scratch || info.Mode().Perm() != 0o777 {
 		t.Fatalf("emptyDir: %v %v", paths, err)
@@ -73,18 +76,102 @@ func TestSetupVolumes(t *testing.T) {
 		bad := testPod()
 		bad.Spec.Volumes = []corev1.Volume{{Name: "x", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
 			Path: filepath.Join(host, "missing"), Type: ptrTo(typ)}}}}
-		if _, err := m.setupVolumes(bad); err == nil || !strings.Contains(err.Error(), `MountVolume.SetUp failed for volume "x": hostPath type check failed:`) ||
+		if _, err := m.setupVolumes(bad); err == nil || !strings.Contains(err.Error(), `MountVolume.SetUp failed for volume "x" : hostPath type check failed:`) ||
 			!strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v", typ, err)
 		}
 	}
 }
 
+// configMap, secret, downwardAPI and projected volumes: written under the
+// Pod's directory, in memory except for configMaps, mounted read-only,
+// refreshed on every setup; a missing object fails the setup and is
+// reported as FailedMount events, paced by a backoff.
+func TestProjectedVolumes(t *testing.T) {
+	_, m, _ := newTestManager(t)
+	objects := testObjects()
+	m.Objects = objects
+	rec := &fakeRecorder{}
+	m.Recorder = rec
+	pod := testPod()
+	pod.Namespace = "ns"
+	pod.Labels = map[string]string{"tier": "x"}
+	pod.Spec.Volumes = []corev1.Volume{
+		{Name: "cfg", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "cm1"}}}},
+		{Name: "sec", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "s1"}}},
+		{Name: "down", VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{
+			{Path: "labels", FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.labels"}}}}}},
+	}
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "cfg", MountPath: "/etc/cfg"}, {Name: "sec", MountPath: "/etc/sec"}}
+	vols, err := m.setupVolumes(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(m.PodsDir, "uid-1", "volumes", "kubernetes.io~configmap", "cfg")
+	if vols.paths["cfg"] != cfgDir || !vols.readOnly["cfg"] || !vols.readOnly["sec"] || !vols.readOnly["down"] {
+		t.Fatalf("volumes: %+v", vols)
+	}
+	if data, err := os.ReadFile(filepath.Join(cfgDir, "a")); err != nil || string(data) != "1" {
+		t.Fatalf("configMap file: %q %v", data, err)
+	}
+	fm := m.Mounter.(*fakeMounter)
+	secDir := filepath.Join(m.PodsDir, "uid-1", "volumes", "kubernetes.io~secret", "sec")
+	downDir := filepath.Join(m.PodsDir, "uid-1", "volumes", "kubernetes.io~downward-api", "down")
+	if _, ok := fm.mounted[secDir]; !ok || len(fm.mounted) != 2 {
+		t.Fatalf("secret and downward API volumes are tmpfs, configMaps are not: %v", fm.mounted)
+	}
+	if data, _ := os.ReadFile(filepath.Join(downDir, "labels")); string(data) != `tier="x"` {
+		t.Fatalf("labels file: %q", data)
+	}
+	cfg := containerConfig(pod, pod.Spec.Containers[0], 0, vols, containerExtras{})
+	if len(cfg.Mounts) != 2 || !cfg.Mounts[0].Readonly || !cfg.Mounts[1].Readonly {
+		t.Fatalf("projected volumes are mounted read-only: %+v", cfg.Mounts)
+	}
+
+	objects.configMaps["ns/cm1"].Data["a"] = "changed"
+	pod.Labels["tier"] = "y"
+	if _, err := m.setupVolumes(pod); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(cfgDir, "a")); string(data) != "changed" {
+		t.Fatalf("configMap update: %q", data)
+	}
+	if data, _ := os.ReadFile(filepath.Join(downDir, "labels")); string(data) != `tier="y"` {
+		t.Fatalf("label update: %q", data)
+	}
+
+	missing := testPod()
+	missing.UID = "uid-2"
+	missing.Spec.Volumes = []corev1.Volume{{Name: "cfg", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "nope"}}}}}
+	for range 3 {
+		_, err := m.setupVolumes(missing)
+		m.reportMountFailure(missing, err)
+		if err == nil || err.Error() != `MountVolume.SetUp failed for volume "cfg" : configmap "nope" not found` {
+			t.Fatalf("missing configMap: %v", err)
+		}
+	}
+	if len(rec.events) != 1 || rec.events[0] != `Warning FailedMount MountVolume.SetUp failed for volume "cfg" : configmap "nope" not found` {
+		t.Fatalf("one FailedMount event per backoff period: %q", rec.events)
+	}
+}
+
+type fakeRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *fakeRecorder) Eventf(_ metav1.Object, eventType, reason, format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, eventType+" "+reason+" "+fmt.Sprintf(format, args...))
+}
+
 func TestVolumeMountsAndNamespacesInCRIConfig(t *testing.T) {
 	_, m, _ := newTestManager(t)
 	pod := testPod()
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/data", ReadOnly: true}}
-	cfg := containerConfig(pod, pod.Spec.Containers[0], 0, map[string]string{"data": "/var/lib/x"}, containerExtras{})
+	cfg := containerConfig(pod, pod.Spec.Containers[0], 0, mountedVolumes{paths: map[string]string{"data": "/var/lib/x"}}, containerExtras{})
 	if len(cfg.Mounts) != 1 || cfg.Mounts[0].HostPath != "/var/lib/x" || cfg.Mounts[0].ContainerPath != "/data" || !cfg.Mounts[0].Readonly {
 		t.Fatalf("mounts: %+v", cfg.Mounts)
 	}
@@ -106,7 +193,7 @@ func TestVolumeMountsAndNamespacesInCRIConfig(t *testing.T) {
 	if sb.Linux.SecurityContext.NamespaceOptions.Network != runtimeapi.NamespaceMode_NODE || sb.Hostname != "" || sb.DnsConfig != nil {
 		t.Fatalf("host network sandbox: %+v", sb)
 	}
-	if c := containerConfig(pod, pod.Spec.Containers[0], 0, nil, containerExtras{}); c.Linux.SecurityContext.NamespaceOptions.Network != runtimeapi.NamespaceMode_NODE {
+	if c := containerConfig(pod, pod.Spec.Containers[0], 0, mountedVolumes{}, containerExtras{}); c.Linux.SecurityContext.NamespaceOptions.Network != runtimeapi.NamespaceMode_NODE {
 		t.Fatal("host network container")
 	}
 }
@@ -169,13 +256,13 @@ func TestVolumeErrorsBlockOnlyNewContainersAndPodDirsAreRemoved(t *testing.T) {
 func TestSecurityContextInCRIConfig(t *testing.T) {
 	_, m, _ := newTestManager(t)
 	pod := testPod()
-	if cfg := containerConfig(pod, pod.Spec.Containers[0], 0, nil, containerExtras{}); cfg.Linux.SecurityContext.Privileged || m.sandboxConfig(pod, 0).Linux.SecurityContext.Privileged {
+	if cfg := containerConfig(pod, pod.Spec.Containers[0], 0, mountedVolumes{}, containerExtras{}); cfg.Linux.SecurityContext.Privileged || m.sandboxConfig(pod, 0).Linux.SecurityContext.Privileged {
 		t.Fatal("containers are unprivileged by default")
 	}
 	privileged := true
 	pod.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: &privileged,
 		Capabilities: &corev1.Capabilities{Add: []string{"NET_ADMIN"}, Drop: []string{"MKNOD"}}}
-	sc := containerConfig(pod, pod.Spec.Containers[0], 0, nil, containerExtras{}).Linux.SecurityContext
+	sc := containerConfig(pod, pod.Spec.Containers[0], 0, mountedVolumes{}, containerExtras{}).Linux.SecurityContext
 	if !sc.Privileged || sc.Capabilities.AddCapabilities[0] != "NET_ADMIN" || sc.Capabilities.DropCapabilities[0] != "MKNOD" {
 		t.Fatalf("security context: %+v", sc)
 	}

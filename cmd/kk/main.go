@@ -34,6 +34,9 @@ Resources:
   kk apply -f FILE|DIR|-          create or update (validated with a dry run first)
   kk create -f FILE|DIR|-
   kk create namespace NAME
+  kk create configmap NAME [--from-literal=KEY=VALUE] [--from-file=[KEY=]PATH] ...
+  kk create secret generic NAME [--type TYPE] [--from-literal=KEY=VALUE] [--from-file=[KEY=]PATH] ...
+  kk create secret tls NAME --cert FILE --key FILE
   kk delete -f FILE | TYPE NAME... | TYPE -l SELECTOR | TYPE --all
             [--grace-period N] [--force] [--cascade background|foreground|orphan] [--wait=false]
   kk logs POD [-c CONTAINER] [-f] [--tail N] [-p]
@@ -53,7 +56,7 @@ Global flags:
   -A, --all-namespaces   list across all namespaces
 
 TYPE accepts kubectl-style names: pods/pod/po, deployments/deploy, replicasets/rs,
-services/svc, nodes/no, namespaces/ns, events/ev. TYPE/NAME is also accepted.
+services/svc, nodes/no, namespaces/ns, events/ev, configmaps/cm, secrets. TYPE/NAME is also accepted.
 `
 
 func execute(ctx context.Context, argv []string) error {
