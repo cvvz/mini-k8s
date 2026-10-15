@@ -41,7 +41,8 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   `pods/eviction` 子资源与 `kk cordon/uncordon/drain/taint` 用于维护节点。
 - **像 kubeadm 一样自托管**：etcd、kube-apiserver、kube-controller-manager、kube-scheduler 与
   Ingress 控制器都是 `control-plane` 节点上的 **static Pod**，以 mirror Pod 的形式出现在 `kube-system` 中；
-  kube-proxy 是 DaemonSet 插件；control-plane 节点带污点，业务 Pod 只调度到 worker；组件崩溃后由 kubelet 重启。
+  kube-proxy 是 DaemonSet 插件；control-plane 节点带污点，业务 Pod 只调度到 worker；组件崩溃后由 kubelet 重启。kube-controller-manager 与
+  kube-scheduler 通过 `kube-system` 中的 Lease 选主（相当于 `--leader-elect`），leader 停止后由 standby 副本接管。
 - **资源指标**：kubelet 提供 `/metrics/resource`（CPU 与内存取自 CRI 与节点 cgroup）；metrics-server 插件抓取后
   提供 `metrics.k8s.io/v1beta1`，由 API Server 像 kube-aggregator 一样代理；`kk top nodes|pods`。
 - **自动扩缩**：Deployment、ReplicaSet、StatefulSet 的 `scale` 子资源（`kk scale` 经由它）；autoscaling/v2
@@ -519,10 +520,12 @@ unset MINI_TOKEN
 | M9c | StatefulSet（卷模板与保留策略）、共享的修订历史 | ✅ |
 | M10a | 资源指标：kubelet `/metrics/resource`、metrics-server、metrics.k8s.io API、`kk top` | ✅ |
 | M10b | HorizontalPodAutoscaler、scale 子资源、`kk autoscale` | ✅ |
+| M10c | kube-controller-manager 与 kube-scheduler 的 Leader Election | ✅ |
 
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M10c Leader Election 计划](docs/superpowers/plans/2026-10-15-m10c-leader-election.md)
 - [M10b 自动扩缩计划](docs/superpowers/plans/2026-10-15-m10b-hpa.md)
 - [M10a 资源指标计划](docs/superpowers/plans/2026-10-15-m10a-metrics.md)
 - [M9c StatefulSet 计划](docs/superpowers/plans/2026-10-15-m9c-statefulset.md)

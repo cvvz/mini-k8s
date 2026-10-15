@@ -300,7 +300,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M9c ✅ | StatefulSet（volumeClaimTemplates、PVC 保留策略），修订历史抽成共享包（落地记录见 §12.13） |
 | M10a ✅ | 资源指标：kubelet `/metrics/resource`、metrics-server 插件、metrics.k8s.io 聚合代理、`kk top`（落地记录见 §12.14） |
 | M10b ✅ | HPA（autoscaling/v2）、scale 子资源、`kk autoscale`（落地记录见 §12.15） |
-| M10c | Leader Election（controller-manager、scheduler） |
+| M10c ✅ | Leader Election（controller-manager、scheduler，落地记录见 §12.16） |
 | M10d | RBAC 简化版 |
 | 之后 | 补充复杂场景 e2e、提速 e2e 框架、full e2e 集中修复 |
 
@@ -630,6 +630,21 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
   - `describe hpa`。
   - `autoscale`：`--cpu-percent` 或 `--cpu N%|QUANTITY`。
 
+### 12.16 M10c 落地记录
+
+按[实施计划](../plans/2026-10-15-m10c-leader-election.md)落地，`[sig-cluster-lifecycle]` 全部 e2e（含 `kk cluster down/up`、控制面重启与选主切换）通过。要点：
+
+- **`pkg/client/leaderelection`**：client-go LeaseLock 语义的实现。
+  - 以本地观察时间判断租约是否过期，用 resourceVersion 乐观更新。
+  - 易主时 `leaseTransitions` 加一。
+  - `ReleaseOnCancel` 时退出前清空 holder 并把租期设为 1s。
+  - 在 Lease 上记录 `LeaderElection` 事件（`<id> became leader`）。
+- **组件**：controller-manager 与 scheduler 默认参选，租约分别为 `kube-system/kube-controller-manager` 与 `kube-system/kube-scheduler`，
+  identity 为 `<hostname>_<uuid>`，参数 15s/10s/2s，当选后才启动 informer 与控制器。
+  - 失去领导权时进程退出；apiserver 停机超过 10s 也会如此，与 Kubernetes 相同。
+  - 收到 SIGTERM 时释放租约，便于立即切换。
+  - `MINI_LEADER_ELECT=false` 关闭选主。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -731,7 +746,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/apiserver` | 通用 API 服务：路由、存储读写、删除语义、watch、子资源 | `k8s.io/apiserver` |
 | `pkg/registry/{core,apps,autoscaling,batch,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
 | `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
-| `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
+| `pkg/client`、`pkg/client/{informers,workqueue,record,leaderelection}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器、基于 Lease 的选主 | `k8s.io/client-go`（含 `tools/leaderelection`） |
 | `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `daemon`、`statefulset`、`podautoscaler`、`history`（ControllerRevision 管理）、`job`、`cronjob`、`ttlafterfinished`、`nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins}` | 调度队列；调度框架（NodeInfo 快照、Filter/Score 接口）与默认插件 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins/<name>}` |
 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars,metrics}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`、容器统计）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量；`/metrics/resource` | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars,metrics/collectors}`；node-local-dns |

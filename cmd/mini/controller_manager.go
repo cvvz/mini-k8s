@@ -30,8 +30,13 @@ import (
 	"mini-k8s/pkg/controller/volume/pvprotection"
 )
 
-// runControllerManager runs every controller against shared informers.
+// runControllerManager runs the controllers while it leads.
 func runControllerManager(ctx context.Context, c *client.Client, _ string) {
+	runLeaderElected(ctx, c, "kube-controller-manager", func(ctx context.Context) { runControllers(ctx, c) })
+}
+
+// runControllers runs every controller against shared informers.
+func runControllers(ctx context.Context, c *client.Client) {
 	host, _ := os.Hostname()
 	rec := record.New(c, "kube-controller-manager", host)
 	pods := informers.New(client.Pods(c, ""), client.ListOptions{}, 30*time.Second)

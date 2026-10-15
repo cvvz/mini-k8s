@@ -11,8 +11,12 @@ import (
 	"mini-k8s/pkg/scheduler"
 )
 
-// runScheduler binds pending Pods to nodes.
+// runScheduler binds pending Pods to nodes while it leads.
 func runScheduler(ctx context.Context, c *client.Client, _ string) {
+	runLeaderElected(ctx, c, "kube-scheduler", func(ctx context.Context) { schedule(ctx, c) })
+}
+
+func schedule(ctx context.Context, c *client.Client) {
 	host, _ := os.Hostname()
 	rec := record.New(c, "default-scheduler", host)
 	pods := informers.New(client.Pods(c, ""), client.ListOptions{}, 0)
