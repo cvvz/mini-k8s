@@ -17,4 +17,4 @@
 
 ## 高负载下偶发失败的 e2e（2026-10-15，M8b 发现）
 
-- `[sig-node] Probes should hold off liveness checks until the startup probe passes`：长时间运行时，kubelet 的 TCP 启动探针连接 Pod IP 出现 `i/o timeout`，容器被重启；单独运行可通过（3/3）。在提速 e2e 框架时一并处理（探针超时与节点负载）。
+- `[sig-node] Probes should hold off liveness checks until the startup probe passes`：长时间运行时，kubelet 的 TCP 启动探针连接 Pod IP 出现 `i/o timeout`，容器被重启；单独运行可通过（3/3）。M9a 查明同类现象（跨节点 Pod 访问超时）源于 IP 复用时邻居表仍缓存旧 Pod 的 MAC，已在 mini-cni 中加入 `arp_notify`（免费 ARP）与宿主机邻居表刷新；提速 e2e 框架时再确认该用例是否已稳定。

@@ -4,9 +4,13 @@
 package controller
 
 import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
 	"sync"
 	"time"
 
+	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 )
 
@@ -82,4 +86,31 @@ func OwnerKey(obj metav1.Object, kind string) string {
 		return m.Namespace + "/" + ref.Name
 	}
 	return ""
+}
+
+// ComputeHash identifies a Pod template, like controller.ComputeHash in
+// Kubernetes: the FNV-32a hash of the template, spelled safely. It names
+// a Deployment's ReplicaSets and a DaemonSet's ControllerRevisions.
+func ComputeHash(tpl *corev1.PodTemplateSpec) string { return ComputeHashWithCollisions(tpl, 0) }
+
+// ComputeHashWithCollisions also mixes in the number of hash collisions
+// seen, so a name taken by another template yields a different hash.
+func ComputeHashWithCollisions(tpl *corev1.PodTemplateSpec, collisions int32) string {
+	data, _ := json.Marshal(tpl)
+	h := fnv.New32a()
+	_, _ = h.Write(data)
+	if collisions > 0 {
+		_, _ = h.Write([]byte(fmt.Sprint(collisions)))
+	}
+	return safeEncode(fmt.Sprint(h.Sum32()))
+}
+
+// safeEncode maps digits onto consonants and digits that cannot spell words.
+func safeEncode(s string) string {
+	const alphabet = "bcdfghjklmnpqrstvwxz2456789"
+	out := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		out[i] = alphabet[int(s[i])%len(alphabet)]
+	}
+	return string(out)
 }

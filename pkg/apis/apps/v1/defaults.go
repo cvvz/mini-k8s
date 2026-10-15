@@ -46,3 +46,29 @@ func SetDefaultsReplicaSet(rs *ReplicaSet) {
 	}
 	corev1.SetDefaultsPodSpec(&rs.Spec.Template.Spec)
 }
+
+// SetDefaultsDaemonSet fills omitted fields: a RollingUpdate strategy
+// replacing one node at a time without surge, and ten old revisions kept.
+func SetDefaultsDaemonSet(ds *DaemonSet) {
+	if ds.Spec.UpdateStrategy.Type == "" {
+		ds.Spec.UpdateStrategy.Type = RollingUpdateDaemonSetStrategyType
+	}
+	if ds.Spec.UpdateStrategy.Type == RollingUpdateDaemonSetStrategyType {
+		if ds.Spec.UpdateStrategy.RollingUpdate == nil {
+			ds.Spec.UpdateStrategy.RollingUpdate = &RollingUpdateDaemonSet{}
+		}
+		ru := ds.Spec.UpdateStrategy.RollingUpdate
+		if ru.MaxUnavailable == nil {
+			v := intstr.FromInt(1)
+			ru.MaxUnavailable = &v
+		}
+		if ru.MaxSurge == nil {
+			v := intstr.FromInt(0)
+			ru.MaxSurge = &v
+		}
+	}
+	if ds.Spec.RevisionHistoryLimit == nil {
+		ds.Spec.RevisionHistoryLimit = ptr.To[int32](10)
+	}
+	corev1.SetDefaultsPodSpec(&ds.Spec.Template.Spec)
+}

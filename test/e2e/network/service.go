@@ -11,6 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "mini-k8s/pkg/apis/core/v1"
+	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/test/e2e/framework"
 )
@@ -272,14 +273,24 @@ var _ = framework.SIGDescribe("network", "Services", func() {
 var _ = framework.SIGDescribe("network", "kube-proxy", func() {
 	f := framework.NewDefaultFramework("kube-proxy")
 
-	It("should run on every node as a static Pod", func(ctx SpecContext) {
-		for _, node := range framework.Nodes {
-			p, err := client.Pods(f.Client, "kube-system").Get(ctx, "kube-proxy-"+node)
-			framework.ExpectNoError(err, node)
-			Expect(corev1.IsMirrorPod(p)).To(BeTrue())
+	It("should run on every node as a DaemonSet", func(ctx SpecContext) {
+		Expect(framework.KK(ctx, "get", "daemonset", "-n", "kube-system", "kube-proxy")).To(
+			MatchRegexp(`(?m)^kube-proxy\s+3\s+3\s+3\s+3\s+3\s+<none>\s+`))
+		pods, err := client.Pods(f.Client, "kube-system").List(ctx, client.ListOptions{LabelSelector: "k8s-app=kube-proxy"})
+		framework.ExpectNoError(err)
+		onNode := map[string]bool{}
+		for _, p := range pods.Items {
+			if p.DeletionTimestamp != nil {
+				continue
+			}
+			onNode[p.Spec.NodeName] = true
+			Expect(metav1.ControllerOf(&p.ObjectMeta).Kind).To(Equal("DaemonSet"))
 			Expect(p.Spec.HostNetwork).To(BeTrue())
 			Expect(*p.Spec.Containers[0].SecurityContext.Privileged).To(BeTrue())
-			Expect(corev1.IsPodReady(p)).To(BeTrue(), node)
+			Expect(corev1.IsPodReady(&p)).To(BeTrue(), p.Spec.NodeName)
+		}
+		for _, node := range framework.Nodes {
+			Expect(onNode).To(HaveKey(node))
 		}
 		out, err := framework.Docker(ctx, "exec", framework.ComponentContainer("worker-1"), "iptables", "-t", "nat", "-S", "PREROUTING")
 		framework.ExpectNoError(err)

@@ -129,15 +129,18 @@ var _ = framework.SIGDescribe("node", "Node lifecycle", func() {
 			ContainSubstring("cannot delete Pods declare no controller (use --force to override): "+f.Namespace+"/loner")))
 		Expect(framework.KK(ctx, "get", "nodes", "worker-2")).To(MatchRegexp(`worker-2\s+Ready,SchedulingDisabled`))
 
-		out = framework.KK(ctx, "drain", "worker-2", "--force", "--timeout", "90s")
+		out = framework.KK(ctx, "drain", "worker-2", "--force", "--ignore-daemonsets", "--timeout", "90s")
 		Expect(out).To(And(ContainSubstring("node/worker-2 already cordoned"), ContainSubstring("evicting pod "+f.Namespace+"/loner"),
 			ContainSubstring("pod/loner evicted"), HaveSuffix("node/worker-2 drained\n")))
 		Expect(podsOn(ctx, labels, "worker-2")).To(BeEmpty())
 		Eventually(ctx, func() []corev1.Pod { return podsOn(ctx, labels, "worker-1") }).
 			WithTimeout(framework.TestContext.PodStartTimeout).Should(HaveLen(2))
 		f.WaitForRunningPods(ctx, labels, 2)
-		_, err = client.Pods(f.Client, "kube-system").Get(ctx, "kube-proxy-worker-2")
-		framework.ExpectNoError(err, "mirror Pods are left to the kubelet")
+		Expect(out).To(MatchRegexp(`Warning: ignoring DaemonSet-managed Pods: kube-system/kube-proxy-\w+`))
+		proxies, err := client.Pods(f.Client, "kube-system").List(ctx, client.ListOptions{LabelSelector: "k8s-app=kube-proxy",
+			FieldSelector: "spec.nodeName=worker-2"})
+		framework.ExpectNoError(err)
+		Expect(proxies.Items).To(HaveLen(1), "DaemonSet Pods stay on a drained node")
 
 		Expect(framework.KK(ctx, "uncordon", "worker-2")).To(Equal("node/worker-2 uncordoned\n"))
 	})

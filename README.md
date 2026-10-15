@@ -27,8 +27,11 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **Control plane**: event-driven informers and work queues; Deployment and ReplicaSet
   controllers (RollingUpdate with `maxSurge`/`maxUnavailable` or Recreate, revision
   history, rollback, pause/resume, Available/Progressing conditions with a progress
-  deadline); Endpoints controller; garbage collector; namespace controller; Pod garbage
-  collector (Pods bound to a deleted node are failed and deleted).
+  deadline); DaemonSet controller (a Pod on every node that matches the template's node
+  selector, affinity and tolerations; RollingUpdate with `maxUnavailable`/`maxSurge` or
+  OnDelete; history in ControllerRevisions, rollback); Endpoints controller; garbage
+  collector; namespace controller; Pod garbage collector (Pods bound to a deleted node are
+  failed and deleted).
 - **Scheduler**: a kube-scheduler-style framework. Filter plugins check cordoned nodes,
   taints, `nodeSelector` and node affinity, resource requests against allocatable, and pod
   affinity/anti-affinity. Score plugins (with kube-scheduler's weights) prefer the least
@@ -44,9 +47,9 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   and `kk cordon/uncordon/drain/taint` maintain nodes.
 - **Self-hosted like kubeadm**: etcd, kube-apiserver, kube-controller-manager,
   kube-scheduler and the Ingress controller are **static Pods** of the `control-plane`
-  node, and kube-proxy is a static Pod of every node, all visible as mirror Pods in
-  `kube-system`; the control-plane node is tainted so workloads stay on the workers; a
-  crashed component is restarted by the kubelet.
+  node, visible as mirror Pods in `kube-system`; kube-proxy is a DaemonSet add-on; the
+  control-plane node is tainted so workloads stay on the workers; a crashed component is
+  restarted by the kubelet.
 - **Nodes like kind**: each node is a privileged container running its own containerd;
   the kubelet manages Pods over **CRI** (a sandbox per Pod, then its container);
   Ready only when the runtime, the Pod network and the sandbox image are ready.
@@ -142,9 +145,9 @@ How to read it:
   worker-3 and up (or keeps only worker-1).
 - The control-plane node's kubelet runs etcd, the API server, the controller manager, the
   scheduler and the Ingress controller as static Pods; the node's taint keeps workloads on
-  the workers. Every node (the control-plane one too) also runs kube-proxy; the cluster
-  DNS (`kube-dns`, `10.96.0.10`) and the local-path provisioner run as ordinary Pods on the
-  workers.
+  the workers. Every node (the control-plane one too) also runs kube-proxy, a DaemonSet;
+  the cluster DNS (`kube-dns`, `10.96.0.10`) and the local-path provisioner run as ordinary
+  Pods on the workers.
 - Arrows between components are API traffic: every component lists and watches the API
   server and writes back; only the API server talks to etcd. The kubelet starts Pods through
   containerd (CRI).
@@ -155,10 +158,9 @@ How to read it:
 
 Every component is a role of the single `mini` binary. Docker Compose only starts the
 node containers (like [kind](https://kind.sigs.k8s.io) nodes); as with kubeadm, each
-kubelet starts its static Pods from a manifest directory before the API exists
-([build/manifests/control-plane](build/manifests/control-plane),
-[build/manifests/node](build/manifests/node) on the workers). Pods run in the nodes'
-containerd, so the host's `docker ps` shows only the nodes.
+control-plane kubelet starts the control plane as static Pods from a manifest directory
+([build/manifests/control-plane](build/manifests/control-plane)) before the API exists. Pods
+run in the nodes' containerd, so the host's `docker ps` shows only the nodes.
 
 ## What is built here and what is reused
 
@@ -171,13 +173,13 @@ container runtime) uses those open-source components as-is, configured but not m
 | Component | Responsibility | Status |
 | --- | --- | --- |
 | kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation | done |
-| controller-manager | Deployment, ReplicaSet, Endpoints, garbage collector, namespace, node IPAM, node lifecycle, taint-eviction, Pod garbage collector, PersistentVolume and PVC/PV protection controllers | done, growing |
+| controller-manager | Deployment, ReplicaSet, DaemonSet, Endpoints, garbage collector, namespace, node IPAM, node lifecycle, taint-eviction, Pod garbage collector, PersistentVolume and PVC/PV protection controllers | done, growing |
 | scheduler | Scheduling framework with pre-filter, filter and score plugins (taints, node affinity, resource fit, pod (anti-)affinity, spreading, volume binding), backoff queue, binding (asynchronous while volumes are provisioned) | done |
 | kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
-| kube-proxy | iptables mode: cluster IPs, node ports, session affinity, masquerading; a static Pod of every node (it runs the iptables tools of its Ubuntu-based image) | done |
+| kube-proxy | iptables mode: cluster IPs, node ports, session affinity, masquerading; a DaemonSet add-on on every node (it runs the iptables tools of its Ubuntu-based image) | done |
 | Ingress controller | networking.k8s.io/v1 Ingress: host and path routing to Service endpoints on `127.0.0.1:18080` (the role ingress-nginx plays in kind); a static Pod of the control-plane node | done |
-| static Pod manifests | `build/manifests/control-plane` and `build/manifests/node` (like kubeadm's) | done |
+| static Pod manifests and add-ons | `build/manifests/control-plane` and `build/manifests/addons` (like kubeadm's) | done |
 | `kk` | CLI, cluster lifecycle, image loading | done |
 | demo app | HTTP server for examples and tests; `mini fetch` is a tiny HTTP client for images without a shell | done |
 | `mini-cni` + host-gw route agent | Pod networking: bridge, veth, IP allocation, loopback, cross-node routes, egress masquerading | done |
@@ -269,11 +271,10 @@ from `storage.googleapis.com` with host-side curl), builds five images from
 `build/images/` (components, node, pause, etcd and kube-proxy; the node image takes about a
 minute the first time), starts the node containers (three by default), loads the images into each
 node's containerd (the control-plane node's kubelet then starts etcd, the API server, the
-controller manager, the scheduler and the Ingress controller as static Pods, and every
-node starts kube-proxy), waits up to two minutes for a healthy API and fresh Ready
-heartbeats from every node, and finally applies the cluster DNS and local-path storage
-add-ons ([build/manifests/addons](build/manifests/addons)), as kubeadm installs CoreDNS and kind
-its storage provisioner.
+controller manager, the scheduler and the Ingress controller as static Pods), waits up to
+two minutes for a healthy API and fresh Ready heartbeats from every node, and finally applies
+the add-ons ([build/manifests/addons](build/manifests/addons)): kube-proxy as a DaemonSet and
+the cluster DNS, as kubeadm installs them, and the local-path storage provisioner, as kind does.
 
 ```text
 API healthy
@@ -351,7 +352,7 @@ kk rollout undo deployment/web           # back to the previous revision
 kk delete pod POD_NAME                   # graceful; the Deployment replaces it
 kk delete pod POD_NAME --force           # removed from the API immediately
 kk get leases -n kube-node-lease         # each kubelet renews its Lease every 2s
-kk drain worker-2                        # cordon worker-2 and move its Pods to worker-1
+kk drain worker-2 --ignore-daemonsets    # cordon worker-2 and move its Pods to worker-1
 kk get pods -o wide                      # the web Pods now all run on worker-1
 kk uncordon worker-2
 kk taint nodes worker-2 dedicated=demo:NoExecute   # evicts Pods that do not tolerate it
@@ -461,7 +462,7 @@ still not a cross-resource transaction.
 - No scheduler preemption, priorities or `topologySpreadConstraints` (replicas spread by
   default); no PodDisruptionBudgets (evictions always succeed). Heartbeats are faster than Kubernetes' defaults: Leases are
   renewed every 2 s and a node is Unknown after 15 s without one.
-- No DaemonSets, Jobs, CronJobs, StatefulSets, HPA, RBAC or control-plane HA.
+- No Jobs, CronJobs or StatefulSets yet (M9b, M9c); no HPA, RBAC or control-plane HA.
 
 ## Development
 
@@ -509,7 +510,7 @@ Every new feature ships with e2e specs.
 | Pod shows `CrashLoopBackOff` | `kk logs NAME` shows the application output and `kk logs -p NAME` the previous run's; restarts back off from 1s up to 30s. |
 | `127.0.0.1:18080` returns `503` | The Service has no ready endpoints: `kk get endpoints NAME` (unready Pods are not listed under ENDPOINTS); check the selector and `targetPort`. `404 default backend` means no Ingress rule matches the host and path. |
 | A Service name does not resolve in a Pod | `kk get pods -n kube-system -l k8s-app=kube-dns` (two Running), `kk logs -n kube-system POD`, and `kk exec POD -- /mini cat /etc/resolv.conf` (nameserver `10.96.0.10` unless `dnsPolicy` says otherwise). `kk exec POD -- /mini lookup NAME` shows what the Pod's resolver gets. |
-| A cluster IP or node port does not answer | `kk get pods -n kube-system` (kube-proxy must run on every node), `kk logs -n kube-system kube-proxy-worker-1`, and `docker exec mini-k8s-worker-1-1 iptables -t nat -S` for the rules. `connection refused` means the Service has no ready endpoints. |
+| A cluster IP or node port does not answer | `kk get pods -n kube-system` (kube-proxy must run on every node), `kk get pods -n kube-system -l k8s-app=kube-proxy -o wide` and `kk logs -n kube-system POD` for the node's kube-proxy, and `docker exec mini-k8s-worker-1-1 iptables -t nat -S` for the rules. `connection refused` means the Service has no ready endpoints. |
 | `Error from server (Invalid)` | Fix the field named in the message; unknown fields are rejected too. |
 | Port or project-name conflict | Free the ports or stop the conflicting project; `MINI_API` alone does not change Compose ports. |
 | A fresh clone shows old resources | One Docker Engine hosts one cluster and one set of node disks (etcd lives on the control-plane node's); reset with `kk cluster down --volumes` as in step 5. |
@@ -549,11 +550,14 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M7c | More workers (`kk cluster up --workers N`), Pod garbage collector | ✅ |
 | M8a | ConfigMaps, Secrets, `valueFrom`/`envFrom`, downward API, projected volumes | ✅ |
 | M8b | PersistentVolumes, claims and StorageClasses, volume binding in the scheduler, local-path provisioning | ✅ |
-| M9 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
+| M9a | DaemonSets and ControllerRevisions, kube-proxy as a DaemonSet | ✅ |
+| M9b | Jobs and CronJobs | planned |
+| M9c | StatefulSets | planned |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M9a DaemonSet plan (Chinese)](docs/superpowers/plans/2026-10-15-m9a-daemonset.md)
 - [M8b persistent volumes plan (Chinese)](docs/superpowers/plans/2026-10-15-m8b-persistent-volumes.md)
 - [M8a ConfigMaps and Secrets plan (Chinese)](docs/superpowers/plans/2026-10-15-m8a-configmap-secret.md)
 - [M7c worker scaling plan (Chinese)](docs/superpowers/plans/2026-10-15-m7c-worker-scaling.md)

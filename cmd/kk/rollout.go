@@ -18,11 +18,11 @@ import (
 	"mini-k8s/pkg/util/deepcopy"
 )
 
-const rolloutUsage = `usage: kk rollout status|history|undo|pause|resume|restart deployment/NAME
+const rolloutUsage = `usage: kk rollout status|history|undo|pause|resume|restart deployment/NAME|daemonset/NAME
   status   [--timeout DURATION]   wait until the rollout finishes
-  history                         list revisions and their change causes
+  history  [--revision N]         list revisions and their change causes (or show one)
   undo     [--to-revision N]      roll back to the previous (or given) revision
-  pause | resume                  stop or continue rolling out template changes
+  pause | resume                  stop or continue rolling out template changes (Deployments)
   restart                         replace every Pod with a fresh one`
 
 // rollout implements `kk rollout`, like kubectl's.
@@ -39,13 +39,22 @@ func (a *app) rollout(ctx context.Context, p args) error {
 	if err != nil {
 		return err
 	}
+	if res.Resource == scheme.DaemonSets.Resource {
+		return a.daemonSetRollout(ctx, pos[0], pos[2], p)
+	}
 	if res.Resource != scheme.Deployments.Resource {
 		return fmt.Errorf("rollout is not supported for %s", res.Resource)
 	}
 	name, deps := pos[2], client.Deployments(a.client, a.namespace)
 	switch pos[0] {
 	case "status":
-		return a.rolloutStatus(ctx, name, p.value("timeout", "0s"))
+		return a.waitRollout(ctx, p.value("timeout", "0s"), func() (string, bool, error) {
+			d, err := deps.Get(ctx, name)
+			if err != nil {
+				return "", false, err
+			}
+			return RolloutStatus(d)
+		})
 	case "history":
 		return a.rolloutHistory(ctx, name)
 	case "undo":
@@ -89,7 +98,9 @@ func RolloutStatus(d *appsv1.Deployment) (string, bool, error) {
 	return fmt.Sprintf("deployment %q successfully rolled out", d.Name), true, nil
 }
 
-func (a *app) rolloutStatus(ctx context.Context, name, timeout string) error {
+// waitRollout prints the rollout status as it changes until it is done or
+// the timeout passes.
+func (a *app) waitRollout(ctx context.Context, timeout string, status func() (string, bool, error)) error {
 	limit, err := time.ParseDuration(timeout)
 	if err != nil {
 		return fmt.Errorf("invalid --timeout %q", timeout)
@@ -101,15 +112,11 @@ func (a *app) rolloutStatus(ctx context.Context, name, timeout string) error {
 	}
 	last := ""
 	for {
-		d, err := client.Deployments(a.client, a.namespace).Get(ctx, name)
+		msg, done, err := status()
 		if err != nil {
 			if ctx.Err() != nil {
 				return errors.New("timed out waiting for the condition")
 			}
-			return err
-		}
-		msg, done, err := RolloutStatus(d)
-		if err != nil {
 			return err
 		}
 		if msg != last {

@@ -70,6 +70,10 @@ func containerObjects(cs []Container) []any {
 	return out
 }
 
+// ContainerObject renders a container as a manifest map, for templates
+// built by hand.
+func ContainerObject(c Container) map[string]any { return c.object() }
+
 func (c Container) object() map[string]any {
 	o := map[string]any{"name": c.Name, "image": c.Image}
 	if len(c.Command) > 0 {

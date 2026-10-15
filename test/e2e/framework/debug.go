@@ -8,7 +8,7 @@ import (
 
 // ControlPlaneComponents are the static Pods of the control-plane node;
 // kube-proxy also runs on every worker.
-var ControlPlaneComponents = []string{"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler", "ingress-controller", "kube-proxy"}
+var ControlPlaneComponents = []string{"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler", "ingress-controller"}
 
 // DumpDebugInfo writes cluster state, the namespace's objects and events, and
 // recent component logs to the spec report.

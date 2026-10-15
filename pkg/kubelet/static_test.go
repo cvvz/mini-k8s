@@ -218,12 +218,10 @@ func TestStaticPodsAndMirrorPods(t *testing.T) {
 	})
 }
 
-// The manifests shipped in build/manifests must load, and kube-proxy must
-// be the same on the control plane and the workers.
+// The static Pod manifests shipped in build/manifests must load.
 func TestShippedManifestsAreValid(t *testing.T) {
 	for dir, want := range map[string][]string{
-		"control-plane": {"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler", "ingress-controller", "kube-proxy"},
-		"node":          {"kube-proxy"},
+		"control-plane": {"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler", "ingress-controller"},
 	} {
 		pods, errs := LoadStaticPods(filepath.Join("..", "..", "build", "manifests", dir), "n1")
 		if len(errs) != 0 {
@@ -236,10 +234,5 @@ func TestShippedManifestsAreValid(t *testing.T) {
 		if len(names) != len(want) {
 			t.Errorf("%s has %v, want %v", dir, names, want)
 		}
-	}
-	a, _ := os.ReadFile(filepath.Join("..", "..", "build", "manifests", "control-plane", "kube-proxy.yaml"))
-	b, _ := os.ReadFile(filepath.Join("..", "..", "build", "manifests", "node", "kube-proxy.yaml"))
-	if len(a) == 0 || string(a) != string(b) {
-		t.Fatal("build/manifests/{control-plane,node}/kube-proxy.yaml must be identical")
 	}
 }

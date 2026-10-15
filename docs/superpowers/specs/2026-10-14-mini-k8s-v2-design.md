@@ -244,7 +244,7 @@ kubelet 运行在节点容器内，经 Unix socket 以 CRI gRPC 调用同一节�
     Pod 之间通信保留源 IP。节点容器同在一个 Docker 网桥上，下一跳二层直达。
 - **ClusterIP（M6）**：API Server 从 `10.96.0.0/12` 分配并持久化在 Service 上；Endpoints 控制器
   维护就绪地址。
-- **kube-proxy（M6）**：`kube-system` 中的 DaemonSet（`hostNetwork`，`NET_ADMIN`），在每个节点内
+- **kube-proxy（M6，M9a 起为 DaemonSet）**：`kube-system` 中的 DaemonSet（`hostNetwork`，`NET_ADMIN`），在每个节点内
   用 iptables 实现 ClusterIP 与 NodePort：`KUBE-SERVICES` → `KUBE-SVC-*`（按概率均分）→
   `KUBE-SEP-*`（DNAT 到 Pod），与真实 kube-proxy 的 iptables 模式一致；支持多端口与
   `sessionAffinity: ClientIP`。DaemonSet 实现前以 static Pod 过渡。
@@ -295,7 +295,9 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M7c ✅ | worker 扩缩（`kk cluster up --workers N`）、Pod 垃圾回收（落地记录见 §12.8） |
 | M8a ✅ | ConfigMap、Secret、env `valueFrom`/`envFrom`、downward API、configMap/secret/downwardAPI/projected 卷（落地记录见 §12.9） |
 | M8b ✅ | PV/PVC、StorageClass、调度器 VolumeBinding、local-path 式动态供给（落地记录见 §12.10） |
-| M9 | DaemonSet、Job、CronJob、StatefulSet |
+| M9a ✅ | DaemonSet 与 ControllerRevision、kube-proxy 改为 DaemonSet 插件（落地记录见 §12.11） |
+| M9b | Job、CronJob |
+| M9c | StatefulSet（volumeClaimTemplates） |
 | M10+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
 
 ### 12.1 M1 落地记录与过渡态
@@ -499,6 +501,26 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
   创建辅助 Pod 前向 API 确认 PV 状态，PV 删除后清理残留的辅助 Pod。
 - **kubelet**：PVC 卷按 PVC → PV 解析为 hostPath/local 路径；PVC 未绑定时报 `error processing PVC ns/x: PVC is not bound`
   （FailedMount）；`readOnly` 生效。
+
+### 12.11 M9a 落地记录
+
+按[实施计划](../plans/2026-10-15-m9a-daemonset.md)落地，相关 e2e（apps、network、cluster-lifecycle、节点生命周期）全部通过。要点：
+
+- **API**：apps/v1 DaemonSet（默认 RollingUpdate、maxUnavailable 1、maxSurge 0、revisionHistoryLimit 10；模板变化时 Strategy 递增
+  `deprecated.daemonset.template.generation`）与 ControllerRevision（data 不可变，revision 可改）。
+- **控制器**：`pkg/controller/daemon`。修订：当前模板对应一个 `<ds>-<hash>` 修订（data 为 `$patch: replace` 的模板），回滚到旧模板时
+  把该修订提为最新，超出上限且无 Pod 使用的旧修订被删除。节点判定：nodeSelector/节点亲和 + 污点（NoSchedule 不新建，NoExecute 删除）。
+  Pod 带 `matchFields metadata.name` 节点亲和与 6 条默认容忍（hostNetwork 加 network-unavailable），由默认调度器绑定。manage 补齐与
+  删除（失败 Pod 按 1s 起、上限 5 分钟的退避替换），之后按策略滚动（无 surge 时以 maxUnavailable 为预算删旧 Pod；有 surge 时先在
+  旧 Pod 旁建新 Pod，新 Pod 可用后删旧 Pod）。
+- **kube-proxy**：由每节点 static Pod 改为 `build/manifests/addons/kube-proxy.yaml` 的 DaemonSet（容忍一切污点），worker 不再挂载
+  static Pod 清单目录；`kk drain` 因此需要 `--ignore-daemonsets`（与 kubectl 相同）。
+- **kk**：`get ds|controllerrevisions`、`describe ds`；`rollout status|history [--revision N]|undo|restart` 支持 daemonset，pause/resume
+  报不支持。
+- **审查修复**：不允许 surge 时每个节点只保留最老的 Pod；状态只看节点上最老的 Pod（surge 期间旧 Pod 未删前不算已更新）；收养标签匹配
+  且无 controller 的修订与 Pod（`--cascade=orphan` 后重建不会多出一个 Pod），修订名被其他模板占用时递增 `collisionCount` 重新哈希。
+- **mini-cni**：容器网卡 up 前打开 `arp_notify`（发免费 ARP），并刷新宿主机网桥上该 IP 的邻居表项。IP 被新 Pod 复用时，旧 MAC
+  缓存曾导致跨节点访问与探针在数十秒内超时（与 CNI bridge 插件发送免费 ARP 的做法一致）。
 
 ## 13. 非目标
 
