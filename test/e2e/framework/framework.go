@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -100,6 +101,22 @@ func ExpectNoError(err error, explain ...any) {
 // Logf writes progress to the Ginkgo report.
 func Logf(format string, args ...any) {
 	ginkgo.GinkgoWriter.Printf(time.Now().Format("15:04:05.000")+" INFO: "+format+"\n", args...)
+}
+
+// ExpectDefaultNodes fails unless the cluster has exactly the nodes the
+// specs assume (Nodes): say, after kk cluster up --workers 3 or with a Node
+// object left over by an aborted run.
+func ExpectDefaultNodes(ctx context.Context) {
+	c := client.New(TestContext.APIURL, TestContext.Token)
+	nodes, err := client.Nodes(c).List(ctx, client.ListOptions{})
+	ExpectNoError(err)
+	var names []string
+	for _, n := range nodes.Items {
+		names = append(names, n.Name)
+	}
+	sort.Strings(names)
+	gomega.Expect(names).To(gomega.Equal(Nodes),
+		"the e2e suite needs the default nodes: run kk cluster up --workers 2 and delete other Node objects")
 }
 
 // WaitForClusterReady blocks until the API is healthy and at least workers

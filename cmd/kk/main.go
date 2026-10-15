@@ -22,7 +22,10 @@ func apiURL() string {
 const usage = `kk controls a mini-k8s cluster.
 
 Cluster lifecycle (run from the project root or via its bin/kk):
-  kk cluster up|status|down [--volumes]   --volumes also deletes etcd data and node disks
+  kk cluster up [--workers N]             build and start (or update) the cluster; N workers (1-10,
+                                          default: as last time, initially 2)
+  kk cluster status
+  kk cluster down [--volumes]             --volumes also deletes etcd data and node disks
   kk image load IMAGE...                  copy local Docker images into every node
 
 Resources:

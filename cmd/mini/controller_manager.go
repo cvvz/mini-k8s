@@ -16,6 +16,7 @@ import (
 	"mini-k8s/pkg/controller/namespace"
 	"mini-k8s/pkg/controller/nodeipam"
 	"mini-k8s/pkg/controller/nodelifecycle"
+	"mini-k8s/pkg/controller/podgc"
 	"mini-k8s/pkg/controller/replicaset"
 	"mini-k8s/pkg/controller/tainteviction"
 )
@@ -44,6 +45,7 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	lifecycle := nodelifecycle.NewController(c, nodes, leases, pods, rec)
 	eviction := tainteviction.NewController(c, nodes, pods, rec)
 	gc := garbagecollector.NewGarbageCollector(c, garbagecollector.TrackedResources())
+	podGC := podgc.NewController(c, pods, nodes)
 	go rec.Run(ctx)
 	for _, run := range []func(context.Context){pods.Run, deployments.Run, rsets.Run, namespaces.Run, nodes.Run, services.Run, endpoints.Run, leases.Run} {
 		go run(ctx)
@@ -57,6 +59,7 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	go lifecycle.Run(ctx)
 	go eviction.Run(ctx, 2)
 	go gc.Run(ctx)
+	go podGC.Run(ctx)
 	log.Print("kube-controller-manager started")
 	dc.Run(ctx, 4)
 }

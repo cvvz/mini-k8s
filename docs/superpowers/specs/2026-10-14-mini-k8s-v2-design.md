@@ -292,7 +292,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M6b ✅ | 集群 DNS、Headless、ExternalName、`kubernetes` Service、Pod DNS 配置与 Service 环境变量（落地记录见 §12.5） |
 | M7a ✅ | 节点租约与生命周期、污点驱逐、Eviction API、cordon/drain/taint（落地记录见 §12.6） |
 | M7b ✅ | 调度框架（资源、nodeSelector/亲和性、Pod 亲和/反亲和、打散）（落地记录见 §12.7） |
-| M7c | worker 扩展（`kk cluster up --workers N`） |
+| M7c ✅ | worker 扩缩（`kk cluster up --workers N`）、Pod 垃圾回收（落地记录见 §12.8） |
 | M8 | ConfigMap、Secret、卷、PVC/PV |
 | M9 | DaemonSet、Job、CronJob、StatefulSet |
 | M10+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
@@ -447,6 +447,25 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
 - **就绪**：调度器不再单独判断节点就绪；kubelet 注册节点时带 `node.kubernetes.io/not-ready:NoSchedule`，节点生命周期控制器在 Ready
   后移除（与 Kubernetes 相同）。
 
+### 12.8 M7c 落地记录
+
+按[实施计划](../plans/2026-10-15-m7c-worker-scaling.md)落地，相关 e2e（cluster-lifecycle、Pod 垃圾回收）全部通过。要点：
+
+- **worker 数**：`kk cluster up --workers N`（1–10）把 N 记在 `.mini-k8s/workers`，不带参数时沿用上次的数量（首次为 2）。
+  每个集群命令都据此重新生成 `.mini-k8s/compose.workers.yaml`，所有 compose 调用都带 `-f compose.yaml -f` 该文件：N > 2 时
+  worker-3 起用 `extends` 复制 worker-1（只改 hostname、`MINI_NODE` 与 `/var` 卷，挂载与 `depends_on` 沿用）；N = 1 时
+  worker-2 设 `deploy.replicas: 0`；N = 2 时为空。已有节点的配置不变，扩缩时 Compose 不会重建它们。
+- **缩容**：要移除的 worker 都由实际状态推导（API 中编号超过 N 的 `worker-K` 节点、本项目编号超过 N 的 `worker-K-var` 卷），
+  不依赖记录的数量，中途失败后重跑也能收敛。API 可用时先把它们全部 cordon（避免 Pod 从一个被移除节点挪到另一个），再按
+  `kk drain --force --delete-emptydir-data --ignore-daemonsets --timeout 2m` 逐个 drain；不 Ready 的节点没有 kubelet 确认驱逐，
+  只 cordon 不 drain；drain 失败则撤销本次 cordon 并中止。随后 `compose up --remove-orphans` 删除其容器，再删除其卷；集群
+  就绪后删除这些 Node 对象（像云上的节点控制器删除已删 VM 的 Node），Lease 与镜像 Pod 随属主引用被垃圾回收（镜像 Pod
+  删除时没有 kubelet 确认，由 PodGC 强制删除），nodeipam 释放 Pod CIDR，各节点的 host-gw 路由随 Node 列表收敛。
+- **Pod 垃圾回收**：`pkg/controller/podgc` 实现 Kubernetes PodGC 的 gcOrphaned：每 20s 检查，`spec.nodeName` 指向的节点不在
+  informer 中满 40s 且 GET 确认不存在时，先把未终止的 Pod 写成 `Failed` 并加 `DisruptionTarget`（`DeletionByPodGC`）条件，
+  再以宽限期 0 删除。集群停着时缩容（无法 drain）靠它清理。
+- **e2e**：节点相关的辅助函数改为遍历正在运行的节点容器；套件开始时检查节点恰为默认的三个。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -540,7 +559,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | 路径 | 内容 | 对应的 Kubernetes 位置 |
 | --- | --- | --- |
 | `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`node-init`（含 kubelet）、`kube-proxy`、`ingress-controller`、`cluster-dns`、`demo`，以及 `fetch`/`lookup` 等测试工具 | `cmd/kube-*`（及早期的 `hyperkube`） |
-| `cmd/kk` | 命令行客户端与集群生命周期 | `kubectl`、`kind` |
+| `cmd/kk` | 命令行客户端与集群生命周期（含 worker 扩缩） | `kubectl`、`kind` |
 | `pkg/apis/{meta,core,apps,networking,coordination}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`networkingv1`、`coordinationv1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
 | `pkg/apis/{core,apps,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
 | `pkg/labels`、`pkg/fields`、`pkg/watch` | 选择器与 watch 事件类型 | `apimachinery/pkg/{labels,fields,watch}` |
@@ -549,7 +568,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/registry/{core,apps,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
 | `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
-| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `nodelifecycle`、`tainteviction`） | `pkg/controller` |
+| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `nodelifecycle`、`tainteviction`、`podgc`） | `pkg/controller` |
 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins}` | 调度队列；调度框架（NodeInfo 快照、Filter/Score 接口）与默认插件 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins/<name>}` |
 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars}`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |

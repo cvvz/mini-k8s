@@ -413,6 +413,9 @@ const (
 	PodInitialized  = "Initialized"
 	ContainersReady = "ContainersReady"
 	PodReady        = "Ready"
+	// DisruptionTarget marks a Pod about to be deleted by a disruption,
+	// such as the Pod garbage collector removing it from a vanished node.
+	DisruptionTarget = "DisruptionTarget"
 )
 
 // PodCondition is one aspect of Pod state.

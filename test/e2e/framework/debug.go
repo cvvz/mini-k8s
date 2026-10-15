@@ -28,7 +28,11 @@ func DumpDebugInfo(ctx context.Context, namespace string) {
 			w.Printf("error: %v\n", err)
 		}
 	}
-	for _, node := range Nodes {
+	nodes, err := RunningNodes(ctx)
+	if err != nil {
+		w.Printf("error: %v\n", err)
+	}
+	for _, node := range nodes {
 		out, _ := Crictl(ctx, node, "ps", "-a")
 		w.Printf("$ crictl ps -a (on %s)\n%s", node, out)
 		out, _ = Docker(ctx, "logs", "--tail", "15", ComponentContainer(node))

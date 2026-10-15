@@ -49,7 +49,7 @@ var commandFlags = map[string][]flagSpec{
 	"label":         {{long: "overwrite"}},
 	"api-resources": {},
 	"version":       {},
-	"cluster":       {{long: "volumes"}},
+	"cluster":       {{long: "volumes"}, {long: "workers", takesValue: true}},
 	"image":         {},
 	"help":          {},
 }

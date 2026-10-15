@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,8 +13,9 @@ import (
 	corev1 "mini-k8s/pkg/apis/core/v1"
 )
 
-// Workers are the worker nodes; Nodes adds the control-plane node, which runs
-// the control plane as static Pods.
+// Workers are the worker nodes of the default topology the specs expect;
+// Nodes adds the control-plane node, which runs the control plane as static
+// Pods.
 var (
 	Workers = []string{"worker-1", "worker-2"}
 	Nodes   = append([]string{"control-plane"}, Workers...)
@@ -71,8 +73,12 @@ func PodSandboxes(ctx context.Context, label string) ([]string, error) {
 }
 
 func acrossNodes(ctx context.Context, crictlArgs []string) ([]string, error) {
+	nodes, err := RunningNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var ids []string
-	for _, node := range Nodes {
+	for _, node := range nodes {
 		out, err := Crictl(ctx, node, crictlArgs...)
 		if err != nil {
 			return nil, err
@@ -80,6 +86,18 @@ func acrossNodes(ctx context.Context, crictlArgs []string) ([]string, error) {
 		ids = append(ids, strings.Fields(out)...)
 	}
 	return ids, nil
+}
+
+// RunningNodes lists the nodes whose containers are running, including
+// workers added by kk cluster up --workers.
+func RunningNodes(ctx context.Context) ([]string, error) {
+	out, err := Docker(ctx, "ps", "--filter", "label=com.docker.compose.project=mini-k8s", "--format", `{{.Label "com.docker.compose.service"}}`)
+	if err != nil {
+		return nil, err
+	}
+	nodes := strings.Fields(out)
+	sort.Strings(nodes)
+	return nodes, nil
 }
 
 // ExecInPod runs a command in the Pod's first container, like kubectl exec.
@@ -95,8 +113,12 @@ func ComponentContainer(component string) string {
 
 // PodLogDirs lists a Pod UID's log directories (/var/log/pods/<ns>_<name>_<uid>) across all nodes.
 func PodLogDirs(ctx context.Context, podUID string) ([]string, error) {
+	nodes, err := RunningNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var dirs []string
-	for _, node := range Nodes {
+	for _, node := range nodes {
 		out, err := Docker(ctx, "exec", ComponentContainer(node), "sh", "-c", "ls /var/log/pods 2>/dev/null || true")
 		if err != nil {
 			return nil, err

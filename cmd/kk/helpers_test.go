@@ -18,7 +18,8 @@ func readyNode(name string, beat time.Time) corev1.Node {
 	return n
 }
 
-// fakeNodeServer serves /healthz and the Node list, requiring token.
+// fakeNodeServer serves /healthz and the Node list, requiring token; every
+// other path is NotFound.
 func fakeNodeServer(t *testing.T, token string, nodes func() []corev1.Node) *httptest.Server {
 	t.Helper()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +34,9 @@ func fakeNodeServer(t *testing.T, token string, nodes func() []corev1.Node) *htt
 		case "/api/v1/nodes":
 			_ = json.NewEncoder(w).Encode(metav1.List[corev1.Node]{Items: nodes()})
 		default:
-			http.NotFound(w, r)
+			// Single nodes are never found (cluster up skips draining them).
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status"}, Reason: metav1.ReasonNotFound, Code: 404})
 		}
 	}))
 	t.Cleanup(s.Close)

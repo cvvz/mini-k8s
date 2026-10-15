@@ -35,4 +35,5 @@ func TestE2E(t *testing.T) {
 var _ = ginkgo.BeforeSuite(func(ctx ginkgo.SpecContext) {
 	framework.ExpectNoError(framework.Setup())
 	framework.WaitForClusterReady(ctx, len(framework.Nodes))
+	framework.ExpectDefaultNodes(ctx)
 })
