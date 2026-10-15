@@ -147,39 +147,6 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 （仅为 CRI 协议定义，不含实现）；测试使用 Ginkgo/Gomega。项目不依赖 client-go 或任何
 Kubernetes 组件的实现代码。
 
-## 代码结构
-
-目录与包名对齐 Kubernetes 源码，可以直接对照阅读（完整对照表见
-[v2 设计规格 §15](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)）：
-
-```text
-cmd/mini/                    多合一二进制：mini kube-apiserver | kube-controller-manager | kube-scheduler |
-                             node-init | kube-proxy | ingress-controller | demo | pause | fetch；
-                             以 mini-cni/loopback 名字调用时是 CNI 插件
-cmd/kk/                      命令行客户端（相当于 kubectl + 集群生命周期）
-build/images/<name>/         Dockerfile：mini（组件与 demo）、node、pause、etcd、kube-proxy
-build/manifests/<节点角色>   static Pod 清单（对应 /etc/kubernetes/manifests）；addons/：集群 DNS
-pkg/apis/<group>/v1          资源类型（metav1、corev1、appsv1、networkingv1）及 validation
-pkg/api/resource, util/intstr 数量（"500m"、"64Mi"）与 int-or-string 值
-pkg/labels, fields, watch    选择器与 watch 事件类型（对应 apimachinery）
-pkg/scheme                   资源注册表
-pkg/apiserver                通用 API 服务（对应 k8s.io/apiserver）
-pkg/registry/<group>/<res>   各资源的 Strategy：默认值、校验、可变性、字段选择器；
-                             Service 的 ClusterIP 与 NodePort 分配器及其 repair 循环
-pkg/storage/etcd3            etcd 存储
-pkg/client/...               客户端、informers、workqueue、record（对应 client-go）
-pkg/controller/<name>        deployment、replicaset、endpoint、garbagecollector、namespace、nodeipam 控制器
-pkg/scheduler                调度器
-pkg/kubelet                  节点代理与 static Pod；kuberuntime（CRI 客户端）、prober（探针）、envvars（Service 环境变量）、
-                             dns（Pod DNS 配置与节点本地转发）
-pkg/network/{cni,hostgw}     CNI 插件与 host-gw 路由代理
-pkg/proxy/iptables           kube-proxy（iptables 模式）
-pkg/ingress                  Ingress 控制器
-pkg/dns                      集群 DNS 服务器
-pkg/nodeinit                 节点容器入口
-test/e2e, test/integration   端到端测试与集成测试
-```
-
 ## 环境要求
 
 | 依赖 | 要求 |
