@@ -230,6 +230,8 @@ type VolumeSource struct {
 	Secret      *SecretVolumeSource      `json:"secret,omitempty"`
 	DownwardAPI *DownwardAPIVolumeSource `json:"downwardAPI,omitempty"`
 	Projected   *ProjectedVolumeSource   `json:"projected,omitempty"`
+	// PersistentVolumeClaim mounts the volume bound to a claim.
+	PersistentVolumeClaim *PersistentVolumeClaimVolumeSource `json:"persistentVolumeClaim,omitempty"`
 }
 
 // EmptyDirVolumeSource is a directory that lives as long as the Pod on its node.
@@ -681,13 +683,15 @@ const (
 	EventTypeWarning = "Warning"
 )
 
-// ObjectReference points at another object.
+// ObjectReference points at another object, such as the subject of an
+// Event or the claim a volume is bound to.
 type ObjectReference struct {
-	Kind       string `json:"kind,omitempty"`
-	Namespace  string `json:"namespace,omitempty"`
-	Name       string `json:"name,omitempty"`
-	UID        string `json:"uid,omitempty"`
-	APIVersion string `json:"apiVersion,omitempty"`
+	Kind            string `json:"kind,omitempty"`
+	Namespace       string `json:"namespace,omitempty"`
+	Name            string `json:"name,omitempty"`
+	UID             string `json:"uid,omitempty"`
+	APIVersion      string `json:"apiVersion,omitempty"`
+	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
 // EventSource names the reporting component.

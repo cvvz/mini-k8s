@@ -1,0 +1,69 @@
+# The local-path storage add-on, applied by `kk cluster up` like the cluster
+# DNS (kind ships the same: rancher's local-path-provisioner and a default
+# "standard" StorageClass). Claims of the class wait for their first Pod;
+# once the scheduler has picked its node, `mini local-path-provisioner`
+# creates a hostPath PersistentVolume under /var/local-path-provisioner on
+# that node (pinned there by node affinity), and deletes the directory
+# through a helper Pod when the claim goes. mini has no ServiceAccounts, so
+# the provisioner reads the API token from its node.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-path-storage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-path-provisioner
+  namespace: local-path-storage
+  labels:
+    app: local-path-provisioner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: local-path-provisioner
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: local-path-provisioner
+    spec:
+      containers:
+      - name: local-path-provisioner
+        image: mini-k8s:local
+        imagePullPolicy: Never
+        command: ["/mini", "local-path-provisioner"]
+        env:
+        - name: MINI_TOKEN_FILE
+          value: /etc/mini-k8s/token
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            memory: 128Mi
+        volumeMounts:
+        - name: credentials
+          mountPath: /etc/mini-k8s
+          readOnly: true
+      volumes:
+      - name: credentials
+        hostPath:
+          path: /etc/mini-k8s
+          type: Directory
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: standard
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: mini-k8s.io/local-path
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer

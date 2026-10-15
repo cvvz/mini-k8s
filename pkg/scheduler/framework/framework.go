@@ -119,6 +119,13 @@ func NewSnapshot(nodes []*corev1.Node, pods []*corev1.Pod) *Snapshot {
 // Get returns a node's info.
 func (s *Snapshot) Get(name string) *NodeInfo { return s.byName[name] }
 
+// PreFilterPlugin rejects a Pod before any node is looked at, with one
+// reason for all of them (such as a missing PersistentVolumeClaim).
+type PreFilterPlugin interface {
+	Name() string
+	PreFilter(pod *corev1.Pod, snapshot *Snapshot) string
+}
+
 // FilterPlugin rejects nodes a Pod cannot run on, with the reasons
 // (several, as "Insufficient cpu" and "Insufficient memory"); none means fit.
 type FilterPlugin interface {
@@ -138,8 +145,9 @@ const MaxScore = 100
 
 // Framework runs the plugins of a profile.
 type Framework struct {
-	Filters []FilterPlugin
-	Scores  []ScorePlugin
+	PreFilters []PreFilterPlugin
+	Filters    []FilterPlugin
+	Scores     []ScorePlugin
 	// Rand picks among nodes with the same best score (nil: math/rand).
 	Rand func(n int) int
 }
@@ -147,6 +155,11 @@ type Framework struct {
 // Schedule returns the node for pod, or "" and the reason no node fits,
 // like the scheduler's FailedScheduling message.
 func (f *Framework) Schedule(pod *corev1.Pod, snapshot *Snapshot) (string, string) {
+	for _, plugin := range f.PreFilters {
+		if reason := plugin.PreFilter(pod, snapshot); reason != "" {
+			return "", fmt.Sprintf("0/%d nodes are available: %s.", len(snapshot.Nodes), reason)
+		}
+	}
 	var feasible []*NodeInfo
 	reasons := map[string]int{}
 	for _, node := range snapshot.Nodes {

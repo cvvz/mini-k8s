@@ -85,8 +85,11 @@ type Kubelet struct {
 	// through the regular resync.
 	configMaps *informers.Informer[corev1.ConfigMap, *corev1.ConfigMap]
 	secrets    *informers.Informer[corev1.Secret, *corev1.Secret]
-	network    chan struct{}
-	probes     *prober.Manager
+	// claims and volumes resolve persistentVolumeClaim volumes.
+	claims  *informers.Informer[corev1.PersistentVolumeClaim, *corev1.PersistentVolumeClaim]
+	volumes *informers.Informer[corev1.PersistentVolume, *corev1.PersistentVolume]
+	network chan struct{}
+	probes  *prober.Manager
 
 	mu      sync.Mutex
 	workers map[string]chan struct{} // by Pod UID
@@ -126,6 +129,8 @@ func New(c *client.Client, rt Runtime, recorder *record.Recorder, cfg Config) *K
 	k.services = informers.New(client.Services(c, ""), client.ListOptions{}, 0)
 	k.configMaps = informers.New(client.ConfigMaps(c, ""), client.ListOptions{}, 0)
 	k.secrets = informers.New(client.Secrets(c, ""), client.ListOptions{}, 0)
+	k.claims = informers.New(client.PersistentVolumeClaims(c, ""), client.ListOptions{}, 0)
+	k.volumes = informers.New(client.PersistentVolumes(c), client.ListOptions{}, 0)
 	k.nodes = informers.New(client.Nodes(c), client.ListOptions{}, 0)
 	k.nodes.AddHandler(informers.Handler[*corev1.Node]{
 		OnAdd: func(*corev1.Node) { poke() }, OnUpdate: func(_, _ *corev1.Node) { poke() }, OnDelete: func(*corev1.Node) { poke() },
@@ -161,13 +166,16 @@ func (k *Kubelet) Run(ctx context.Context) {
 	go k.services.Run(ctx)
 	go k.configMaps.Run(ctx)
 	go k.secrets.Run(ctx)
+	go k.claims.Run(ctx)
+	go k.volumes.Run(ctx)
 	// Static Pods run without the API, which may itself be one of them.
 	if k.cfg.StaticPodPath != "" {
 		go k.staticLoop(ctx)
 	}
 	// Containers get the variables of the Services that exist when they
 	// start, and the ConfigMaps and Secrets they refer to.
-	if !informers.WaitForSync(ctx, k.pods.HasSynced, k.services.HasSynced, k.configMaps.HasSynced, k.secrets.HasSynced) {
+	if !informers.WaitForSync(ctx, k.pods.HasSynced, k.services.HasSynced, k.configMaps.HasSynced, k.secrets.HasSynced,
+		k.claims.HasSynced, k.volumes.HasSynced) {
 		return
 	}
 	poll := time.NewTicker(time.Second)
@@ -530,6 +538,16 @@ func (k *Kubelet) ConfigMap(namespace, name string) (*corev1.ConfigMap, bool) {
 // Secret returns a Secret from the kubelet's cache.
 func (k *Kubelet) Secret(namespace, name string) (*corev1.Secret, bool) {
 	return k.secrets.Get(namespace, name)
+}
+
+// Claim returns a PersistentVolumeClaim from the kubelet's cache.
+func (k *Kubelet) Claim(namespace, name string) (*corev1.PersistentVolumeClaim, bool) {
+	return k.claims.Get(namespace, name)
+}
+
+// Volume returns a PersistentVolume from the kubelet's cache.
+func (k *Kubelet) Volume(name string) (*corev1.PersistentVolume, bool) {
+	return k.volumes.Get("", name)
 }
 
 // ServiceEnv returns the Service environment variables of a Pod's containers.

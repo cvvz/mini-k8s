@@ -11,6 +11,7 @@ import (
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	networkingv1 "mini-k8s/pkg/apis/networking/v1"
+	storagev1 "mini-k8s/pkg/apis/storage/v1"
 )
 
 // ResourceInfo describes one REST resource.
@@ -87,6 +88,13 @@ var (
 		ShortNames: []string{"cm"}, New: func() metav1.Object { return &corev1.ConfigMap{} }}
 	Secrets = ResourceInfo{Version: "v1", Resource: "secrets", Singular: "secret", Kind: "Secret", Namespaced: true,
 		New: func() metav1.Object { return &corev1.Secret{} }}
+	PersistentVolumes = ResourceInfo{Version: "v1", Resource: "persistentvolumes", Singular: "persistentvolume",
+		Kind: "PersistentVolume", ShortNames: []string{"pv"}, HasStatus: true, New: func() metav1.Object { return &corev1.PersistentVolume{} }}
+	PersistentVolumeClaims = ResourceInfo{Version: "v1", Resource: "persistentvolumeclaims", Singular: "persistentvolumeclaim",
+		Kind: "PersistentVolumeClaim", Namespaced: true, ShortNames: []string{"pvc"}, HasStatus: true,
+		New: func() metav1.Object { return &corev1.PersistentVolumeClaim{} }}
+	StorageClasses = ResourceInfo{Group: "storage.k8s.io", Version: "v1", Resource: "storageclasses", Singular: "storageclass",
+		Kind: "StorageClass", ShortNames: []string{"sc"}, New: func() metav1.Object { return &storagev1.StorageClass{} }}
 	Deployments = ResourceInfo{Group: "apps", Version: "v1", Resource: "deployments", Singular: "deployment", Kind: "Deployment",
 		Namespaced: true, ShortNames: []string{"deploy"}, HasStatus: true, New: func() metav1.Object { return &appsv1.Deployment{} }}
 	ReplicaSets = ResourceInfo{Group: "apps", Version: "v1", Resource: "replicasets", Singular: "replicaset", Kind: "ReplicaSet",
@@ -98,8 +106,8 @@ var (
 )
 
 // All lists every registered resource in discovery order.
-var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, ConfigMaps, Secrets, Deployments, ReplicaSets,
-	Ingresses, Leases}
+var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, ConfigMaps, Secrets, PersistentVolumes,
+	PersistentVolumeClaims, Deployments, ReplicaSets, Ingresses, Leases, StorageClasses}
 
 // Lookup resolves a user-supplied name: plural, singular, short name, kind
 // (case-insensitive) or "plural.group".

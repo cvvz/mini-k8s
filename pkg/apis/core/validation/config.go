@@ -480,6 +480,14 @@ func validateVolumeSource(p string, v corev1.VolumeSource) []string {
 	if pr := v.Projected; pr != nil {
 		add("projected", func() []string { return validateProjectedSources(p+".projected", pr) })
 	}
+	if c := v.PersistentVolumeClaim; c != nil {
+		add("persistentVolumeClaim", func() []string {
+			if c.ClaimName == "" {
+				return []string{p + ".persistentVolumeClaim.claimName: Required value"}
+			}
+			return nil
+		})
+	}
 	if kinds == 0 {
 		errs = append(errs, p+": Required value: must specify a volume type")
 	}

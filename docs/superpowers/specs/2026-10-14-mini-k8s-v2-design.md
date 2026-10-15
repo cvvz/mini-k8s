@@ -294,7 +294,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M7b ✅ | 调度框架（资源、nodeSelector/亲和性、Pod 亲和/反亲和、打散）（落地记录见 §12.7） |
 | M7c ✅ | worker 扩缩（`kk cluster up --workers N`）、Pod 垃圾回收（落地记录见 §12.8） |
 | M8a ✅ | ConfigMap、Secret、env `valueFrom`/`envFrom`、downward API、configMap/secret/downwardAPI/projected 卷（落地记录见 §12.9） |
-| M8b | PV/PVC、StorageClass 与动态供给（local-path 式：PV 带节点亲和，`WaitForFirstConsumer`） |
+| M8b ✅ | PV/PVC、StorageClass、调度器 VolumeBinding、local-path 式动态供给（落地记录见 §12.10） |
 | M9 | DaemonSet、Job、CronJob、StatefulSet |
 | M10+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
 
@@ -480,6 +480,26 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
   事件按 1s 起翻倍、上限 2 分钟的节奏重复（hostPath 类型检查失败同样如此，原先报 `CreateContainerConfigError`）。
 - **工具**：`kk create configmap|secret generic|secret tls`；`mini env`、`mini ls` 便于在 Pod 内查看。
 
+### 12.10 M8b 落地记录
+
+按[实施计划](../plans/2026-10-15-m8b-persistent-volumes.md)落地，相关 e2e（storage、scheduling、apps、node）全部通过。要点：
+
+- **API**：PersistentVolume、PersistentVolumeClaim（core/v1）与 StorageClass（storage.k8s.io/v1）。创建 PVC 时 BeginCreate 从 etcd
+  读取 StorageClass，为未写类的 PVC 填入默认类（DefaultStorageClass 准入）；PrepareForCreate 加上 pvc-protection / pv-protection
+  finalizer（StorageObjectInUseProtection 准入）。PVC 的 spec 不可变，只允许 `volumeName` 由空变为非空。
+- **控制器**：`pkg/controller/volume/persistentvolume` 每 15s 全量重扫，同时由事件驱动。绑定时两边互指，WFFC 等待
+  `selected-node`，需要供给时打供给器注解并发 `ExternalProvisioning` 事件，Released 后按回收策略处理（非供给卷用 Delete → Failed）。
+  `pvcprotection` 在没有未结束的 Pod 使用 PVC 时移除 finalizer，`pvprotection` 在 PV 不处于 Bound 时移除 finalizer。
+- **调度器**：新增 PreFilter 扩展点；VolumeBinding 插件检查 PVC 是否存在、Immediate PVC 是否已绑定、PV 节点亲和、静态卷或供给器是否可用。
+  Pod 选定节点后先被假定在该节点上；若有 PVC 需要绑定，在 goroutine 中预留静态卷（写 claimRef）或写 `selected-node`，
+  等待 PVC Bound（上限 2 分钟）后再绑定 Pod。失败时撤销假定，报 `running PreBind plugin "VolumeBinding": ...` 并退避重试。
+- **供给器**：`pkg/volume/localpath` + `mini local-path-provisioner`，插件清单 `build/manifests/addons/local-path-storage.yaml`
+  （命名空间、Deployment、默认类 `standard`）。PV 名为 `pvc-<uid>`，是 hostPath `DirectoryOrCreate`，路径为
+  `/var/local-path-provisioner/<pv>_<ns>_<pvc>`，带节点亲和。回收时在该节点运行辅助 Pod（`mini rm`）删除目录，成功后删除 Pod 与 PV；
+  创建辅助 Pod 前向 API 确认 PV 状态，PV 删除后清理残留的辅助 Pod。
+- **kubelet**：PVC 卷按 PVC → PV 解析为 hostPath/local 路径；PVC 未绑定时报 `error processing PVC ns/x: PVC is not bound`
+  （FailedMount）；`readOnly` 生效。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -574,7 +594,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | --- | --- | --- |
 | `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`node-init`（含 kubelet）、`kube-proxy`、`ingress-controller`、`cluster-dns`、`demo`，以及 `fetch`/`lookup` 等测试工具 | `cmd/kube-*`（及早期的 `hyperkube`） |
 | `cmd/kk` | 命令行客户端与集群生命周期（含 worker 扩缩） | `kubectl`、`kind` |
-| `pkg/apis/{meta,core,apps,networking,coordination}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`networkingv1`、`coordinationv1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
+| `pkg/apis/{meta,core,apps,networking,coordination,storage}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`networkingv1`、`coordinationv1`、`storagev1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
 | `pkg/apis/{core,apps,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
 | `pkg/labels`、`pkg/fields`、`pkg/watch` | 选择器与 watch 事件类型 | `apimachinery/pkg/{labels,fields,watch}` |
 | `pkg/scheme` | 资源注册表（REST 坐标、Kind、构造函数） | `runtime.Scheme`、`RESTMapper` |
@@ -582,7 +602,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/registry/{core,apps,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
 | `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
-| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `nodelifecycle`、`tainteviction`、`podgc`） | `pkg/controller` |
+| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins}` | 调度队列；调度框架（NodeInfo 快照、Filter/Score 接口）与默认插件 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins/<name>}` |
 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars}`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |
@@ -591,7 +611,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/ingress` | Ingress 控制器（取代 M6 之前的单 Service 网关） | 无直接对应（ingress-nginx 等外部项目） |
 | `pkg/dns` | 集群 DNS 服务器（报文编解码、kubernetes 记录、上游转发） | 无直接对应（CoreDNS 及其 kubernetes 插件） |
 | `pkg/fieldpath` | downward API：Pod 字段路径与容器资源取值 | `pkg/fieldpath`、`pkg/api/v1/resource` |
-| `pkg/volume` | configMap/secret/downwardAPI/projected 卷的内容与原子写入器 | `pkg/volume/util`（AtomicWriter）与各卷插件 |
+| `pkg/volume` | configMap/secret/downwardAPI/projected 卷的内容与原子写入器；`localpath` 为 local-path 动态供给器 | `pkg/volume/util`（AtomicWriter）与各卷插件；kind 使用的 rancher local-path-provisioner |
 | `pkg/util/{ptr,deepcopy,validation,expansion}` | 通用小工具（`expansion` 展开 `$(VAR)`） | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation`、`third_party/forked/golang/expansion` |
 | `test/e2e` | Ginkgo 端到端测试 | `test/e2e` |
 | `test/integration` | 真实 etcd + 进程内 API Server 的集成测试与框架 | `test/integration` |

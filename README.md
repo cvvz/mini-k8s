@@ -65,6 +65,13 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   atomically (`..data` switched by a rename), mounted read-only (secrets in memory) and follow
   changes to their sources. A missing ConfigMap or Secret keeps the Pod waiting
   (`CreateContainerConfigError`, or `ContainerCreating` with `FailedMount` events) until it exists.
+- **Storage**: PersistentVolumes, PersistentVolumeClaims and StorageClasses. The
+  PersistentVolume controller binds claims to the smallest fitting volume or hands them to a
+  provisioner, and releases volumes by their reclaim policy; claims and volumes in use are
+  protected by finalizers. As in kind, a local-path provisioner add-on backs the default
+  `standard` class (`WaitForFirstConsumer`): the scheduler picks the node first, the volume is
+  created as a directory there, pinned by node affinity, and removed by a helper Pod when the
+  claim is deleted.
 - **kubelet**: node registration, Lease renewal and status reports; static Pods from a manifest directory
   with mirror Pods; one worker per Pod; restarts with backoff (CrashLoopBackOff);
   `imagePullPolicy` and image pull errors (ErrImagePull/ImagePullBackOff); sandbox
@@ -136,7 +143,8 @@ How to read it:
 - The control-plane node's kubelet runs etcd, the API server, the controller manager, the
   scheduler and the Ingress controller as static Pods; the node's taint keeps workloads on
   the workers. Every node (the control-plane one too) also runs kube-proxy; the cluster
-  DNS (`kube-dns`, `10.96.0.10`) runs as ordinary Pods on the workers.
+  DNS (`kube-dns`, `10.96.0.10`) and the local-path provisioner run as ordinary Pods on the
+  workers.
 - Arrows between components are API traffic: every component lists and watches the API
   server and writes back; only the API server talks to etcd. The kubelet starts Pods through
   containerd (CRI).
@@ -163,8 +171,8 @@ container runtime) uses those open-source components as-is, configured but not m
 | Component | Responsibility | Status |
 | --- | --- | --- |
 | kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation | done |
-| controller-manager | Deployment, ReplicaSet, Endpoints, garbage collector, namespace, node IPAM, node lifecycle and taint-eviction controllers | done, growing |
-| scheduler | Scheduling framework with filter and score plugins (taints, node affinity, resource fit, pod (anti-)affinity, spreading), backoff queue, binding | done |
+| controller-manager | Deployment, ReplicaSet, Endpoints, garbage collector, namespace, node IPAM, node lifecycle, taint-eviction, Pod garbage collector, PersistentVolume and PVC/PV protection controllers | done, growing |
+| scheduler | Scheduling framework with pre-filter, filter and score plugins (taints, node affinity, resource fit, pod (anti-)affinity, spreading, volume binding), backoff queue, binding (asynchronous while volumes are provisioned) | done |
 | kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
 | kube-proxy | iptables mode: cluster IPs, node ports, session affinity, masquerading; a static Pod of every node (it runs the iptables tools of its Ubuntu-based image) | done |
@@ -175,6 +183,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | `mini-cni` + host-gw route agent | Pod networking: bridge, veth, IP allocation, loopback, cross-node routes, egress masquerading | done |
 | `mini node-init`, pause image | Node container entrypoint (cgroup delegation, containerd configuration and start, then the kubelet); Pod sandbox process | done |
 | cluster DNS | `mini cluster-dns`: Service, headless, SRV, ExternalName and Pod records, forwarding of other names (its own DNS message codec); runs as the `kube-dns` add-on, the role CoreDNS plays | done |
+| local-path provisioner | `mini local-path-provisioner`: node-local hostPath volumes for the default StorageClass, deleted through helper Pods; runs as the `local-path-storage` add-on, the role rancher's local-path-provisioner plays in kind | done |
 
 **Open-source components used as-is**:
 
@@ -262,8 +271,9 @@ minute the first time), starts the node containers (three by default), loads the
 node's containerd (the control-plane node's kubelet then starts etcd, the API server, the
 controller manager, the scheduler and the Ingress controller as static Pods, and every
 node starts kube-proxy), waits up to two minutes for a healthy API and fresh Ready
-heartbeats from every node, and finally applies the cluster DNS add-on
-([build/manifests/addons](build/manifests/addons)), as kubeadm installs CoreDNS.
+heartbeats from every node, and finally applies the cluster DNS and local-path storage
+add-ons ([build/manifests/addons](build/manifests/addons)), as kubeadm installs CoreDNS and kind
+its storage provisioner.
 
 ```text
 API healthy
@@ -354,6 +364,11 @@ kk exec config-demo -- /mini env         # GREETING=hello, MESSAGE=hello from co
 kk exec config-demo -- /mini ls /etc/config      # greeting -> ..data/greeting: files switched atomically
 kk label pod config-demo tier=web --overwrite    # /etc/podinfo/labels follows within seconds,
 kk exec config-demo -- /mini cat /etc/podinfo/labels    # as do the files of an edited ConfigMap
+kk apply -f examples/storage.yaml        # a claim of the default class and a Pod using it
+kk get pvc,pv                            # Bound to pvc-<uid>, provisioned on the Pod's node
+kk exec notes -- /mini write /data/note "kept across Pods"
+kk delete pod notes && kk apply -f examples/storage.yaml   # the new Pod lands on the same node
+kk exec notes -- /mini cat /data/note
 kk create secret generic db --from-literal=password=s3cr3t   # or --from-file=[KEY=]PATH
 kk describe secret db                    # shows sizes, never values
 
@@ -408,7 +423,10 @@ into the nodes), also delete the volumes:
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
 | Node | `v1` | Registered by kubelets with `capacity`/`allocatable` (cpu, memory, pods) and role labels; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` and `spec.taints` (NoSchedule, PreferNoSchedule, NoExecute with `timeAdded`) are honoured by the scheduler and the taint-eviction controller; the control-plane node is tainted `node-role.kubernetes.io/control-plane:NoSchedule`; lost nodes become `Unknown` with the `node.kubernetes.io/unreachable` taints. |
 | Lease | `coordination.k8s.io/v1` | `holderIdentity`, `leaseDurationSeconds`, `renewTime`; each kubelet renews `kube-node-lease/<node>`. |
-| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env` (`value` with `$(VAR)` references, or `valueFrom` `configMapKeyRef`, `secretKeyRef`, `fieldRef`, `resourceFieldRef`), `envFrom` (`configMapRef`, `secretRef`, `prefix`), `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`, `configMap`, `secret`, `downwardAPI`, `projected`, with `items`, `defaultMode`, `optional`); `hostNetwork`; `hostname`, `subdomain`; `dnsPolicy` (ClusterFirst, ClusterFirstWithHostNet, Default, None) and `dnsConfig`; `enableServiceLinks`; `tolerations`; `nodeSelector`; `affinity` (`nodeAffinity`, `podAffinity`, `podAntiAffinity`, required and preferred; `topologyKey`); scheduling accounts for `resources.requests`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
+| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env` (`value` with `$(VAR)` references, or `valueFrom` `configMapKeyRef`, `secretKeyRef`, `fieldRef`, `resourceFieldRef`), `envFrom` (`configMapRef`, `secretRef`, `prefix`), `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`, `configMap`, `secret`, `downwardAPI`, `projected`, with `items`, `defaultMode`, `optional`, and `persistentVolumeClaim`); `hostNetwork`; `hostname`, `subdomain`; `dnsPolicy` (ClusterFirst, ClusterFirstWithHostNet, Default, None) and `dnsConfig`; `enableServiceLinks`; `tolerations`; `nodeSelector`; `affinity` (`nodeAffinity`, `podAffinity`, `podAntiAffinity`, required and preferred; `topologyKey`); scheduling accounts for `resources.requests`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
+| PersistentVolume | `v1` | `capacity` (storage), `accessModes` (ReadWriteOnce, ReadOnlyMany, ReadWriteMany, ReadWriteOncePod; not enforced across nodes), `hostPath` or `local` (with `nodeAffinity`), `persistentVolumeReclaimPolicy` (Retain by default, Delete), `storageClassName`, `claimRef` (pre-binding), `volumeMode` Filesystem; phases Pending, Available, Bound, Released, Failed; finalizer `kubernetes.io/pv-protection`. |
+| PersistentVolumeClaim | `v1` | `accessModes`, `resources.requests.storage`, `storageClassName` (the default class when omitted, `""` for none), `volumeName`, `selector`; immutable spec; phases Pending, Bound, Lost; finalizer `kubernetes.io/pvc-protection` (Terminating while a Pod uses it). |
+| StorageClass | `storage.k8s.io/v1` | `provisioner`, `parameters`, `reclaimPolicy` (Delete by default, Retain), `volumeBindingMode` (Immediate, WaitForFirstConsumer), `storageclass.kubernetes.io/is-default-class`. The `standard` class (`mini-k8s.io/local-path`) is installed by `cluster up`. |
 | ConfigMap | `v1` | `data`, `binaryData` (keys `[-._a-zA-Z0-9]+`, 1 MiB in total), `immutable`. |
 | Secret | `v1` | `data` (base64), write-only `stringData` merged into it, `type` (default `Opaque`, immutable; `kubernetes.io/tls`, `basic-auth`, `ssh-auth` and `dockerconfigjson` must have their keys), `immutable`; selectable by `type`. |
 | Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always), `strategy` (RollingUpdate with `maxSurge`/`maxUnavailable`, 25% each by default, or Recreate), `minReadySeconds`, `revisionHistoryLimit` (10), `paused`, `progressDeadlineSeconds` (600). Each template version runs as a ReplicaSet; annotations `deployment.kubernetes.io/revision` and `kubernetes.io/change-cause`. |
@@ -426,8 +444,8 @@ still not a cross-resource transaction.
 
 ## Current limitations (addressed by upcoming milestones)
 
-- No persistent volumes yet (M8b); no `subPath`, `hostPort`, service accounts or projected
-  service account tokens. `kk exec` runs a
+- No `subPath`, `hostPort`, service accounts or projected service account tokens; no volume
+  expansion, CSI drivers, block volumes or recycling of volumes. `kk exec` runs a
   command to completion and returns its output; there is no interactive session (stdin/tty),
   unlike Kubernetes' streaming exec.
 - Rollouts do not scale proportionally when `replicas` changes mid-rollout, and ReplicaSets
@@ -530,12 +548,13 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M7b | Scheduling framework: resource fit, node selectors and affinity, pod (anti-)affinity, spreading | ✅ |
 | M7c | More workers (`kk cluster up --workers N`), Pod garbage collector | ✅ |
 | M8a | ConfigMaps, Secrets, `valueFrom`/`envFrom`, downward API, projected volumes | ✅ |
-| M8b | PersistentVolumes and claims with dynamic provisioning | planned |
+| M8b | PersistentVolumes, claims and StorageClasses, volume binding in the scheduler, local-path provisioning | ✅ |
 | M9 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M8b persistent volumes plan (Chinese)](docs/superpowers/plans/2026-10-15-m8b-persistent-volumes.md)
 - [M8a ConfigMaps and Secrets plan (Chinese)](docs/superpowers/plans/2026-10-15-m8a-configmap-secret.md)
 - [M7c worker scaling plan (Chinese)](docs/superpowers/plans/2026-10-15-m7c-worker-scaling.md)
 - [M7b scheduling framework plan (Chinese)](docs/superpowers/plans/2026-10-15-m7b-scheduling-framework.md)

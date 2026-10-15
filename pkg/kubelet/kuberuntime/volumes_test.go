@@ -156,6 +156,51 @@ func TestProjectedVolumes(t *testing.T) {
 	}
 }
 
+type fakeClaims struct {
+	claims  map[string]*corev1.PersistentVolumeClaim
+	volumes map[string]*corev1.PersistentVolume
+}
+
+func (f fakeClaims) Claim(ns, name string) (*corev1.PersistentVolumeClaim, bool) {
+	c, ok := f.claims[ns+"/"+name]
+	return c, ok
+}
+
+func (f fakeClaims) Volume(name string) (*corev1.PersistentVolume, bool) {
+	v, ok := f.volumes[name]
+	return v, ok
+}
+
+// persistentVolumeClaim volumes mount the directory of the bound volume;
+// an unbound claim keeps the Pod waiting.
+func TestClaimVolumes(t *testing.T) {
+	_, m, _ := newTestManager(t)
+	dir := filepath.Join(t.TempDir(), "pvc-1_ns_data")
+	claims := fakeClaims{claims: map[string]*corev1.PersistentVolumeClaim{}, volumes: map[string]*corev1.PersistentVolume{
+		"pvc-1": {Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: dir, Type: ptrTo(corev1.HostPathDirectoryOrCreate)}}}}}}
+	m.Claims = claims
+	pod := testPod()
+	pod.Namespace = "ns"
+	pod.Spec.Volumes = []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data", ReadOnly: true}}}}
+	if _, err := m.setupVolumes(pod); err == nil || err.Error() != `MountVolume.SetUp failed for volume "data" : persistentvolumeclaim "data" not found` {
+		t.Fatalf("missing claim: %v", err)
+	}
+	claims.claims["ns/data"] = &corev1.PersistentVolumeClaim{Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pvc-1"}}
+	if _, err := m.setupVolumes(pod); err == nil || err.Error() != `MountVolume.SetUp failed for volume "data" : error processing PVC ns/data: PVC is not bound` {
+		t.Fatalf("unbound claim: %v", err)
+	}
+	claims.claims["ns/data"].Status.Phase = corev1.ClaimBound
+	vols, err := m.setupVolumes(pod)
+	if err != nil || vols.paths["data"] != dir || !vols.readOnly["data"] {
+		t.Fatalf("bound claim: %+v %v", vols, err)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("the hostPath directory is created: %v", err)
+	}
+}
+
 type fakeRecorder struct {
 	mu     sync.Mutex
 	events []string
