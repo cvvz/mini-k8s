@@ -21,6 +21,7 @@ import (
 	"mini-k8s/pkg/controller/nodelifecycle"
 	"mini-k8s/pkg/controller/podgc"
 	"mini-k8s/pkg/controller/replicaset"
+	"mini-k8s/pkg/controller/statefulset"
 	"mini-k8s/pkg/controller/tainteviction"
 	"mini-k8s/pkg/controller/ttlafterfinished"
 	"mini-k8s/pkg/controller/volume/persistentvolume"
@@ -36,6 +37,7 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	deployments := informers.New(client.Deployments(c, ""), client.ListOptions{}, 30*time.Second)
 	rsets := informers.New(client.ReplicaSets(c, ""), client.ListOptions{}, 30*time.Second)
 	dsets := informers.New(client.DaemonSets(c, ""), client.ListOptions{}, 30*time.Second)
+	sets := informers.New(client.StatefulSets(c, ""), client.ListOptions{}, 30*time.Second)
 	revisions := informers.New(client.ControllerRevisions(c, ""), client.ListOptions{}, 30*time.Second)
 	jobs := informers.New(client.Jobs(c, ""), client.ListOptions{}, 30*time.Second)
 	cronJobs := informers.New(client.CronJobs(c, ""), client.ListOptions{}, 30*time.Second)
@@ -54,6 +56,7 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	dc := deployment.NewDeploymentController(c, deployments, rsets, pods, rec)
 	rc := replicaset.NewController(c, rsets, pods, rec)
 	dsc := daemon.NewController(c, dsets, pods, nodes, revisions, rec)
+	ssc := statefulset.NewController(c, sets, pods, claims, revisions, rec)
 	jc := job.NewController(c, jobs, pods, rec)
 	cjc := cronjob.NewController(c, cronJobs, jobs, rec)
 	ttl := ttlafterfinished.NewController(c, jobs)
@@ -69,14 +72,15 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	pvProtection := pvprotection.NewController(c, volumes)
 	go rec.Run(ctx)
 	for _, run := range []func(context.Context){pods.Run, deployments.Run, rsets.Run, namespaces.Run, nodes.Run, services.Run,
-		endpoints.Run, leases.Run, volumes.Run, claims.Run, classes.Run, dsets.Run, revisions.Run, jobs.Run, cronJobs.Run} {
+		endpoints.Run, leases.Run, volumes.Run, claims.Run, classes.Run, dsets.Run, revisions.Run, jobs.Run, cronJobs.Run, sets.Run} {
 		go run(ctx)
 	}
 	informers.WaitForSync(ctx, pods.HasSynced, deployments.HasSynced, rsets.HasSynced, namespaces.HasSynced, nodes.HasSynced,
 		services.HasSynced, endpoints.HasSynced, leases.HasSynced, volumes.HasSynced, claims.HasSynced, classes.HasSynced,
-		dsets.HasSynced, revisions.HasSynced, jobs.HasSynced, cronJobs.HasSynced)
+		dsets.HasSynced, revisions.HasSynced, jobs.HasSynced, cronJobs.HasSynced, sets.HasSynced)
 	go rc.Run(ctx, 4)
 	go dsc.Run(ctx, 2)
+	go ssc.Run(ctx, 2)
 	go jc.Run(ctx, 4)
 	go cjc.Run(ctx, 2)
 	go ttl.Run(ctx, 2)

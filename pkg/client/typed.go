@@ -77,6 +77,11 @@ func DaemonSets(c *Client, ns string) Resource[appsv1.DaemonSet, *appsv1.DaemonS
 	return For[appsv1.DaemonSet](c, scheme.DaemonSets, ns)
 }
 
+// StatefulSets returns a StatefulSet client.
+func StatefulSets(c *Client, ns string) Resource[appsv1.StatefulSet, *appsv1.StatefulSet] {
+	return For[appsv1.StatefulSet](c, scheme.StatefulSets, ns)
+}
+
 // ControllerRevisions returns a ControllerRevision client.
 func ControllerRevisions(c *Client, ns string) Resource[appsv1.ControllerRevision, *appsv1.ControllerRevision] {
 	return For[appsv1.ControllerRevision](c, scheme.ControllerRevisions, ns)

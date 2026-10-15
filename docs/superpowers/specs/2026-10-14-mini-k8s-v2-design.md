@@ -297,7 +297,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M8b ✅ | PV/PVC、StorageClass、调度器 VolumeBinding、local-path 式动态供给（落地记录见 §12.10） |
 | M9a ✅ | DaemonSet 与 ControllerRevision、kube-proxy 改为 DaemonSet 插件（落地记录见 §12.11） |
 | M9b ✅ | Job、CronJob、TTL-after-finished（落地记录见 §12.12） |
-| M9c | StatefulSet（volumeClaimTemplates） |
+| M9c ✅ | StatefulSet（volumeClaimTemplates、PVC 保留策略），修订历史抽成共享包（落地记录见 §12.13） |
 | M10+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
 
 ### 12.1 M1 落地记录与过渡态
@@ -547,6 +547,41 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
   `describe job|cronjob`；`kk create job NAME --image IMG -- CMD...` 与 `kk create job NAME --from=cronjob/NAME`
   （注解 `cronjob.kubernetes.io/instantiate: manual`，与 Kubernetes 一样会让 CronJob 报 UnexpectedJob 警告）。
 
+### 12.13 M9c 落地记录
+
+按[实施计划](../plans/2026-10-15-m9c-statefulset.md)落地，语义以 AKS 实测为准，相关 e2e（`[sig-apps] StatefulSet`、`DaemonSet`）全部通过。要点：
+
+- **API**：apps/v1 StatefulSet（短名 `sts`）。默认 OrderedReady、RollingUpdate + partition 0、revisionHistoryLimit 10、
+  PVC 保留策略 Retain/Retain，卷模板补 `volumeMode: Filesystem`。校验文案与 Kubernetes 相同；创建后只允许修改 replicas、ordinals、
+  template、updateStrategy、revisionHistoryLimit、persistentVolumeClaimRetentionPolicy 与 minReadySeconds。模板校验把卷模板视为
+  卷（Kubernetes 干脆跳过了这项检查），容器可以挂载 PVC。
+- **修订历史**：DaemonSet 的 ControllerRevision 管理移到 `pkg/controller/history`，两种控制器共用：收养孤儿修订，回滚时把旧修订
+  提为最新，清理超出上限且未被使用的修订。名字被占用时，同模板的修订直接收养（`--cascade=orphan` 删除后重建的情形；旧属主尚未被 GC
+  解除时等待），不同模板才计入 `collisionCount`，与 Kubernetes 的 CreateControllerRevision 一致。
+  StatefulSet 修订的 hash 标签为 `controller.kubernetes.io/hash`，Pod 的 `controller-revision-hash` 标签记录修订名。
+- **控制器**：`pkg/controller/statefulset`，按 k8s `stateful_set_control.go` 的语义实现。
+  - Pod 名为 `<set>-<序号>`，hostname 为 Pod 名，subdomain 为 serviceName。Pod 带 `statefulset.kubernetes.io/pod-name` 与
+    `apps.kubernetes.io/pod-index` 标签。
+  - **replicas 组**（序号在范围内）：
+    - 已结束的 Pod 先删除再重建。
+    - 缺失的 Pod 先补 PVC（`<模板>-<set>-<序号>`）再建 Pod。PVC 正在删除时等待。
+    - OrderedReady 模式下遇到未就绪的 Pod 就停止推进。
+  - **condemned 组**（序号超出范围）：从最大序号往下删除，OrderedReady 模式下一次只删一个。
+  - **更新**：RollingUpdate 从最大序号往下替换修订不符的 Pod，直到 partition。新建的 Pod 中，序号小于 partition 的沿用
+    currentRevision。全部更新且就绪后，currentRevision 前进到 updateRevision；OnDelete 与 Kubernetes 一样不前进。
+  - **PVC 属主**：按 `updateClaimOwnerRefForSetAndPod` 维护：
+    - `whenDeleted: Delete`：PVC 以 StatefulSet 为 controller。
+    - `whenScaled: Delete`：被缩掉的 Pod 成为其 PVC 的属主，由 GC 随 Pod 删除。
+  - **其他**：收养选择器匹配的孤儿 Pod。Expectations 新增累加式的 `Raise`，供并行创建与删除使用。
+- **kk**：
+  - `get sts`：READY 列，`-o wide` 加 CONTAINERS 与 IMAGES。
+  - `describe sts`：含 Pods Status、Volume Claims 与保留策略。
+  - `scale statefulset`。
+  - `rollout status|history|undo|restart statefulset`：DaemonSet 与 StatefulSet 共用基于修订的实现；status 文案与 kubectl 相同
+    （`partitioned roll out complete: N new pods have been updated...`）。
+- **其他**：新增 `pkg/util/equality.Semantic`，按 JSON 编码比较，nil 与空集合视为相等，用于 StatefulSet 与 Job 的不可变字段校验
+  （`deepcopy` 走 JSON 往返，会把 nil map 变成空 map）。`ptr.Deref`。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -649,7 +684,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/registry/{core,apps,batch,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
 | `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
-| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `daemon`、`job`、`cronjob`、`ttlafterfinished`、`nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
+| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `daemon`、`statefulset`、`history`（ControllerRevision 管理）、`job`、`cronjob`、`ttlafterfinished`、`nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins}` | 调度队列；调度框架（NodeInfo 快照、Filter/Score 接口）与默认插件 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins/<name>}` |
 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars}`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |
@@ -659,7 +694,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/dns` | 集群 DNS 服务器（报文编解码、kubernetes 记录、上游转发） | 无直接对应（CoreDNS 及其 kubernetes 插件） |
 | `pkg/fieldpath` | downward API：Pod 字段路径与容器资源取值 | `pkg/fieldpath`、`pkg/api/v1/resource` |
 | `pkg/volume` | configMap/secret/downwardAPI/projected 卷的内容与原子写入器；`localpath` 为 local-path 动态供给器 | `pkg/volume/util`（AtomicWriter）与各卷插件；kind 使用的 rancher local-path-provisioner |
-| `pkg/util/{ptr,deepcopy,validation,expansion,cron}` | 通用小工具（`expansion` 展开 `$(VAR)`，`cron` 解析 cron 表达式） | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation`、`third_party/forked/golang/expansion`、`github.com/robfig/cron/v3` |
+| `pkg/util/{ptr,deepcopy,equality,validation,expansion,cron}` | 通用小工具（`equality` 按序列化结果比较，`expansion` 展开 `$(VAR)`，`cron` 解析 cron 表达式） | `k8s.io/utils/ptr`、`apimachinery/pkg/api/equality`、`apimachinery/pkg/util/validation`、`third_party/forked/golang/expansion`、`github.com/robfig/cron/v3` |
 | `test/e2e` | Ginkgo 端到端测试 | `test/e2e` |
 | `test/integration` | 真实 etcd + 进程内 API Server 的集成测试与框架 | `test/integration` |
 

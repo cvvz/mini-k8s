@@ -6,9 +6,8 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -24,6 +23,7 @@ import (
 	"mini-k8s/pkg/client/record"
 	"mini-k8s/pkg/client/workqueue"
 	"mini-k8s/pkg/controller"
+	"mini-k8s/pkg/controller/history"
 	"mini-k8s/pkg/util/deepcopy"
 	"mini-k8s/pkg/util/intstr"
 	"mini-k8s/pkg/util/ptr"
@@ -37,15 +37,15 @@ const (
 
 // Controller reconciles DaemonSets with their Pods and revisions.
 type Controller struct {
-	client    *client.Client
-	dsets     *informers.Informer[appsv1.DaemonSet, *appsv1.DaemonSet]
-	pods      *informers.Informer[corev1.Pod, *corev1.Pod]
-	nodes     *informers.Informer[corev1.Node, *corev1.Node]
-	revisions *informers.Informer[appsv1.ControllerRevision, *appsv1.ControllerRevision]
-	recorder  *record.Recorder
-	queue     *workqueue.Queue
-	expect    *controller.Expectations
-	now       func() time.Time
+	client   *client.Client
+	dsets    *informers.Informer[appsv1.DaemonSet, *appsv1.DaemonSet]
+	pods     *informers.Informer[corev1.Pod, *corev1.Pod]
+	nodes    *informers.Informer[corev1.Node, *corev1.Node]
+	history  *history.History
+	recorder *record.Recorder
+	queue    *workqueue.Queue
+	expect   *controller.Expectations
+	now      func() time.Time
 
 	mu sync.Mutex
 	// failed counts the failed Pods replaced per DaemonSet and node.
@@ -61,7 +61,8 @@ type failedPods struct {
 func NewController(c *client.Client, dsets *informers.Informer[appsv1.DaemonSet, *appsv1.DaemonSet],
 	pods *informers.Informer[corev1.Pod, *corev1.Pod], nodes *informers.Informer[corev1.Node, *corev1.Node],
 	revisions *informers.Informer[appsv1.ControllerRevision, *appsv1.ControllerRevision], recorder *record.Recorder) *Controller {
-	dc := &Controller{client: c, dsets: dsets, pods: pods, nodes: nodes, revisions: revisions, recorder: recorder,
+	dc := &Controller{client: c, dsets: dsets, pods: pods, nodes: nodes,
+		history: &history.History{Client: c, Revisions: revisions}, recorder: recorder,
 		queue: workqueue.New(), expect: controller.NewExpectations(), now: time.Now, failed: map[string]failedPods{}}
 	enqueue := func(ds *appsv1.DaemonSet) { dc.queue.Add(informers.Key(ds)) }
 	dsets.AddHandler(informers.Handler[*appsv1.DaemonSet]{
@@ -410,157 +411,36 @@ func (dc *Controller) updateStatus(ctx context.Context, ds *appsv1.DaemonSet, no
 	return err
 }
 
-// RevisionData is a template as a ControllerRevision stores it: a patch
-// replacing the controller's template.
-func RevisionData(tpl *corev1.PodTemplateSpec) json.RawMessage {
-	raw, _ := json.Marshal(tpl)
-	var m map[string]any
-	_ = json.Unmarshal(raw, &m)
-	m["$patch"] = "replace"
-	data, _ := json.Marshal(map[string]any{"spec": map[string]any{"template": m}})
-	return data
-}
-
-// RevisionTemplate decodes the template of a ControllerRevision.
-func RevisionTemplate(cr *appsv1.ControllerRevision) (*corev1.PodTemplateSpec, error) {
-	var data struct {
-		Spec struct {
-			Template map[string]any `json:"template"`
-		} `json:"spec"`
-	}
-	if err := json.Unmarshal(cr.Data, &data); err != nil {
-		return nil, err
-	}
-	delete(data.Spec.Template, "$patch")
-	raw, _ := json.Marshal(data.Spec.Template)
-	var tpl corev1.PodTemplateSpec
-	if err := json.Unmarshal(raw, &tpl); err != nil {
-		return nil, err
-	}
-	return &tpl, nil
-}
-
-func sameTemplate(a, b *corev1.PodTemplateSpec) bool {
-	canonical := func(t *corev1.PodTemplateSpec) []byte {
-		t = deepcopy.Copy(t)
-		corev1.SetDefaultsPodSpec(&t.Spec)
-		data, _ := json.Marshal(t)
-		return data
-	}
-	return bytes.Equal(canonical(a), canonical(b))
-}
-
 // syncRevisions finds or creates the ControllerRevision of the current
-// template, makes it the newest (after a rollback to an older template),
-// drops revisions beyond revisionHistoryLimit that no Pod uses and returns
-// the current revision's hash.
+// template (see package history) and returns its hash. Revisions beyond
+// revisionHistoryLimit that no Pod uses are deleted.
 func (dc *Controller) syncRevisions(ctx context.Context, ds *appsv1.DaemonSet) (string, error) {
-	selector, err := ds.Spec.Selector.AsSelector()
-	if err != nil {
-		return "", err
-	}
-	revisions := client.ControllerRevisions(dc.client, ds.Namespace)
-	var owned []*appsv1.ControllerRevision
-	for _, cr := range dc.revisions.List(ds.Namespace, nil) {
-		ref := metav1.ControllerOf(&cr.ObjectMeta)
-		if ref == nil && cr.DeletionTimestamp == nil && selector.Matches(cr.Labels) {
-			adopted, err := dc.adoptRevision(ctx, ds, cr)
-			if err != nil {
-				return "", err
-			}
-			cr, ref = adopted, metav1.ControllerOf(&adopted.ObjectMeta)
-		}
-		if ref != nil && ref.UID == ds.UID {
-			owned = append(owned, cr)
-		}
-	}
-	sort.Slice(owned, func(i, j int) bool { return owned[i].Revision < owned[j].Revision })
-	var maxRevision int64
-	var cur *appsv1.ControllerRevision
-	for _, cr := range owned {
-		maxRevision = max(maxRevision, cr.Revision)
-		if tpl, err := RevisionTemplate(cr); err == nil && sameTemplate(tpl, &ds.Spec.Template) {
-			cur = cr
-		}
-	}
-	switch {
-	case cur == nil:
-		var collisions int32
-		if ds.Status.CollisionCount != nil {
-			collisions = *ds.Status.CollisionCount
-		}
-		hash := controller.ComputeHashWithCollisions(&ds.Spec.Template, collisions)
-		labels := map[string]string{appsv1.ControllerRevisionHashLabelKey: hash}
-		for k, v := range ds.Spec.Template.Labels {
-			labels[k] = v
-		}
-		annotations := map[string]string{appsv1.DeprecatedTemplateGeneration: ds.Annotations[appsv1.DeprecatedTemplateGeneration]}
-		if cause := ds.Annotations[appsv1.ChangeCauseAnnotation]; cause != "" {
-			annotations[appsv1.ChangeCauseAnnotation] = cause
-		}
-		cr := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: ds.Name + "-" + hash, Namespace: ds.Namespace,
-			Labels: labels, Annotations: annotations, OwnerReferences: []metav1.OwnerReference{metav1.NewControllerRef(ds)}},
-			Data: RevisionData(&ds.Spec.Template), Revision: maxRevision + 1}
-		created, err := revisions.Create(ctx, cr)
-		if client.IsAlreadyExists(err) {
-			// The name is taken by another template: count a collision so
-			// the next attempt hashes differently, as Kubernetes does.
-			cp := deepcopy.Copy(ds)
-			cp.Status.CollisionCount = ptr.To(collisions + 1)
-			if _, err := client.DaemonSets(dc.client, ds.Namespace).UpdateStatus(ctx, cp); err != nil && !client.IsConflict(err) {
-				return "", err
-			}
-			return "", fmt.Errorf("controller revision %s exists with another template; collision count raised", cr.Name)
-		}
-		if err != nil {
-			return "", err
-		}
-		cur = created
-		owned = append(owned, created)
-	case cur.Revision < maxRevision:
-		cp := deepcopy.Copy(cur)
-		cp.Revision = maxRevision + 1
-		updated, err := revisions.Update(ctx, cp)
-		if err != nil {
-			return "", err
-		}
-		cur = updated
-	}
-	hash := cur.Labels[appsv1.ControllerRevisionHashLabelKey]
-	return hash, dc.cleanupHistory(ctx, ds, owned, hash)
-}
-
-// adoptRevision makes the DaemonSet the controller of an orphaned
-// revision of it.
-func (dc *Controller) adoptRevision(ctx context.Context, ds *appsv1.DaemonSet, cr *appsv1.ControllerRevision) (*appsv1.ControllerRevision, error) {
-	refs := append(append([]metav1.OwnerReference{}, cr.OwnerReferences...), metav1.NewControllerRef(ds))
-	return client.ControllerRevisions(dc.client, cr.Namespace).Patch(ctx, cr.Name, map[string]any{"metadata": map[string]any{
-		"resourceVersion": cr.ResourceVersion, "ownerReferences": refs}})
-}
-
-// cleanupHistory deletes the oldest revisions beyond the limit that are
-// neither current nor used by a live Pod.
-func (dc *Controller) cleanupHistory(ctx context.Context, ds *appsv1.DaemonSet, owned []*appsv1.ControllerRevision, hash string) error {
-	limit := int(*ds.Spec.RevisionHistoryLimit)
-	used := map[string]bool{hash: true}
+	used := map[string]bool{}
 	for _, p := range dc.pods.List(ds.Namespace, nil) {
 		if ref := metav1.ControllerOf(&p.ObjectMeta); ref != nil && ref.UID == ds.UID {
 			used[p.Labels[appsv1.ControllerRevisionHashLabelKey]] = true
 		}
 	}
-	var unused []*appsv1.ControllerRevision
-	for _, cr := range owned {
-		if !used[cr.Labels[appsv1.ControllerRevisionHashLabelKey]] {
-			unused = append(unused, cr)
-		}
+	annotations := map[string]string{appsv1.DeprecatedTemplateGeneration: ds.Annotations[appsv1.DeprecatedTemplateGeneration]}
+	if cause := ds.Annotations[appsv1.ChangeCauseAnnotation]; cause != "" {
+		annotations[appsv1.ChangeCauseAnnotation] = cause
 	}
-	sort.Slice(unused, func(i, j int) bool { return unused[i].Revision < unused[j].Revision })
-	for len(unused) > limit {
-		err := client.ControllerRevisions(dc.client, ds.Namespace).Delete(ctx, unused[0].Name, nil)
-		if err != nil && !client.IsNotFound(err) {
-			return err
+	cur, _, err := dc.history.Sync(ctx, history.Owner{Object: ds, Selector: ds.Spec.Selector, Template: &ds.Spec.Template,
+		HashLabel: appsv1.ControllerRevisionHashLabelKey, Annotations: annotations, CollisionCount: ds.Status.CollisionCount,
+		Limit: int(*ds.Spec.RevisionHistoryLimit),
+		InUse: func(cr *appsv1.ControllerRevision) bool {
+			return used[cr.Labels[appsv1.ControllerRevisionHashLabelKey]]
+		}})
+	if errors.Is(err, history.ErrCollision) {
+		cp := deepcopy.Copy(ds)
+		cp.Status.CollisionCount = ptr.To(ptr.Deref(ds.Status.CollisionCount, 0) + 1)
+		if _, uerr := client.DaemonSets(dc.client, ds.Namespace).UpdateStatus(ctx, cp); uerr != nil && !client.IsConflict(uerr) {
+			return "", uerr
 		}
-		unused = unused[1:]
+		return "", fmt.Errorf("%w; collision count raised", err)
 	}
-	return nil
+	if err != nil {
+		return "", err
+	}
+	return cur.Labels[appsv1.ControllerRevisionHashLabelKey], nil
 }

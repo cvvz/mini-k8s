@@ -39,8 +39,11 @@ func (a *app) rollout(ctx context.Context, p args) error {
 	if err != nil {
 		return err
 	}
-	if res.Resource == scheme.DaemonSets.Resource {
-		return a.daemonSetRollout(ctx, pos[0], pos[2], p)
+	switch res.Resource {
+	case scheme.DaemonSets.Resource:
+		return a.revisionRollout(ctx, pos[0], a.daemonSetRevisioned(pos[2]), p)
+	case scheme.StatefulSets.Resource:
+		return a.revisionRollout(ctx, pos[0], a.statefulSetRevisioned(pos[2]), p)
 	}
 	if res.Resource != scheme.Deployments.Resource {
 		return fmt.Errorf("rollout is not supported for %s", res.Resource)

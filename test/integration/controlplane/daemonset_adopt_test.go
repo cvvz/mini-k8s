@@ -12,6 +12,7 @@ import (
 	"mini-k8s/pkg/client/record"
 	"mini-k8s/pkg/controller"
 	"mini-k8s/pkg/controller/daemon"
+	"mini-k8s/pkg/controller/history"
 	"mini-k8s/test/integration/framework"
 )
 
@@ -43,7 +44,7 @@ func TestDaemonSetAdoptsOrphansAndResolvesCollisions(t *testing.T) {
 	agent := tpl("agent")
 	hash := controller.ComputeHash(&agent)
 	orphanRev := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "agent-" + hash,
-		Labels: map[string]string{"app": "agent", appsv1.ControllerRevisionHashLabelKey: hash}}, Data: daemon.RevisionData(&agent), Revision: 1}
+		Labels: map[string]string{"app": "agent", appsv1.ControllerRevisionHashLabelKey: hash}}, Data: history.RevisionData(&agent), Revision: 1}
 	if _, err := client.ControllerRevisions(c, "default").Create(ctx, orphanRev); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +62,7 @@ func TestDaemonSetAdoptsOrphansAndResolvesCollisions(t *testing.T) {
 	squatter := tpl("squatter")
 	if _, err := client.ControllerRevisions(c, "default").Create(ctx, &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "victim-" + victimHash, Labels: map[string]string{"app": "squatter"}},
-		Data:       daemon.RevisionData(&squatter), Revision: 1}); err != nil {
+		Data:       history.RevisionData(&squatter), Revision: 1}); err != nil {
 		t.Fatal(err)
 	}
 

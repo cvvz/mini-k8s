@@ -538,13 +538,14 @@ func (a *app) scale(ctx context.Context, p args) error {
 		pos = []string{typ, name}
 	}
 	if len(pos) != 2 {
-		return errors.New("usage: kk scale deployment|replicaset NAME --replicas N")
+		return errors.New("usage: kk scale deployment|replicaset|statefulset NAME --replicas N")
 	}
 	res, err := lookupResource(pos[0])
 	if err != nil {
 		return err
 	}
-	if res.Resource != scheme.Deployments.Resource && res.Resource != scheme.ReplicaSets.Resource {
+	if res.Resource != scheme.Deployments.Resource && res.Resource != scheme.ReplicaSets.Resource &&
+		res.Resource != scheme.StatefulSets.Resource {
 		return fmt.Errorf("scale is not supported for %s", res.Resource)
 	}
 	replicas, err := strconv.Atoi(p.value("replicas", ""))
