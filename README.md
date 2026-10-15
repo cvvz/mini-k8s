@@ -27,8 +27,14 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **Control plane**: event-driven informers and work queues; Deployment and ReplicaSet
   controllers (RollingUpdate with `maxSurge`/`maxUnavailable` or Recreate, revision
   history, rollback, pause/resume, Available/Progressing conditions with a progress
-  deadline); Endpoints controller; garbage collector; namespace controller; scheduler binding through the `binding` subresource, honouring
-  taints and tolerations, and reporting unschedulable Pods with conditions and events.
+  deadline); Endpoints controller; garbage collector; namespace controller.
+- **Scheduler**: a kube-scheduler-style framework. Filter plugins check cordoned nodes,
+  taints, `nodeSelector` and node affinity, resource requests against allocatable, and pod
+  affinity/anti-affinity. Score plugins (with kube-scheduler's weights) prefer the least
+  allocated node, spread a controller's replicas, and follow preferred affinities and
+  PreferNoSchedule taints. Unschedulable Pods get kube-scheduler's messages (`0/3 nodes are
+  available: 2 Insufficient cpu, …`), back off and are retried on cluster events; bindings go
+  through the `binding` subresource.
 - **Node lifecycle**: kubelets renew a Lease in `kube-node-lease`; when one stops, the node
   lifecycle controller marks the node Unknown, taints it `node.kubernetes.io/unreachable`
   and takes its Pods out of Services; the taint-eviction controller evicts Pods once their
@@ -78,7 +84,7 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   hour by an etcd lease); `kk describe` shows an object's events.
 - **kk**: `get` (`-o wide|json|yaml|name`, `-l`, `--field-selector`, `-A`, `-w`),
   `describe`, `apply`/`create` (server-side dry run of the whole batch first), `delete`
-  (`--grace-period`, `--force`, `--cascade`), `logs -f/-p/-c`, `exec`, `scale`, `rollout status|history|undo|pause|resume|restart`, `cordon`/`uncordon`/`drain`/`taint`, `api-resources`,
+  (`--grace-period`, `--force`, `--cascade`), `logs -f/-p/-c`, `exec`, `scale`, `rollout status|history|undo|pause|resume|restart`, `cordon`/`uncordon`/`drain`/`taint`, `label`, `api-resources`,
   `version`, cluster lifecycle and `image load` (copy local images into the nodes).
 
 ```mermaid
@@ -147,7 +153,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | --- | --- | --- |
 | kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation | done |
 | controller-manager | Deployment, ReplicaSet, Endpoints, garbage collector, namespace, node IPAM, node lifecycle and taint-eviction controllers | done, growing |
-| scheduler | Picks a node for each Pod (honouring taints and tolerations) and binds it | done |
+| scheduler | Scheduling framework with filter and score plugins (taints, node affinity, resource fit, pod (anti-)affinity, spreading), backoff queue, binding | done |
 | kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
 | kube-proxy | iptables mode: cluster IPs, node ports, session affinity, masquerading; a static Pod of every node (it runs the iptables tools of its Ubuntu-based image) | done |
@@ -315,6 +321,8 @@ kk get pods -o wide                      # the web Pods now all run on worker-1
 kk uncordon worker-2
 kk taint nodes worker-2 dedicated=demo:NoExecute   # evicts Pods that do not tolerate it
 kk taint nodes worker-2 dedicated-                  # remove it again
+kk label nodes worker-2 disk=ssd         # Pods with nodeSelector disk: ssd now land on worker-2
+kk scale deployment web --replicas 4     # replicas spread: two per worker
 
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # another namespace, exposed by a NodePort Service
@@ -367,7 +375,7 @@ into the nodes), also delete the volumes:
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
 | Node | `v1` | Registered by kubelets with `capacity`/`allocatable` (cpu, memory, pods) and role labels; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` and `spec.taints` (NoSchedule, PreferNoSchedule, NoExecute with `timeAdded`) are honoured by the scheduler and the taint-eviction controller; the control-plane node is tainted `node-role.kubernetes.io/control-plane:NoSchedule`; lost nodes become `Unknown` with the `node.kubernetes.io/unreachable` taints. |
 | Lease | `coordination.k8s.io/v1` | `holderIdentity`, `leaseDurationSeconds`, `renewTime`; each kubelet renews `kube-node-lease/<node>`. |
-| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`); `hostNetwork`; `hostname`, `subdomain`; `dnsPolicy` (ClusterFirst, ClusterFirstWithHostNet, Default, None) and `dnsConfig`; `enableServiceLinks`; `tolerations`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
+| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`); `hostNetwork`; `hostname`, `subdomain`; `dnsPolicy` (ClusterFirst, ClusterFirstWithHostNet, Default, None) and `dnsConfig`; `enableServiceLinks`; `tolerations`; `nodeSelector`; `affinity` (`nodeAffinity`, `podAffinity`, `podAntiAffinity`, required and preferred; `topologyKey`); scheduling accounts for `resources.requests`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
 | Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always), `strategy` (RollingUpdate with `maxSurge`/`maxUnavailable`, 25% each by default, or Recreate), `minReadySeconds`, `revisionHistoryLimit` (10), `paused`, `progressDeadlineSeconds` (600). Each template version runs as a ReplicaSet; annotations `deployment.kubernetes.io/revision` and `kubernetes.io/change-cause`. |
 | ReplicaSet | `apps/v1` | `replicas`, `selector` (immutable), `template`, `minReadySeconds`; usually owned by a Deployment. |
 | Service | `v1` | `type` ClusterIP (default), NodePort or ExternalName (`externalName`); `selector` (optional: without one, write the Endpoints yourself); `ports` (`name`, `port`, `targetPort` number or container port name, `protocol` TCP/UDP, `nodePort` from 30000-32767); `clusterIP` (allocated from `10.96.0.0/12` unless given; `None` for a headless Service; immutable); `publishNotReadyAddresses`; `sessionAffinity` None/ClientIP with `sessionAffinityConfig.clientIP.timeoutSeconds`. `default/kubernetes` (`10.96.0.1`, `443/TCP`) is kept by the API server. |
@@ -397,8 +405,8 @@ still not a cross-resource transaction.
   there are no ServiceAccounts, so the DNS add-on reads the API token from its node.
 - One control-plane node and two workers, fixed in `compose.yaml`; nodes are containers
   sharing the host kernel.
-- No resource-aware scheduling, node selectors or affinity yet (M7b); no PodDisruptionBudgets
-  (evictions always succeed). Heartbeats are faster than Kubernetes' defaults: Leases are
+- No scheduler preemption, priorities or `topologySpreadConstraints` (replicas spread by
+  default); no PodDisruptionBudgets (evictions always succeed). Heartbeats are faster than Kubernetes' defaults: Leases are
   renewed every 2 s and a node is Unknown after 15 s without one.
 - No DaemonSets, Jobs, CronJobs, StatefulSets, HPA, RBAC or control-plane HA.
 
@@ -484,13 +492,15 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M6a | ClusterIP and NodePort Services, Endpoints, iptables kube-proxy, Ingress | ✅ |
 | M6b | Cluster DNS, headless and ExternalName Services, the `kubernetes` Service, Pod DNS configuration and Service environment variables | ✅ |
 | M7a | Node leases and lifecycle, taint-based eviction, eviction API, cordon/drain/taint | ✅ |
-| M7b | Scheduling framework: resource fit, node selectors and affinity, spreading; more workers | planned |
+| M7b | Scheduling framework: resource fit, node selectors and affinity, pod (anti-)affinity, spreading | ✅ |
+| M7c | More workers (`kk cluster up --workers N`) | planned |
 | M8 | ConfigMaps, Secrets, volumes, PVCs | planned |
 | M9 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M7b scheduling framework plan (Chinese)](docs/superpowers/plans/2026-10-15-m7b-scheduling-framework.md)
 - [M7a node lifecycle plan (Chinese)](docs/superpowers/plans/2026-10-15-m7a-node-lifecycle.md)
 - [M6b cluster DNS plan (Chinese)](docs/superpowers/plans/2026-10-15-m6b-cluster-dns.md)
 - [M6a Services, kube-proxy and Ingress plan (Chinese)](docs/superpowers/plans/2026-10-15-m6a-services-kube-proxy-ingress.md)

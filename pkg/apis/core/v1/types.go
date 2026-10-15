@@ -164,6 +164,10 @@ type PodSpec struct {
 	// EnableServiceLinks injects the environment variables of the Services
 	// in the Pod's namespace (default true).
 	EnableServiceLinks *bool `json:"enableServiceLinks,omitempty"`
+	// NodeSelector limits the Pod to nodes with all these labels.
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// Affinity holds node and inter-Pod (anti-)affinity rules.
+	Affinity *Affinity `json:"affinity,omitempty"`
 }
 
 // DNS policies.

@@ -44,6 +44,7 @@ func ValidatePodSpec(path string, spec *corev1.PodSpec) []string {
 		}
 	}
 	errs = append(errs, validateDNS(path, spec)...)
+	errs = append(errs, validateScheduling(path, spec)...)
 	return errs
 }
 

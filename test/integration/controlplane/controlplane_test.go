@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"mini-k8s/pkg/api/resource"
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
@@ -69,6 +70,9 @@ func heartbeat(ctx context.Context, c *client.Client, name string) {
 		if n, err := client.Nodes(c).Get(ctx, name); err == nil {
 			now := metav1.Now()
 			n.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue, LastHeartbeatTime: now, LastTransitionTime: now}}
+			n.Status.Allocatable = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4"),
+				corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourcePods: resource.MustParse("110")}
+			n.Status.Capacity = n.Status.Allocatable
 			_, _ = client.Nodes(c).UpdateStatus(ctx, n)
 		}
 		select {

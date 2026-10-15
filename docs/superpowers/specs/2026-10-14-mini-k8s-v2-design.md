@@ -291,7 +291,8 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M6a ✅ | 网络：ClusterIP 与 NodePort（apiserver 分配）、Endpoints、iptables kube-proxy、Ingress 取代网关（落地记录见 §12.4） |
 | M6b ✅ | 集群 DNS、Headless、ExternalName、`kubernetes` Service、Pod DNS 配置与 Service 环境变量（落地记录见 §12.5） |
 | M7a ✅ | 节点租约与生命周期、污点驱逐、Eviction API、cordon/drain/taint（落地记录见 §12.6） |
-| M7b | 调度框架（资源、nodeSelector/亲和性、打散）、worker 扩展 |
+| M7b ✅ | 调度框架（资源、nodeSelector/亲和性、Pod 亲和/反亲和、打散）（落地记录见 §12.7） |
+| M7c | worker 扩展（`kk cluster up --workers N`） |
 | M8 | ConfigMap、Secret、卷、PVC/PV |
 | M9 | DaemonSet、Job、CronJob、StatefulSet |
 | M10+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
@@ -309,7 +310,7 @@ M1 已实现第 4、5 节的 API 机制，并把全部组件迁到 informer/work
 | 控制面组件与网关由 Compose 直接启动，不在 API 中可见 | M4 控制面自托管 |
 | Service 仍是全局唯一的 HTTP 网关（准入保证），无 ClusterIP | M6a（已替换） |
 | 节点通过 Node status 的 Ready 条件每 5 秒心跳，消费者按 20 秒新鲜度判断就绪；无 Lease、无驱逐 | M7a（已替换） |
-| 调度器只按 Pod 数选最少者，遵守 `spec.unschedulable` | M4 加入污点过滤，M7 调度框架 |
+| 调度器只按 Pod 数选最少者，遵守 `spec.unschedulable` | M4 加入污点过滤，M7b 调度框架（已替换） |
 
 实现中确认的细节：
 
@@ -431,6 +432,21 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
 - **Eviction 与 kk**：`pods/eviction` 子资源即优雅删除（没有 PDB）；`kk drain` 与 kubectl 一样先 cordon、跳过 mirror Pod、
   对没有 controller 或带 emptyDir 的 Pod 要求 `--force`/`--delete-emptydir-data`，逐个驱逐并等待消失。
 
+### 12.7 M7b 落地记录
+
+按[实施计划](../plans/2026-10-15-m7b-scheduling-framework.md)落地，相关 e2e（scheduling、apps、node、network）全部通过。要点：
+
+- **框架**：一轮调度 = 快照（节点 + 已绑定与“假定已绑定”的 Pod）→ 按顺序跑 Filter（某节点首个失败插件的原因计入失败信息）→
+  对可行节点跑 Score 并按 kube-scheduler 默认权重加权 → 取最高分，并列随机。失败信息与 kube-scheduler 的 `FitError` 相同
+  （“数量 原因”整串排序），不实现抢占，因此没有 `preemption:` 后缀。
+- **插件**：NodeUnschedulable（容忍 `node.kubernetes.io/unschedulable` 可放行）、TaintToleration、NodeAffinity（nodeSelector 与
+  required/preferred 节点亲和，`matchFields` 支持 `metadata.name`）、NodeResourcesFit（有效请求含 init 容器，LeastAllocated 打分时
+  未设请求按 100m/200Mi 计）、InterPodAffinity（含已运行 Pod 的反亲和与“组内第一个 Pod”例外）、PodTopologySpread（默认按
+  controller 打散，相当于 SelectorSpread）。
+- **队列**：失败后 1s 起翻倍、上限 10s 退避；节点新增/更新与 Pod 删除时立即重试所有待调度 Pod。
+- **就绪**：调度器不再单独判断节点就绪；kubelet 注册节点时带 `node.kubernetes.io/not-ready:NoSchedule`，节点生命周期控制器在 Ready
+  后移除（与 Kubernetes 相同）。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -534,7 +550,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
 | `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `nodelifecycle`、`tainteviction`） | `pkg/controller` |
-| `pkg/scheduler` | 调度器 | `pkg/scheduler` |
+| `pkg/scheduler`、`pkg/scheduler/framework{,/plugins}` | 调度队列；调度框架（NodeInfo 快照、Filter/Score 接口）与默认插件 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins/<name>}` |
 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars}`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |
 | `pkg/nodeinit` | 节点容器入口：cgroup 委派、containerd 配置与启动 | kind 的节点入口脚本 |

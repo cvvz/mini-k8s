@@ -21,6 +21,7 @@ import (
 	_ "mini-k8s/test/e2e/lifecycle"
 	_ "mini-k8s/test/e2e/network"
 	_ "mini-k8s/test/e2e/node"
+	_ "mini-k8s/test/e2e/scheduling"
 )
 
 func TestE2E(t *testing.T) {

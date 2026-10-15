@@ -53,3 +53,35 @@ func TestAddDefaultTolerations(t *testing.T) {
 		t.Fatalf("tolerating everything needs nothing more: %+v", all.Tolerations)
 	}
 }
+
+func TestMatchesNodeSelector(t *testing.T) {
+	node := &Node{}
+	node.Name = "worker-1"
+	node.Labels = map[string]string{"disk": "ssd", "cores": "8"}
+	req := func(key, op string, values ...string) NodeSelectorRequirement {
+		return NodeSelectorRequirement{Key: key, Operator: op, Values: values}
+	}
+	affinity := func(terms ...NodeSelectorTerm) *PodSpec {
+		return &PodSpec{Affinity: &Affinity{NodeAffinity: &NodeAffinity{Required: &NodeSelector{NodeSelectorTerms: terms}}}}
+	}
+	for name, tc := range map[string]struct {
+		spec *PodSpec
+		want bool
+	}{
+		"no constraints":              {&PodSpec{}, true},
+		"nodeSelector":                {&PodSpec{NodeSelector: map[string]string{"disk": "ssd"}}, true},
+		"nodeSelector misses":         {&PodSpec{NodeSelector: map[string]string{"disk": "hdd"}}, false},
+		"empty value needs the label": {&PodSpec{NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""}}, false},
+		"In":                          {affinity(NodeSelectorTerm{MatchExpressions: []NodeSelectorRequirement{req("disk", "In", "nvme", "ssd")}}), true},
+		"NotIn":                       {affinity(NodeSelectorTerm{MatchExpressions: []NodeSelectorRequirement{req("disk", "NotIn", "ssd")}}), false},
+		"Exists and Gt":               {affinity(NodeSelectorTerm{MatchExpressions: []NodeSelectorRequirement{req("disk", "Exists"), req("cores", "Gt", "4")}}), true},
+		"Lt fails":                    {affinity(NodeSelectorTerm{MatchExpressions: []NodeSelectorRequirement{req("cores", "Lt", "4")}}), false},
+		"DoesNotExist":                {affinity(NodeSelectorTerm{MatchExpressions: []NodeSelectorRequirement{req("gpu", "DoesNotExist")}}), true},
+		"terms are ORed":              {affinity(NodeSelectorTerm{MatchExpressions: []NodeSelectorRequirement{req("gpu", "Exists")}}, NodeSelectorTerm{MatchFields: []NodeSelectorRequirement{req("metadata.name", "In", "worker-1")}}), true},
+		"empty term matches 0":        {affinity(NodeSelectorTerm{}), false},
+	} {
+		if got := MatchesNodeSelector(tc.spec, node); got != tc.want {
+			t.Errorf("%s: got %v", name, got)
+		}
+	}
+}

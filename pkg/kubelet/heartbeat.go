@@ -79,7 +79,9 @@ func (k *Kubelet) syncNodeStatus(ctx context.Context) (*corev1.Node, error) {
 		labels := map[string]string{
 			corev1.LabelHostname: k.cfg.NodeName, corev1.LabelOSStable: "linux", corev1.LabelArchStable: runtime.GOARCH,
 		}
-		var taints []corev1.Taint
+		// Registered not ready, as the kubelet does: the node lifecycle
+		// controller lifts the taint once the node reports Ready.
+		taints := []corev1.Taint{{Key: corev1.TaintNodeNotReady, Effect: corev1.TaintEffectNoSchedule}}
 		if k.cfg.Role != "" {
 			labels[corev1.LabelNodeRolePrefix+k.cfg.Role] = ""
 		}

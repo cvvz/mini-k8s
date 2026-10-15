@@ -233,3 +233,64 @@ func (a *app) taint(ctx context.Context, p args) error {
 	_, err = fmt.Fprintf(a.out, "node/%s %s\n", name, verb)
 	return err
 }
+
+// label implements `kk label TYPE NAME key=value ... | key- ... [--overwrite]`.
+func (a *app) label(ctx context.Context, p args) error {
+	pos := p.positional
+	if len(pos) >= 1 && strings.Contains(pos[0], "/") {
+		typ, name, _ := strings.Cut(pos[0], "/")
+		pos = append([]string{typ, name}, pos[1:]...)
+	}
+	if len(pos) < 3 {
+		return errors.New("usage: kk label TYPE NAME key=value ... | key- ... [--overwrite]")
+	}
+	res, err := lookupResource(pos[0])
+	if err != nil {
+		return err
+	}
+	ns := ""
+	if res.Namespaced {
+		ns = a.namespace
+	}
+	obj, err := a.getObject(ctx, res, ns, pos[1])
+	if err != nil {
+		return err
+	}
+	current := obj.GetObjectMeta().Labels
+	patch := map[string]any{}
+	added := false
+	for _, spec := range pos[2:] {
+		if key, ok := strings.CutSuffix(spec, "-"); ok && !strings.Contains(spec, "=") {
+			if _, has := current[key]; has {
+				patch[key] = nil
+			}
+			continue
+		}
+		key, value, ok := strings.Cut(spec, "=")
+		if !ok || key == "" {
+			return fmt.Errorf("invalid label spec: %s", spec)
+		}
+		if old, has := current[key]; has && old != value && !p.boolean("overwrite", false) {
+			return fmt.Errorf("'%s' already has a value (%s), and --overwrite is false", key, old)
+		}
+		if old, has := current[key]; !has || old != value {
+			patch[key] = value
+			added = true
+		}
+	}
+	verb := "unlabeled"
+	switch {
+	case len(patch) == 0:
+		verb = "not labeled"
+	case added:
+		verb = "labeled"
+	}
+	if len(patch) > 0 {
+		body := map[string]any{"metadata": map[string]any{"labels": patch}}
+		if err := a.client.Do(ctx, http.MethodPatch, res.Path(ns, pos[1]), nil, "application/merge-patch+json", body, nil); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintf(a.out, "%s/%s %s\n", qualifiedName(res), pos[1], verb)
+	return err
+}
