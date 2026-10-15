@@ -135,7 +135,10 @@ func (f *fakeRuntime) Exec(context.Context, *corev1.Pod, string, []string, time.
 	return &corev1.PodExecResult{}, nil
 }
 func (f *fakeRuntime) StopContainer(context.Context, *corev1.Pod, string, int64) error { return nil }
-func (f *fakeRuntime) Version(context.Context) (string, error)                         { return "fake://1", nil }
+func (f *fakeRuntime) ContainerStats(context.Context) ([]kuberuntime.ContainerStats, error) {
+	return []kuberuntime.ContainerStats{{Namespace: "ns", Pod: "p", Container: "c", CPUSeconds: 1.5, MemoryWorkingSet: 1024}}, nil
+}
+func (f *fakeRuntime) Version(context.Context) (string, error) { return "fake://1", nil }
 func (f *fakeRuntime) Status(context.Context, string) kuberuntime.Readiness {
 	return kuberuntime.Readiness{Ready: true}
 }

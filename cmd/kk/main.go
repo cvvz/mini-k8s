@@ -37,13 +37,15 @@ Resources:
   kk create configmap NAME [--from-literal=KEY=VALUE] [--from-file=[KEY=]PATH] ...
   kk create secret generic NAME [--type TYPE] [--from-literal=KEY=VALUE] [--from-file=[KEY=]PATH] ...
   kk create secret tls NAME --cert FILE --key FILE
+  kk create job NAME --image IMAGE [-- COMMAND [ARG...]] | kk create job NAME --from=cronjob/NAME
   kk delete -f FILE | TYPE NAME... | TYPE -l SELECTOR | TYPE --all
             [--grace-period N] [--force] [--cascade background|foreground|orphan] [--wait=false]
   kk logs POD [-c CONTAINER] [-f] [--tail N] [-p]
   kk exec POD [-c CONTAINER] -- COMMAND [ARG...]   run a command to completion (no stdin/tty)
-  kk scale deployment|replicaset NAME --replicas N
-  kk rollout status|history|undo|pause|resume|restart deployment/NAME
-            [--timeout DURATION] [--to-revision N]
+  kk scale deployment|replicaset|statefulset NAME --replicas N
+  kk rollout status|history|undo|pause|resume|restart deployment|daemonset|statefulset/NAME
+            [--timeout DURATION] [--to-revision N] [--revision N]
+  kk top nodes|pods [NAME] [-l SELECTOR] [--containers] [--sort-by cpu|memory]
   kk cordon|uncordon NODE
   kk drain NODE [--force] [--delete-emptydir-data] [--ignore-daemonsets] [--grace-period N] [--timeout D]
   kk taint nodes NODE key[=value]:Effect ... | key[:Effect]- ...   [--overwrite]
@@ -55,8 +57,9 @@ Global flags:
   -n, --namespace NS     namespace (default "default")
   -A, --all-namespaces   list across all namespaces
 
-TYPE accepts kubectl-style names: pods/pod/po, deployments/deploy, replicasets/rs,
-services/svc, nodes/no, namespaces/ns, events/ev, configmaps/cm, secrets. TYPE/NAME is also accepted.
+TYPE accepts kubectl-style names: pods/pod/po, deployments/deploy, replicasets/rs, daemonsets/ds,
+statefulsets/sts, jobs, cronjobs/cj, services/svc, nodes/no, namespaces/ns, events/ev, configmaps/cm,
+secrets, persistentvolumeclaims/pvc. TYPE/NAME is also accepted (see kk api-resources).
 `
 
 func execute(ctx context.Context, argv []string) error {

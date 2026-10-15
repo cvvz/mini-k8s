@@ -60,3 +60,19 @@ func TestQuantityJSON(t *testing.T) {
 		t.Fatal("invalid quantity accepted")
 	}
 }
+
+func TestMetricsQuantities(t *testing.T) {
+	for s, milli := range map[string]int64{"117586291n": 118, "1000000n": 1, "250u": 1, "0n": 0} {
+		if q := MustParse(s); q.MilliValue() != milli {
+			t.Errorf("%s: %d milli, want %d", s, q.MilliValue(), milli)
+		}
+	}
+	if q := NewNanoQuantity(307831245); q.String() != "307831245n" || q.MilliValue() != 308 {
+		t.Errorf("nano: %s %d", q, q.MilliValue())
+	}
+	for bytes, want := range map[int64]string{3059101696: "2987404Ki", 64 << 20: "64Mi", 1000: "1000", 0: "0", 3 << 30: "3Gi"} {
+		if q := NewBinaryQuantity(bytes); q.String() != want || q.Value() != bytes {
+			t.Errorf("%d bytes: %s (%d)", bytes, q, q.Value())
+		}
+	}
+}

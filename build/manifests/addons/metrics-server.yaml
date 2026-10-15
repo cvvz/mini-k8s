@@ -1,0 +1,78 @@
+# The metrics-server add-on, applied by `kk cluster up` (as kubeadm users
+# install metrics-server): `mini metrics-server` scrapes each kubelet's
+# /metrics/resource every 10s (metrics-server's default is 15s) and serves
+# metrics.k8s.io/v1beta1, which the API server proxies to it, for
+# `kk top` and the HorizontalPodAutoscaler. Like the DNS add-on it reads
+# the token from the node; it uses it with kubelets and to check that
+# requests come from the API server.
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-server
+  namespace: kube-system
+  labels:
+    k8s-app: metrics-server
+spec:
+  selector:
+    k8s-app: metrics-server
+  ports:
+  - name: https
+    port: 443
+    targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-server
+  namespace: kube-system
+  labels:
+    k8s-app: metrics-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: metrics-server
+  template:
+    metadata:
+      labels:
+        k8s-app: metrics-server
+    spec:
+      containers:
+      - name: metrics-server
+        image: mini-k8s:local
+        imagePullPolicy: Never
+        command: ["/mini", "metrics-server"]
+        env:
+        - name: MINI_TOKEN_FILE
+          value: /etc/mini-k8s/token
+        - name: MINI_METRIC_RESOLUTION
+          value: 10s
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          periodSeconds: 2
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: http
+          periodSeconds: 10
+          failureThreshold: 5
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            memory: 128Mi
+        volumeMounts:
+        - name: credentials
+          mountPath: /etc/mini-k8s
+          readOnly: true
+      volumes:
+      - name: credentials
+        hostPath:
+          path: /etc/mini-k8s
+          type: Directory

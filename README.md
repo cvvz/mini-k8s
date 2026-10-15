@@ -58,6 +58,9 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   node, visible as mirror Pods in `kube-system`; kube-proxy is a DaemonSet add-on; the
   control-plane node is tainted so workloads stay on the workers; a crashed component is
   restarted by the kubelet.
+- **Resource metrics**: kubelets serve `/metrics/resource` (CPU and memory from CRI and the
+  node's cgroup); the metrics-server add-on scrapes them and serves `metrics.k8s.io/v1beta1`,
+  which the API server proxies like kube-aggregator; `kk top nodes|pods`.
 - **Nodes like kind**: each node is a privileged container running its own containerd;
   the kubelet manages Pods over **CRI** (a sandbox per Pod, then its container);
   Ready only when the runtime, the Pod network and the sandbox image are ready.
@@ -183,7 +186,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation | done |
 | controller-manager | Deployment, ReplicaSet, DaemonSet, StatefulSet, Job, CronJob, TTL-after-finished, Endpoints, garbage collector, namespace, node IPAM, node lifecycle, taint-eviction, Pod garbage collector, PersistentVolume and PVC/PV protection controllers | done, growing |
 | scheduler | Scheduling framework with pre-filter, filter and score plugins (taints, node affinity, resource fit, pod (anti-)affinity, spreading, volume binding), backoff queue, binding (asynchronous while volumes are provisioned) | done |
-| kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder | done |
+| kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder, resource metrics (`/metrics/resource`) | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
 | kube-proxy | iptables mode: cluster IPs, node ports, session affinity, masquerading; a DaemonSet add-on on every node (it runs the iptables tools of its Ubuntu-based image) | done |
 | Ingress controller | networking.k8s.io/v1 Ingress: host and path routing to Service endpoints on `127.0.0.1:18080` (the role ingress-nginx plays in kind); a static Pod of the control-plane node | done |
@@ -193,6 +196,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | `mini-cni` + host-gw route agent | Pod networking: bridge, veth, IP allocation, loopback, cross-node routes, egress masquerading | done |
 | `mini node-init`, pause image | Node container entrypoint (cgroup delegation, containerd configuration and start, then the kubelet); Pod sandbox process | done |
 | cluster DNS | `mini cluster-dns`: Service, headless, SRV, ExternalName and Pod records, forwarding of other names (its own DNS message codec); runs as the `kube-dns` add-on, the role CoreDNS plays | done |
+| metrics-server | `mini metrics-server`: scrapes every kubelet's resource metrics and serves the metrics.k8s.io API (CPU rates, memory working sets) that the API server proxies to it; runs as the `metrics-server` add-on, as sigs.k8s.io/metrics-server does | done |
 | local-path provisioner | `mini local-path-provisioner`: node-local hostPath volumes for the default StorageClass, deleted through helper Pods; runs as the `local-path-storage` add-on, the role rancher's local-path-provisioner plays in kind | done |
 
 **Open-source components used as-is**:
@@ -388,6 +392,8 @@ kk apply -f examples/statefulset.yaml    # kv-0 then kv-1, each with its own cla
 kk rollout status statefulset/kv
 kk exec kv-0 -- /mini lookup kv-1.kv     # stable DNS names under the headless Service
 kk scale statefulset kv --replicas 1     # kv-1 goes; its claim data-kv-1 stays for later
+kk top nodes                             # usage from metrics-server, refreshed every 10s
+kk top pods -A --sort-by cpu
 
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # another namespace, exposed by a NodePort Service
@@ -478,7 +484,8 @@ still not a cross-resource transaction.
 - No scheduler preemption, priorities or `topologySpreadConstraints` (replicas spread by
   default); no PodDisruptionBudgets (evictions always succeed). Heartbeats are faster than Kubernetes' defaults: Leases are
   renewed every 2 s and a node is Unknown after 15 s without one.
-- No HPA, RBAC or control-plane HA. Jobs have no `podFailurePolicy`, `successPolicy` or
+- No HPA (M10b), RBAC or control-plane HA; the metrics pipeline has only resource metrics (no
+  custom or external metrics APIs). Jobs have no `podFailurePolicy`, `successPolicy` or
   per-index backoff, and are tracked without the job-tracking finalizer. StatefulSets have no
   `maxUnavailable` (alpha in Kubernetes).
 
@@ -571,10 +578,12 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M9a | DaemonSets and ControllerRevisions, kube-proxy as a DaemonSet | ✅ |
 | M9b | Jobs and CronJobs, TTL after finished, `kk create job` | ✅ |
 | M9c | StatefulSets with claim templates and retention policies, shared revision history | ✅ |
+| M10a | Resource metrics: kubelet `/metrics/resource`, metrics-server, the metrics.k8s.io API, `kk top` | ✅ |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M10a metrics plan (Chinese)](docs/superpowers/plans/2026-10-15-m10a-metrics.md)
 - [M9c StatefulSet plan (Chinese)](docs/superpowers/plans/2026-10-15-m9c-statefulset.md)
 - [M9b Job and CronJob plan (Chinese)](docs/superpowers/plans/2026-10-15-m9b-job-cronjob.md)
 - [M9a DaemonSet plan (Chinese)](docs/superpowers/plans/2026-10-15-m9a-daemonset.md)

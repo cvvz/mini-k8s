@@ -298,7 +298,11 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M9a ✅ | DaemonSet 与 ControllerRevision、kube-proxy 改为 DaemonSet 插件（落地记录见 §12.11） |
 | M9b ✅ | Job、CronJob、TTL-after-finished（落地记录见 §12.12） |
 | M9c ✅ | StatefulSet（volumeClaimTemplates、PVC 保留策略），修订历史抽成共享包（落地记录见 §12.13） |
-| M10+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
+| M10a ✅ | 资源指标：kubelet `/metrics/resource`、metrics-server 插件、metrics.k8s.io 聚合代理、`kk top`（落地记录见 §12.14） |
+| M10b | HPA（autoscaling/v2）、scale 子资源、`kk autoscale` |
+| M10c | Leader Election（controller-manager、scheduler） |
+| M10d | RBAC 简化版 |
+| 之后 | 补充复杂场景 e2e、提速 e2e 框架、full e2e 集中修复 |
 
 ### 12.1 M1 落地记录与过渡态
 
@@ -582,6 +586,25 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
 - **其他**：新增 `pkg/util/equality.Semantic`，按 JSON 编码比较，nil 与空集合视为相等，用于 StatefulSet 与 Job 的不可变字段校验
   （`deepcopy` 走 JSON 往返，会把 nil map 变成空 map）。`ptr.Deref`。
 
+### 12.14 M10a 落地记录
+
+按[实施计划](../plans/2026-10-15-m10a-metrics.md)落地，输出格式以 AKS 实测为准，`[sig-instrumentation] Metrics` e2e 全部通过。要点：
+
+- **kubelet**：`GET /metrics/resource` 输出 Prometheus 文本。容器取自 CRI（只取运行中的容器），节点取自节点容器的 cgroup v2
+  （`usage_usec`；`memory.current - inactive_file`）。获取失败时输出 `resource_scrape_error 1`。
+- **metrics-server**：`pkg/metricsserver`，以插件 `build/manifests/addons/metrics-server.yaml` 部署，分辨率 10s。
+  - 用上一次与最近一次采样计算速率；某 Pod 的每个容器都有两次采样才返回该 Pod。
+  - 不存在的对象返回 `node "x" not found` / `pods "x" not found`；有对象但还没有数据时返回 `nodes.metrics.k8s.io "x" not found`。
+  - 请求须带集群 token（API Server 代理时附上自己的 token）。
+- **API Server**：
+  - 内置一个固定的"APIService"：`metrics.k8s.io/v1beta1` → `kube-system/metrics-server`（kube-aggregator 的简化）。
+  - 只读；没有就绪端点或连接失败时返回 503 `the server is currently unable to handle the request`。
+  - 新增 `nodes/{name}/proxy/...`。
+- **kk**：`top nodes|pods`（列、取整、`--containers`、`-A`、`--sort-by`、错误文案与 kubectl 相同）；`api-resources` 先列出可用组，
+  再报告不可用的组。用法说明补上了 `create job`、StatefulSet 的 scale/rollout 与 `top`。
+- **API 小改**：`resource.Quantity` 支持 `n`、`u` 后缀，新增 `NewNanoQuantity`、`NewBinaryQuantity`；新增 `metav1.Duration`。
+- **工具**：`mini spin [DURATION]` 占满一个 CPU，供 e2e 与后续 HPA 使用。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -676,7 +699,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | --- | --- | --- |
 | `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`node-init`（含 kubelet）、`kube-proxy`、`ingress-controller`、`cluster-dns`、`demo`，以及 `fetch`/`lookup` 等测试工具 | `cmd/kube-*`（及早期的 `hyperkube`） |
 | `cmd/kk` | 命令行客户端与集群生命周期（含 worker 扩缩） | `kubectl`、`kind` |
-| `pkg/apis/{meta,core,apps,batch,networking,coordination,storage}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`batchv1`、`networkingv1`、`coordinationv1`、`storagev1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
+| `pkg/apis/{meta,core,apps,batch,networking,coordination,storage}/v1`、`pkg/apis/metrics/v1beta1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`batchv1`、`networkingv1`、`coordinationv1`、`storagev1`、`metricsv1beta1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1`、`k8s.io/metrics` |
 | `pkg/apis/{core,apps,batch,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
 | `pkg/labels`、`pkg/fields`、`pkg/watch` | 选择器与 watch 事件类型 | `apimachinery/pkg/{labels,fields,watch}` |
 | `pkg/scheme` | 资源注册表（REST 坐标、Kind、构造函数） | `runtime.Scheme`、`RESTMapper` |
@@ -686,11 +709,12 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
 | `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `daemon`、`statefulset`、`history`（ControllerRevision 管理）、`job`、`cronjob`、`ttlafterfinished`、`nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins}` | 调度队列；调度框架（NodeInfo 快照、Filter/Score 接口）与默认插件 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins/<name>}` |
-| `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars}`；node-local-dns |
+| `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars,metrics}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`、容器统计）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量；`/metrics/resource` | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars,metrics/collectors}`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |
 | `pkg/nodeinit` | 节点容器入口：cgroup 委派、containerd 配置与启动 | kind 的节点入口脚本 |
 | `pkg/proxy/iptables` | kube-proxy 的 iptables 模式 | `pkg/proxy/iptables` |
 | `pkg/ingress` | Ingress 控制器（取代 M6 之前的单 Service 网关） | 无直接对应（ingress-nginx 等外部项目） |
+| `pkg/metricsserver` | metrics-server：抓取 kubelet、速率计算、metrics.k8s.io API | 无直接对应（sigs.k8s.io/metrics-server） |
 | `pkg/dns` | 集群 DNS 服务器（报文编解码、kubernetes 记录、上游转发） | 无直接对应（CoreDNS 及其 kubernetes 插件） |
 | `pkg/fieldpath` | downward API：Pod 字段路径与容器资源取值 | `pkg/fieldpath`、`pkg/api/v1/resource` |
 | `pkg/volume` | configMap/secret/downwardAPI/projected 卷的内容与原子写入器；`localpath` 为 local-path 动态供给器 | `pkg/volume/util`（AtomicWriter）与各卷插件；kind 使用的 rancher local-path-provisioner |

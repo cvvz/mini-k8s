@@ -70,6 +70,8 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 		return a.exec(ctx, p)
 	case "scale":
 		return a.scale(ctx, p)
+	case "top":
+		return a.top(ctx, p)
 	case "rollout":
 		return a.rollout(ctx, p)
 	case "cordon", "uncordon":
@@ -577,6 +579,7 @@ func (a *app) apiResources(ctx context.Context) error {
 	}
 	tw := newTabWriter(a.out)
 	fmt.Fprintln(tw, "NAME\tSHORTNAMES\tAPIVERSION\tNAMESPACED\tKIND")
+	var failed []string
 	for _, path := range paths {
 		var list struct {
 			GroupVersion string `json:"groupVersion"`
@@ -588,7 +591,10 @@ func (a *app) apiResources(ctx context.Context) error {
 			} `json:"resources"`
 		}
 		if err := a.client.Do(ctx, http.MethodGet, path, nil, "", nil, &list); err != nil {
-			return err
+			// Like kubectl: an unavailable aggregated group is reported
+			// after the others.
+			failed = append(failed, strings.TrimPrefix(strings.TrimPrefix(path, "/apis/"), "/api/")+": "+errorMessage(err))
+			continue
 		}
 		for _, r := range list.Resources {
 			if strings.Contains(r.Name, "/") {
@@ -597,7 +603,22 @@ func (a *app) apiResources(ctx context.Context) error {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\n", r.Name, strings.Join(r.ShortNames, ","), list.GroupVersion, r.Namespaced, r.Kind)
 		}
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("unable to retrieve the complete list of server APIs: %s", strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+// errorMessage is the message of an API error, or the error itself.
+func errorMessage(err error) string {
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && apiErr.Status.Message != "" {
+		return apiErr.Status.Message
+	}
+	return err.Error()
 }
 
 func (a *app) version(ctx context.Context) error {

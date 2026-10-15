@@ -43,6 +43,7 @@ var commandFlags = map[string][]flagSpec{
 	"exec":     {{long: "container", short: "c", takesValue: true}},
 	"scale":    {{long: "replicas", takesValue: true}},
 	"rollout":  {{long: "to-revision", takesValue: true}, {long: "timeout", takesValue: true}, {long: "revision", takesValue: true}},
+	"top":      {{long: "selector", short: "l", takesValue: true}, {long: "containers"}, {long: "sort-by", takesValue: true}},
 	"cordon":   {},
 	"uncordon": {},
 	"drain": {{long: "force"}, {long: "delete-emptydir-data"}, {long: "ignore-daemonsets"},

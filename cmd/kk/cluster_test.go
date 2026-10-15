@@ -432,8 +432,10 @@ func TestClusterUpAppliesTheAddons(t *testing.T) {
 	if err != nil || svc.Spec.ClusterIP != "10.96.0.10" {
 		t.Fatalf("kube-dns Service: %v %+v", err, svc)
 	}
-	if _, err := client.Deployments(c.client, "kube-system").Get(ctx, "kube-dns"); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"kube-dns", "metrics-server"} {
+		if _, err := client.Deployments(c.client, "kube-system").Get(ctx, name); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if !strings.Contains(out.String(), "deployment.apps/kube-dns unchanged") {
 		t.Fatalf("re-applying changes nothing:\n%s", out.String())

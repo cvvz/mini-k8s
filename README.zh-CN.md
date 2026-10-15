@@ -42,6 +42,8 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
 - **像 kubeadm 一样自托管**：etcd、kube-apiserver、kube-controller-manager、kube-scheduler 与
   Ingress 控制器都是 `control-plane` 节点上的 **static Pod**，以 mirror Pod 的形式出现在 `kube-system` 中；
   kube-proxy 是 DaemonSet 插件；control-plane 节点带污点，业务 Pod 只调度到 worker；组件崩溃后由 kubelet 重启。
+- **资源指标**：kubelet 提供 `/metrics/resource`（CPU 与内存取自 CRI 与节点 cgroup）；metrics-server 插件抓取后
+  提供 `metrics.k8s.io/v1beta1`，由 API Server 像 kube-aggregator 一样代理；`kk top nodes|pods`。
 - **kind 式节点**：每个节点是一个运行自己 containerd 的特权容器；kubelet 通过 **CRI**
   管理 Pod（每个 Pod 先建沙箱，再建容器）；只有运行时、Pod 网络和沙箱镜像都就绪时节点才 Ready。
   `kk cluster up --workers N` 运行 1 到 10 个 worker；被移除的 worker 先 drain。
@@ -145,7 +147,7 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 | kube-apiserver | K8s 风格 REST、Watch、准入与校验、删除语义、子资源、ClusterIP 与 NodePort 分配 | 已实现 |
 | controller-manager | Deployment、ReplicaSet、DaemonSet、StatefulSet、Job、CronJob、TTL-after-finished、Endpoints、垃圾回收、Namespace、node IPAM、节点生命周期、污点驱逐、Pod 垃圾回收、PersistentVolume 与 PVC/PV 保护控制器 | 已实现，持续扩展 |
 | scheduler | 调度框架：PreFilter、Filter 与 Score 插件（污点、节点亲和、资源适配、Pod 亲和/反亲和、打散、卷绑定）、退避队列、binding 绑定（供给卷期间异步完成） | 已实现 |
-| kubelet | 节点注册与心跳、static Pod 与 mirror Pod、基于 CRI 的 Pod 生命周期（客户端一侧，`pkg/kubelet/kuberuntime`）、探针、状态上报、优雅终止、日志、CNI 配置、节点本地 DNS 转发 | 已实现 |
+| kubelet | 节点注册与心跳、static Pod 与 mirror Pod、基于 CRI 的 Pod 生命周期（客户端一侧，`pkg/kubelet/kuberuntime`）、探针、状态上报、优雅终止、日志、CNI 配置、节点本地 DNS 转发、资源指标（`/metrics/resource`） | 已实现 |
 | 客户端库 | 泛型 REST 客户端、Informer、WorkQueue、Event 记录器 | 已实现 |
 | kube-proxy | iptables 模式：ClusterIP、NodePort、会话亲和、地址伪装；作为 DaemonSet 插件运行在每个节点上（使用其 Ubuntu 镜像中的 iptables 工具） | 已实现 |
 | Ingress 控制器 | networking.k8s.io/v1 Ingress：在 `127.0.0.1:18080` 按 host 与 path 转发到 Service 的端点（相当于 kind 中 ingress-nginx 的角色）；作为 control-plane 节点的 static Pod 运行 | 已实现 |
@@ -155,6 +157,7 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 | `mini-cni` + host-gw 路由代理 | Pod 网络：网桥、veth、IP 分配、loopback、跨节点路由、出网地址伪装 | 已实现 |
 | `mini node-init`、pause 镜像 | 节点容器的入口（cgroup 委派、生成 containerd 配置并启动，再运行 kubelet）；Pod 沙箱进程 | 已实现 |
 | 集群 DNS | `mini cluster-dns`：Service、headless、SRV、ExternalName 与 Pod 记录，其余名字转发上游（自写 DNS 报文编解码）；以 `kube-dns` 插件运行，相当于 CoreDNS 的角色 | 已实现 |
+| metrics-server | `mini metrics-server`：抓取各 kubelet 的资源指标，提供 metrics.k8s.io API（CPU 速率、内存 working set），由 API Server 代理；以 `metrics-server` 插件运行，相当于 sigs.k8s.io/metrics-server | 已实现 |
 | local-path 供给器 | `mini local-path-provisioner`：为默认 StorageClass 创建节点本地的 hostPath 卷，经辅助 Pod 删除；以 `local-path-storage` 插件运行，相当于 kind 中 rancher local-path-provisioner 的角色 | 已实现 |
 
 **直接使用的开源组件**：
@@ -340,6 +343,8 @@ kk apply -f examples/statefulset.yaml    # 先 kv-0 后 kv-1，各有自己的 P
 kk rollout status statefulset/kv
 kk exec kv-0 -- /mini lookup kv-1.kv     # headless Service 下稳定的 DNS 名
 kk scale statefulset kv --replicas 1     # kv-1 被删除，PVC data-kv-1 保留以便再次扩容时复用
+kk top nodes                             # 来自 metrics-server 的用量，每 10 秒刷新
+kk top pods -A --sort-by cpu
 
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # 在另一个命名空间部署，用 NodePort Service 暴露
@@ -419,7 +424,7 @@ kk image load my-app:v1
 - 调度器没有抢占、优先级与 `topologySpreadConstraints`（副本默认打散）；没有 PodDisruptionBudget（驱逐总是成功）。心跳比 Kubernetes
   默认值快：每 2 秒续约 Lease，15 秒没有续约的节点即为 Unknown。
 - 一个 control-plane 节点（无高可用），最多 10 个 worker；节点是共享宿主机内核的容器。e2e 套件要求默认的两个 worker。
-- 没有 HPA、RBAC 和控制面高可用。Job 不支持 `podFailurePolicy`、`successPolicy` 与按索引退避，且不使用
+- 没有 HPA（M10b）、RBAC 和控制面高可用；指标管道只有资源指标（没有 custom/external metrics API）。Job 不支持 `podFailurePolicy`、`successPolicy` 与按索引退避，且不使用
   job-tracking finalizer 跟踪 Pod。StatefulSet 不支持 `maxUnavailable`（Kubernetes 中为 alpha）。
 
 ## 开发与测试
@@ -507,10 +512,12 @@ unset MINI_TOKEN
 | M9a | DaemonSet 与 ControllerRevision、kube-proxy 改为 DaemonSet | ✅ |
 | M9b | Job 与 CronJob、完成后 TTL 清理、`kk create job` | ✅ |
 | M9c | StatefulSet（卷模板与保留策略）、共享的修订历史 | ✅ |
+| M10a | 资源指标：kubelet `/metrics/resource`、metrics-server、metrics.k8s.io API、`kk top` | ✅ |
 
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M10a 资源指标计划](docs/superpowers/plans/2026-10-15-m10a-metrics.md)
 - [M9c StatefulSet 计划](docs/superpowers/plans/2026-10-15-m9c-statefulset.md)
 - [M9b Job 与 CronJob 计划](docs/superpowers/plans/2026-10-15-m9b-job-cronjob.md)
 - [M9a DaemonSet 计划](docs/superpowers/plans/2026-10-15-m9a-daemonset.md)
