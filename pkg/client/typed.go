@@ -14,6 +14,7 @@ import (
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	networkingv1 "mini-k8s/pkg/apis/networking/v1"
+	rbacv1 "mini-k8s/pkg/apis/rbac/v1"
 	storagev1 "mini-k8s/pkg/apis/storage/v1"
 	"mini-k8s/pkg/scheme"
 	"mini-k8s/pkg/watch"
@@ -86,6 +87,31 @@ func StatefulSets(c *Client, ns string) Resource[appsv1.StatefulSet, *appsv1.Sta
 // ControllerRevisions returns a ControllerRevision client.
 func ControllerRevisions(c *Client, ns string) Resource[appsv1.ControllerRevision, *appsv1.ControllerRevision] {
 	return For[appsv1.ControllerRevision](c, scheme.ControllerRevisions, ns)
+}
+
+// ServiceAccounts returns a ServiceAccount client.
+func ServiceAccounts(c *Client, ns string) Resource[corev1.ServiceAccount, *corev1.ServiceAccount] {
+	return For[corev1.ServiceAccount](c, scheme.ServiceAccounts, ns)
+}
+
+// Roles returns a Role client.
+func Roles(c *Client, ns string) Resource[rbacv1.Role, *rbacv1.Role] {
+	return For[rbacv1.Role](c, scheme.Roles, ns)
+}
+
+// RoleBindings returns a RoleBinding client.
+func RoleBindings(c *Client, ns string) Resource[rbacv1.RoleBinding, *rbacv1.RoleBinding] {
+	return For[rbacv1.RoleBinding](c, scheme.RoleBindings, ns)
+}
+
+// ClusterRoles returns a ClusterRole client.
+func ClusterRoles(c *Client) Resource[rbacv1.ClusterRole, *rbacv1.ClusterRole] {
+	return For[rbacv1.ClusterRole](c, scheme.ClusterRoles, "")
+}
+
+// ClusterRoleBindings returns a ClusterRoleBinding client.
+func ClusterRoleBindings(c *Client) Resource[rbacv1.ClusterRoleBinding, *rbacv1.ClusterRoleBinding] {
+	return For[rbacv1.ClusterRoleBinding](c, scheme.ClusterRoleBindings, "")
 }
 
 // HorizontalPodAutoscalers returns a HorizontalPodAutoscaler client.

@@ -165,6 +165,16 @@ type VolumeProjection struct {
 	ConfigMap   *ConfigMapProjection   `json:"configMap,omitempty"`
 	Secret      *SecretProjection      `json:"secret,omitempty"`
 	DownwardAPI *DownwardAPIProjection `json:"downwardAPI,omitempty"`
+	// ServiceAccountToken projects a token of the Pod's service account,
+	// requested by the kubelet and renewed before it expires.
+	ServiceAccountToken *ServiceAccountTokenProjection `json:"serviceAccountToken,omitempty"`
+}
+
+// ServiceAccountTokenProjection is a service account token file.
+type ServiceAccountTokenProjection struct {
+	Audience          string `json:"audience,omitempty"`
+	ExpirationSeconds *int64 `json:"expirationSeconds,omitempty"`
+	Path              string `json:"path"`
 }
 
 // ConfigMapProjection projects a ConfigMap.

@@ -15,6 +15,7 @@ import (
 	"mini-k8s/pkg/kubelet"
 	"mini-k8s/pkg/kubelet/dns"
 	"mini-k8s/pkg/kubelet/kuberuntime"
+	tokenmanager "mini-k8s/pkg/kubelet/token"
 	"mini-k8s/pkg/network"
 	"mini-k8s/pkg/network/hostgw"
 	"mini-k8s/pkg/nodeinit"
@@ -72,6 +73,7 @@ func runKubelet(ctx context.Context, c *client.Client, token string) {
 	rt.Probes = k.Probes()
 	rt.Env = k.ServiceEnv
 	rt.Objects, rt.Claims, rt.NodeIP, rt.Allocatable, rt.Recorder = k, k, address, kubelet.NodeCapacity("/proc/meminfo"), rec
+	rt.Tokens = tokenmanager.NewManager(c)
 	go rec.Run(ctx)
 	go k.Run(ctx)
 	serve(ctx, ":10250", k.Handler())

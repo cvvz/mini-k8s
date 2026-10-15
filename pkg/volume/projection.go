@@ -13,10 +13,17 @@ type ObjectSource interface {
 	Secret(namespace, name string) (*corev1.Secret, bool)
 }
 
+// TokenSource issues the service account tokens of projected volumes.
+type TokenSource interface {
+	ServiceAccountToken(pod *corev1.Pod, audience string, expirationSeconds int64) (string, error)
+}
+
 // Source carries what payloads are built from.
 type Source struct {
 	Pod     *corev1.Pod
 	Objects ObjectSource
+	// Tokens issues serviceAccountToken projections.
+	Tokens TokenSource
 	// Allocatable stands in for unset limits in resourceFieldRef values.
 	Allocatable corev1.ResourceList
 }
@@ -142,6 +149,22 @@ func (s Source) Payload(v corev1.VolumeSource) (payload map[string]FileProjectio
 	return payload, true, err
 }
 
+// tokenPayload is a token of the Pod's service account.
+func (s Source) tokenPayload(t *corev1.ServiceAccountTokenProjection, mode int32) (map[string]FileProjection, error) {
+	if s.Tokens == nil {
+		return nil, fmt.Errorf("service account tokens are not available")
+	}
+	expiration := int64(3600)
+	if t.ExpirationSeconds != nil {
+		expiration = *t.ExpirationSeconds
+	}
+	token, err := s.Tokens.ServiceAccountToken(s.Pod, t.Audience, expiration)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]FileProjection{t.Path: {Data: []byte(token), Mode: mode}}, nil
+}
+
 // projectedPayload merges the files of every source.
 func (s Source) projectedPayload(p *corev1.ProjectedVolumeSource) (map[string]FileProjection, error) {
 	mode := modeOr(p.DefaultMode, corev1.ProjectedDefaultMode)
@@ -156,6 +179,8 @@ func (s Source) projectedPayload(p *corev1.ProjectedVolumeSource) (map[string]Fi
 			part, err = s.secretPayload(src.Secret.Name, src.Secret.Items, mode, isTrue(src.Secret.Optional))
 		case src.DownwardAPI != nil:
 			part, err = s.downwardAPIPayload(src.DownwardAPI.Items, mode)
+		case src.ServiceAccountToken != nil:
+			part, err = s.tokenPayload(src.ServiceAccountToken, mode)
 		}
 		if err != nil {
 			return nil, err

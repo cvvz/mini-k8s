@@ -168,6 +168,12 @@ type PodSpec struct {
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 	// Affinity holds node and inter-Pod (anti-)affinity rules.
 	Affinity *Affinity `json:"affinity,omitempty"`
+	// ServiceAccountName is the Pod's identity (default "default");
+	// ServiceAccount is its deprecated alias.
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+	ServiceAccount     string `json:"serviceAccount,omitempty"`
+	// AutomountServiceAccountToken false keeps the token volume out.
+	AutomountServiceAccountToken *bool `json:"automountServiceAccountToken,omitempty"`
 }
 
 // DNS policies.

@@ -24,6 +24,7 @@ import (
 	"mini-k8s/pkg/registry/core/secret"
 	"mini-k8s/pkg/registry/core/service"
 	"mini-k8s/pkg/registry/networking/ingress"
+	"mini-k8s/pkg/registry/rbac"
 	"mini-k8s/pkg/registry/storage/storageclass"
 	"mini-k8s/pkg/scheme"
 	"mini-k8s/pkg/storage/etcd3"
@@ -69,6 +70,11 @@ func New(store *etcd3.Store, prefix string) *Registry {
 			scheme.Jobs.Resource:                     job.Strategy,
 			scheme.CronJobs.Resource:                 cronjob.Strategy,
 			scheme.Ingresses.Resource:                ingress.Strategy,
+			scheme.ServiceAccounts.Resource:          apiserver.Strategy{},
+			scheme.Roles.Resource:                    rbac.RoleStrategy,
+			scheme.RoleBindings.Resource:             rbac.RoleBindingStrategy,
+			scheme.ClusterRoles.Resource:             rbac.ClusterRoleStrategy,
+			scheme.ClusterRoleBindings.Resource:      rbac.ClusterRoleBindingStrategy,
 			scheme.Leases.Resource:                   lease.Strategy,
 		},
 		ServiceAllocators: allocators,

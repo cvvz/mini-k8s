@@ -67,6 +67,11 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   (`kk scale` uses it); autoscaling/v2 HorizontalPodAutoscalers on CPU or memory (utilization
   of requests or average value, per Pod or per container) with Kubernetes' replica calculation,
   stabilization windows and scaling policies; `kk autoscale`.
+- **Identity and RBAC**: ServiceAccounts (a `default` one per namespace) whose bound tokens
+  (JWTs from the TokenRequest API) the kubelet projects into Pods and renews; Roles,
+  ClusterRoles and their bindings authorize every request, with Kubernetes' default
+  cluster-admin/admin/edit/view roles and Forbidden messages; impersonation (`--as`),
+  `kk auth can-i|whoami`, `kk create serviceaccount|token|role|rolebinding|...`.
 - **Nodes like kind**: each node is a privileged container running its own containerd;
   the kubelet manages Pods over **CRI** (a sandbox per Pod, then its container);
   Ready only when the runtime, the Pod network and the sandbox image are ready.
@@ -189,7 +194,7 @@ container runtime) uses those open-source components as-is, configured but not m
 
 | Component | Responsibility | Status |
 | --- | --- | --- |
-| kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation | done |
+| kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation, authentication (cluster token, service account JWTs, impersonation) and RBAC authorization | done |
 | controller-manager | Deployment, ReplicaSet, DaemonSet, StatefulSet, HorizontalPodAutoscaler, Job, CronJob, TTL-after-finished, Endpoints, garbage collector, namespace, node IPAM, node lifecycle, taint-eviction, Pod garbage collector, PersistentVolume and PVC/PV protection controllers | done, growing |
 | scheduler | Scheduling framework with pre-filter, filter and score plugins (taints, node affinity, resource fit, pod (anti-)affinity, spreading, volume binding), backoff queue, binding (asynchronous while volumes are provisioned) | done |
 | kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder, resource metrics (`/metrics/resource`) | done |
@@ -255,7 +260,8 @@ same etcd data (see step 5 to reset). The host build architecture must match the
 container architecture.
 
 > **Trusted local use only.** Node containers are privileged, which grants them extensive
-> control over the Docker host. The API uses a shared bearer token, without TLS or RBAC.
+> control over the Docker host. The API is plain HTTP (no TLS); `kk` and the components use a
+> shared admin token, while Pods get RBAC-checked service account tokens.
 > Do not expose it or run untrusted workloads.
 
 ## Quick start
@@ -401,6 +407,10 @@ kk scale statefulset kv --replicas 1     # kv-1 goes; its claim data-kv-1 stays 
 kk top nodes                             # usage from metrics-server, refreshed every 10s
 kk top pods -A --sort-by cpu
 kk autoscale deployment web --min 2 --max 5 --cpu-percent 50   # a HorizontalPodAutoscaler
+kk auth can-i list pods --as system:serviceaccount:default:default   # no
+kk create rolebinding view --clusterrole=view --serviceaccount=default:default
+kk exec POD_NAME -- /mini fetch --token-file /var/run/secrets/kubernetes.io/serviceaccount/token \
+  http://kubernetes.default.svc:443/api/v1/namespaces/default/pods    # 200 with the binding, 403 without
 kk get hpa                               # TARGETS: cpu: 3%/50%
 
 kk create namespace team
@@ -475,7 +485,7 @@ still not a cross-resource transaction.
 
 ## Current limitations (addressed by upcoming milestones)
 
-- No `subPath`, `hostPort`, service accounts or projected service account tokens; no volume
+- No `subPath` or `hostPort`; no volume
   expansion, CSI drivers, block volumes or recycling of volumes. `kk exec` runs a
   command to completion and returns its output; there is no interactive session (stdin/tty),
   unlike Kubernetes' streaming exec.
@@ -485,14 +495,15 @@ still not a cross-resource transaction.
 - No LoadBalancer type, EndpointSlices, `externalTrafficPolicy` or IPv6 (AAAA queries get
   empty answers); the cluster DNS has no cache and no reverse (PTR) records. Node ports are
   reachable from the Linux host at the nodes' addresses (as in kind), not on `127.0.0.1`.
-  The API, the `kubernetes` Service (port 443) and the Ingress controller speak plain HTTP;
-  there are no ServiceAccounts, so the DNS add-on reads the API token from its node.
+  The API, the `kubernetes` Service (port 443) and the Ingress controller speak plain HTTP, so
+  Pods get no `ca.crt`; the add-ons still read the admin token from their node.
 - One control-plane node (no HA) and at most 10 workers; nodes are containers sharing the
   host kernel. The e2e suite expects the default two workers.
 - No scheduler preemption, priorities or `topologySpreadConstraints` (replicas spread by
   default); no PodDisruptionBudgets (evictions always succeed). Heartbeats are faster than Kubernetes' defaults: Leases are
   renewed every 2 s and a node is Unknown after 15 s without one.
-- No RBAC or control-plane HA; the metrics pipeline has only resource metrics, so autoscalers
+- No control-plane HA; RBAC does not prevent privilege escalation through roles and has no
+  aggregated ClusterRoles; the metrics pipeline has only resource metrics, so autoscalers
   take Resource and ContainerResource metrics only (no Pods, Object or External metrics). Jobs have no `podFailurePolicy`, `successPolicy` or
   per-index backoff, and are tracked without the job-tracking finalizer. StatefulSets have no
   `maxUnavailable` (alpha in Kubernetes).
@@ -589,10 +600,12 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M10a | Resource metrics: kubelet `/metrics/resource`, metrics-server, the metrics.k8s.io API, `kk top` | ✅ |
 | M10b | HorizontalPodAutoscalers, the scale subresource, `kk autoscale` | ✅ |
 | M10c | Leader election of kube-controller-manager and kube-scheduler | ✅ |
+| M10d | ServiceAccounts, bound tokens, RBAC, impersonation, `kk auth` | ✅ |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M10d ServiceAccounts and RBAC plan (Chinese)](docs/superpowers/plans/2026-10-15-m10d-rbac.md)
 - [M10c leader election plan (Chinese)](docs/superpowers/plans/2026-10-15-m10c-leader-election.md)
 - [M10b autoscaling plan (Chinese)](docs/superpowers/plans/2026-10-15-m10b-hpa.md)
 - [M10a metrics plan (Chinese)](docs/superpowers/plans/2026-10-15-m10a-metrics.md)

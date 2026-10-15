@@ -417,6 +417,16 @@ func validateProjectedSources(path string, p *corev1.ProjectedVolumeSource) []st
 				claim(f.Path, f.Path)
 			}
 		}
+		if t := s.ServiceAccountToken; t != nil {
+			kinds++
+			if t.Path == "" {
+				errs = append(errs, sp+".serviceAccountToken.path: Required value")
+			}
+			if e := t.ExpirationSeconds; e != nil && *e < 600 {
+				errs = append(errs, fmt.Sprintf("%s.serviceAccountToken.expirationSeconds: Invalid value: %d: may not specify a duration less than 10 minutes", sp, *e))
+			}
+			claim(t.Path, t.Path)
+		}
 		if kinds > 1 {
 			errs = append(errs, sp+": Forbidden: may not specify more than 1 volume type per source")
 		}

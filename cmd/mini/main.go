@@ -43,7 +43,7 @@ var components = map[string]component{
 }
 
 func usage() string {
-	names := []string{"demo", "pause", "fetch URL", "lookup [-t TYPE] NAME", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE", "spin [DURATION]", "env", "ls DIR", "rm PATH..."}
+	names := []string{"demo", "pause", "fetch [--token-file FILE] URL", "lookup [-t TYPE] NAME", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE", "spin [DURATION]", "env", "ls DIR", "rm PATH..."}
 	for name := range components {
 		names = append(names, name)
 	}

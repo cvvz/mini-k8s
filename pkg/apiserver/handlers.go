@@ -135,7 +135,7 @@ func (s *Server) createFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	if m.Name == "" {
 		return nil, errInvalid(res, "", []string{"metadata.name: Required value: name or generateName is required"})
 	}
-	if !validName(m.Name, st.NameIsDNSLabel) {
+	if !validObjectName(st, m.Name) {
 		return nil, errInvalid(res, m.Name, []string{"metadata.name: Invalid value: must be a lowercase RFC 1123 DNS name"})
 	}
 	if res.Namespaced {
@@ -158,6 +158,11 @@ func (s *Server) createFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 	}
 	if st.PrepareForCreate != nil {
 		st.PrepareForCreate(obj)
+	}
+	if pod, ok := obj.(*corev1.Pod); ok {
+		if err := s.admitServiceAccount(ctx, pod); err != nil {
+			return nil, err
+		}
 	}
 	if errs := s.validate(res, st, obj); len(errs) > 0 {
 		return nil, errInvalid(res, m.Name, errs)
@@ -182,6 +187,9 @@ func (s *Server) createFlow(ctx context.Context, info requestInfo, obj metav1.Ob
 			continue
 		}
 		finish(ctx, err == nil)
+		if err == nil && res.Resource == scheme.Namespaces.Resource {
+			s.ensureDefaultServiceAccount(ctx, m.Name)
+		}
 		return created, err
 	}
 }

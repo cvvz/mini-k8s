@@ -301,7 +301,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M10a ✅ | 资源指标：kubelet `/metrics/resource`、metrics-server 插件、metrics.k8s.io 聚合代理、`kk top`（落地记录见 §12.14） |
 | M10b ✅ | HPA（autoscaling/v2）、scale 子资源、`kk autoscale`（落地记录见 §12.15） |
 | M10c ✅ | Leader Election（controller-manager、scheduler，落地记录见 §12.16） |
-| M10d | RBAC 简化版 |
+| M10d ✅ | ServiceAccount、bound token、RBAC 授权、impersonation（落地记录见 §12.17） |
 | 之后 | 补充复杂场景 e2e、提速 e2e 框架、full e2e 集中修复 |
 
 ### 12.1 M1 落地记录与过渡态
@@ -645,6 +645,34 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
   - 收到 SIGTERM 时释放租约，便于立即切换。
   - `MINI_LEADER_ELECT=false` 关闭选主。
 
+### 12.17 M10d 落地记录
+
+按[实施计划](../plans/2026-10-15-m10d-rbac.md)落地，文案以 AKS 实测为准，`[sig-auth]` e2e 与全量 e2e 通过。要点：
+
+- **身份**：
+  - 集群 token 视为 `kubernetes-admin`（system:masters）。
+  - ServiceAccount token 是 HS256 JWT，claims 与 Kubernetes 相同，签名密钥存在 etcd 中；只要 SA 与绑定的 Pod 仍在，token 即有效。
+  - TokenRequest 默认 1 小时（最短 10 分钟），可绑定 Pod。
+  - 支持 impersonation，需要 `impersonate` 权限。
+- **授权**：
+  - 请求属性按 RequestInfoFactory 的规则解析，RBAC 授权器匹配 ClusterRoleBinding 与命名空间内的 RoleBinding；Forbidden 文案与 Kubernetes 相同。
+  - 默认策略包括 cluster-admin/admin/edit/view、discovery、basic-user、public-info-viewer，只在缺失时创建。
+  - RBAC 对象名允许 `:`（Strategy 新增 `NameIsPathSegment`）。
+- **ServiceAccount**：
+  - 创建命名空间时同步创建 default SA，ServiceAccount 控制器兜底。
+  - Pod 准入：校验 SA 存在，注入 `kube-api-access-*` 投射卷（3607s token 加 namespace 文件）。
+  - kubelet 的 token 管理器在有效期过去 80% 后轮换 token。
+- **kk**：
+  - `create serviceaccount|token|role|clusterrole|rolebinding|clusterrolebinding`。
+  - `auth can-i`（"no" 时退出码为 1）与 `auth whoami`。
+  - 全局 `--as/--as-group`。
+  - `get` 与 `describe` 的列与 kubectl 相同。
+- **未实现**：
+  - 提权检查（escalate/bind）。
+  - 聚合 ClusterRole。
+  - `ca.crt`（API 为明文 HTTP）。
+  - 控制面组件与插件改用各自的身份（仍用集群 token）。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -739,15 +767,16 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | --- | --- | --- |
 | `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`node-init`（含 kubelet）、`kube-proxy`、`ingress-controller`、`cluster-dns`、`demo`，以及 `fetch`/`lookup` 等测试工具 | `cmd/kube-*`（及早期的 `hyperkube`） |
 | `cmd/kk` | 命令行客户端与集群生命周期（含 worker 扩缩） | `kubectl`、`kind` |
-| `pkg/apis/{meta,core,apps,batch,networking,coordination,storage}/v1`、`pkg/apis/autoscaling/v2`、`pkg/apis/metrics/v1beta1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`batchv1`、`networkingv1`、`coordinationv1`、`storagev1`、`autoscalingv2`、`metricsv1beta1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1`、`k8s.io/metrics` |
-| `pkg/apis/{core,apps,autoscaling,batch,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
+| `pkg/apis/{meta,core,apps,batch,networking,coordination,storage,rbac,authentication,authorization}/v1`、`pkg/apis/autoscaling/v2`、`pkg/apis/metrics/v1beta1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`batchv1`、`networkingv1`、`coordinationv1`、`storagev1`、`autoscalingv2`、`metricsv1beta1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1`、`k8s.io/metrics` |
+| `pkg/apis/{core,apps,autoscaling,batch,networking,rbac}/validation` | 资源校验 | `pkg/apis/*/validation` |
 | `pkg/labels`、`pkg/fields`、`pkg/watch` | 选择器与 watch 事件类型 | `apimachinery/pkg/{labels,fields,watch}` |
 | `pkg/scheme` | 资源注册表（REST 坐标、Kind、构造函数） | `runtime.Scheme`、`RESTMapper` |
-| `pkg/apiserver` | 通用 API 服务：路由、存储读写、删除语义、watch、子资源 | `k8s.io/apiserver` |
-| `pkg/registry/{core,apps,autoscaling,batch,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
+| `pkg/apiserver` | 通用 API 服务：路由、存储读写、删除语义、watch、子资源、认证与授权、聚合代理 | `k8s.io/apiserver`、kube-aggregator |
+| `pkg/auth/{user,authorizer/rbac,bootstrappolicy}`、`pkg/serviceaccount` | 用户身份、RBAC 授权器、默认策略；ServiceAccount token 的签发与校验 | `apiserver/pkg/authentication/user`、`plugin/pkg/auth/authorizer/rbac{,/bootstrappolicy}`、`pkg/serviceaccount` |
+| `pkg/registry/{core,apps,autoscaling,batch,networking}/<resource>`、`pkg/registry/rbac` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
 | `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
 | `pkg/client`、`pkg/client/{informers,workqueue,record,leaderelection}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器、基于 Lease 的选主 | `k8s.io/client-go`（含 `tools/leaderelection`） |
-| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `daemon`、`statefulset`、`podautoscaler`、`history`（ControllerRevision 管理）、`job`、`cronjob`、`ttlafterfinished`、`nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
+| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `daemon`、`statefulset`、`podautoscaler`、`serviceaccount`、`history`（ControllerRevision 管理）、`job`、`cronjob`、`ttlafterfinished`、`nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins}` | 调度队列；调度框架（NodeInfo 快照、Filter/Score 接口）与默认插件 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins/<name>}` |
 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars,metrics}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`、容器统计）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量；`/metrics/resource` | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars,metrics/collectors}`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |

@@ -13,6 +13,7 @@ import (
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	networkingv1 "mini-k8s/pkg/apis/networking/v1"
+	rbacv1 "mini-k8s/pkg/apis/rbac/v1"
 	storagev1 "mini-k8s/pkg/apis/storage/v1"
 )
 
@@ -110,6 +111,16 @@ var (
 	HorizontalPodAutoscalers = ResourceInfo{Group: "autoscaling", Version: "v2", Resource: "horizontalpodautoscalers",
 		Singular: "horizontalpodautoscaler", Kind: "HorizontalPodAutoscaler", Namespaced: true, ShortNames: []string{"hpa"},
 		HasStatus: true, New: func() metav1.Object { return &autoscalingv2.HorizontalPodAutoscaler{} }}
+	ServiceAccounts = ResourceInfo{Version: "v1", Resource: "serviceaccounts", Singular: "serviceaccount", Kind: "ServiceAccount",
+		Namespaced: true, ShortNames: []string{"sa"}, New: func() metav1.Object { return &corev1.ServiceAccount{} }}
+	Roles = ResourceInfo{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles", Singular: "role", Kind: "Role",
+		Namespaced: true, New: func() metav1.Object { return &rbacv1.Role{} }}
+	RoleBindings = ResourceInfo{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings", Singular: "rolebinding",
+		Kind: "RoleBinding", Namespaced: true, New: func() metav1.Object { return &rbacv1.RoleBinding{} }}
+	ClusterRoles = ResourceInfo{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles", Singular: "clusterrole",
+		Kind: "ClusterRole", New: func() metav1.Object { return &rbacv1.ClusterRole{} }}
+	ClusterRoleBindings = ResourceInfo{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings",
+		Singular: "clusterrolebinding", Kind: "ClusterRoleBinding", New: func() metav1.Object { return &rbacv1.ClusterRoleBinding{} }}
 	Jobs = ResourceInfo{Group: "batch", Version: "v1", Resource: "jobs", Singular: "job", Kind: "Job", Namespaced: true,
 		HasStatus: true, New: func() metav1.Object { return &batchv1.Job{} }}
 	CronJobs = ResourceInfo{Group: "batch", Version: "v1", Resource: "cronjobs", Singular: "cronjob", Kind: "CronJob",
@@ -121,8 +132,8 @@ var (
 )
 
 // All lists every registered resource in discovery order.
-var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, ConfigMaps, Secrets, PersistentVolumes,
-	PersistentVolumeClaims, Deployments, ReplicaSets, DaemonSets, StatefulSets, ControllerRevisions, HorizontalPodAutoscalers, Jobs, CronJobs, Ingresses, Leases,
+var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, ConfigMaps, Secrets, ServiceAccounts, PersistentVolumes,
+	PersistentVolumeClaims, Deployments, ReplicaSets, DaemonSets, StatefulSets, ControllerRevisions, HorizontalPodAutoscalers, Jobs, CronJobs, Ingresses, Leases, Roles, RoleBindings, ClusterRoles, ClusterRoleBindings,
 	StorageClasses}
 
 // Lookup resolves a user-supplied name: plural, singular, short name, kind

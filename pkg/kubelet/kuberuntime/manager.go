@@ -60,6 +60,8 @@ type Manager struct {
 	// Objects provides the ConfigMaps and Secrets of env and volumes (the
 	// kubelet's informer caches).
 	Objects volume.ObjectSource
+	// Tokens issues the service account tokens of projected volumes.
+	Tokens volume.TokenSource
 	// NodeIP is status.hostIP for the downward API (and status.podIP of
 	// host-network Pods).
 	NodeIP string
