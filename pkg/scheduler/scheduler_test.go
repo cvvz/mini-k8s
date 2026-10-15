@@ -1,17 +1,15 @@
 package scheduler
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
-func TestUnschedulableMessageLikeKubernetes(t *testing.T) {
-	got := unschedulableMessage(3, map[string]int{
-		"were unschedulable": 2,
-		"had untolerated taint {node-role.kubernetes.io/control-plane: }": 1,
-	})
-	want := "0/3 nodes are available: 1 node(s) had untolerated taint {node-role.kubernetes.io/control-plane: }, 2 node(s) were unschedulable."
-	if got != want {
-		t.Fatalf("got  %q\nwant %q", got, want)
-	}
-	if got := unschedulableMessage(0, nil); got != "0/0 nodes are available." {
-		t.Fatalf("no nodes: %q", got)
+func TestBackoffIsBounded(t *testing.T) {
+	for attempts, want := range map[int]time.Duration{1: time.Second, 2: 2 * time.Second, 4: 8 * time.Second, 5: 10 * time.Second,
+		40: 10 * time.Second, 100: 10 * time.Second, 1 << 20: 10 * time.Second} {
+		if got := Backoff(attempts); got != want {
+			t.Errorf("Backoff(%d) = %v, want %v", attempts, got, want)
+		}
 	}
 }

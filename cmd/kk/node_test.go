@@ -105,3 +105,47 @@ func TestDrainEvictsManagedPodsAndRefusesOthers(t *testing.T) {
 }
 
 func ptrTrue() *bool { b := true; return &b }
+
+func TestLabel(t *testing.T) {
+	c := framework.StartTestServer(t)
+	ctx := context.Background()
+	if _, err := client.Nodes(c).Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"label", "nodes", "n1", "disk=ssd", "zone=a"}, "node/n1 labeled\n"},
+		{[]string{"label", "node/n1", "disk=ssd"}, "node/n1 not labeled\n"},
+		{[]string{"label", "nodes", "n1", "disk=nvme", "--overwrite"}, "node/n1 labeled\n"},
+		{[]string{"label", "nodes", "n1", "zone-"}, "node/n1 unlabeled\n"},
+	} {
+		if out, err := kk(t, c, "", tc.args...); err != nil || out != tc.want {
+			t.Fatalf("kk %v: %q %v, want %q", tc.args, out, err, tc.want)
+		}
+	}
+	if _, err := kk(t, c, "", "label", "nodes", "n1", "disk=hdd"); err == nil ||
+		err.Error() != "'disk' already has a value (nvme), and --overwrite is false" {
+		t.Fatalf("conflict: %v", err)
+	}
+	n, _ := client.Nodes(c).Get(ctx, "n1")
+	if n.Labels["disk"] != "nvme" || n.Labels["zone"] != "" {
+		t.Fatalf("labels: %v", n.Labels)
+	}
+}
+
+func TestLabelWithEmptyValue(t *testing.T) {
+	c := framework.StartTestServer(t)
+	ctx := context.Background()
+	if _, err := client.Nodes(c).Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := kk(t, c, "", "label", "nodes", "n1", "role="); err != nil || out != "node/n1 labeled\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+	n, err := client.Nodes(c).Get(ctx, "n1")
+	if value, ok := n.Labels["role"]; err != nil || !ok || value != "" {
+		t.Fatalf("the empty-valued label exists: %v %v", n.Labels, err)
+	}
+}

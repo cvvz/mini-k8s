@@ -46,6 +46,7 @@ var commandFlags = map[string][]flagSpec{
 	"drain": {{long: "force"}, {long: "delete-emptydir-data"}, {long: "ignore-daemonsets"},
 		{long: "grace-period", takesValue: true}, {long: "timeout", takesValue: true}},
 	"taint":         {{long: "overwrite"}},
+	"label":         {{long: "overwrite"}},
 	"api-resources": {},
 	"version":       {},
 	"cluster":       {{long: "volumes"}},

@@ -72,6 +72,8 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 		return a.drain(ctx, p)
 	case "taint":
 		return a.taint(ctx, p)
+	case "label":
+		return a.label(ctx, p)
 	case "api-resources":
 		return a.apiResources(ctx)
 	case "version":

@@ -176,8 +176,11 @@ func TestStaticPodsAndMirrorPods(t *testing.T) {
 		return true
 	})
 	node, err := client.Nodes(c).Get(ctx, "control-plane")
-	if err != nil || node.Labels["node-role.kubernetes.io/control-plane"] != "" || len(node.Spec.Taints) != 1 ||
-		node.Spec.Taints[0].Key != corev1.TaintNodeRoleControlPlane || node.Spec.Taints[0].Effect != corev1.TaintEffectNoSchedule {
+	// Registered not ready (the node lifecycle controller, not running here,
+	// lifts that taint) and tainted as control plane.
+	if err != nil || node.Labels["node-role.kubernetes.io/control-plane"] != "" || len(node.Spec.Taints) != 2 ||
+		node.Spec.Taints[0].Key != corev1.TaintNodeNotReady || node.Spec.Taints[1].Key != corev1.TaintNodeRoleControlPlane ||
+		node.Spec.Taints[1].Effect != corev1.TaintEffectNoSchedule {
 		t.Fatalf("control-plane node registration: %+v %v", node, err)
 	}
 	if !corev1.IsMirrorPod(first) || first.Spec.NodeName != "control-plane" || len(first.OwnerReferences) != 1 ||

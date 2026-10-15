@@ -1,11 +1,11 @@
-// Package scheduler assigns unscheduled Pods to nodes.
+// Package scheduler assigns unscheduled Pods to nodes with the scheduling
+// framework: filter plugins drop the nodes a Pod cannot run on, score
+// plugins rank the rest, and the best node is bound through the Pod's
+// binding subresource.
 package scheduler
 
 import (
 	"context"
-	"fmt"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,48 +15,63 @@ import (
 	"mini-k8s/pkg/client/informers"
 	"mini-k8s/pkg/client/record"
 	"mini-k8s/pkg/client/workqueue"
+	"mini-k8s/pkg/scheduler/framework"
+	"mini-k8s/pkg/scheduler/framework/plugins"
 	"mini-k8s/pkg/util/deepcopy"
 )
 
-// Scheduler binds each pending Pod to the Ready, schedulable node that runs
-// the fewest Pods (ties broken by name).
+// Scheduler binds each pending Pod to the best node of the default profile.
 type Scheduler struct {
-	client   *client.Client
-	pods     *informers.Informer[corev1.Pod, *corev1.Pod]
-	nodes    *informers.Informer[corev1.Node, *corev1.Node]
-	recorder *record.Recorder
-	queue    *workqueue.Queue
+	client    *client.Client
+	pods      *informers.Informer[corev1.Pod, *corev1.Pod]
+	nodes     *informers.Informer[corev1.Node, *corev1.Node]
+	recorder  *record.Recorder
+	queue     *workqueue.Queue
+	framework *framework.Framework
 
 	mu sync.Mutex
 	// assumed holds bindings not yet visible in the Pod cache, so Pods
-	// scheduled back to back still spread across nodes.
-	assumed map[string]string
+	// scheduled back to back see each other's resources and spreading.
+	assumed map[string]*corev1.Pod
+	// attempts counts failed attempts per Pod UID for the backoff.
+	attempts map[string]int
 }
 
-// retryInterval is how often unschedulable Pods are retried.
-const retryInterval = 2 * time.Second
+// Backoff of unschedulable Pods, as kube-scheduler's defaults: 1s doubling
+// up to 10s; cluster events retry them earlier.
+const (
+	initialBackoff = time.Second
+	maxBackoff     = 10 * time.Second
+)
 
 // New wires the scheduler onto shared Pod and Node informers.
 func New(c *client.Client, pods *informers.Informer[corev1.Pod, *corev1.Pod], nodes *informers.Informer[corev1.Node, *corev1.Node], recorder *record.Recorder) *Scheduler {
-	s := &Scheduler{client: c, pods: pods, nodes: nodes, recorder: recorder, queue: workqueue.New(), assumed: map[string]string{}}
-	pods.AddHandler(informers.Handler[*corev1.Pod]{
-		OnAdd:    s.onPod,
-		OnUpdate: func(_, p *corev1.Pod) { s.onPod(p) },
-		OnDelete: func(p *corev1.Pod) { s.forget(p.UID) },
-	})
-	requeuePending := func(*corev1.Node) {
+	s := &Scheduler{client: c, pods: pods, nodes: nodes, recorder: recorder, queue: workqueue.New(),
+		framework: plugins.Default(), assumed: map[string]*corev1.Pod{}, attempts: map[string]int{}}
+	retryPending := func() {
 		for _, p := range pods.List("", nil) {
 			if pending(p) {
 				s.queue.Add(informers.Key(p))
 			}
 		}
 	}
-	nodes.AddHandler(informers.Handler[*corev1.Node]{OnAdd: requeuePending, OnUpdate: func(old, cur *corev1.Node) {
-		if corev1.IsNodeReady(old) != corev1.IsNodeReady(cur) || old.Spec.Unschedulable != cur.Spec.Unschedulable {
-			requeuePending(cur)
-		}
-	}})
+	pods.AddHandler(informers.Handler[*corev1.Pod]{
+		OnAdd:    s.onPod,
+		OnUpdate: func(_, p *corev1.Pod) { s.onPod(p) },
+		// A Pod going away frees resources and affinity constraints.
+		OnDelete: func(p *corev1.Pod) { s.forget(p.UID); retryPending() },
+	})
+	nodes.AddHandler(informers.Handler[*corev1.Node]{
+		OnAdd:    func(*corev1.Node) { retryPending() },
+		OnUpdate: func(_, _ *corev1.Node) { retryPending() },
+	})
 	return s
+}
+
+// Backoff is the wait after the given number of failed attempts: 1s
+// doubling up to maxBackoff (the shift is bounded so it cannot overflow).
+func Backoff(attempts int) time.Duration {
+	return min(initialBackoff<<min(max(attempts-1, 0), 8), maxBackoff)
 }
 
 func pending(p *corev1.Pod) bool { return p.Spec.NodeName == "" && p.DeletionTimestamp == nil }
@@ -73,11 +88,33 @@ func (s *Scheduler) forget(uid string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.assumed, uid)
+	delete(s.attempts, uid)
 }
 
 // Run schedules Pods one at a time until ctx ends.
 func (s *Scheduler) Run(ctx context.Context) {
 	workqueue.Run(ctx, s.queue, "scheduler", 1, s.schedule)
+}
+
+// snapshot is the cluster with bound and assumed Pods placed.
+func (s *Scheduler) snapshot() *framework.Snapshot {
+	pods := s.pods.List("", nil)
+	bound := map[string]bool{}
+	var placed []*corev1.Pod
+	for _, p := range pods {
+		if p.Spec.NodeName != "" {
+			bound[p.UID] = true
+			placed = append(placed, p)
+		}
+	}
+	s.mu.Lock()
+	for uid, p := range s.assumed {
+		if !bound[uid] {
+			placed = append(placed, p)
+		}
+	}
+	s.mu.Unlock()
+	return framework.NewSnapshot(s.nodes.List("", nil), placed)
 }
 
 func (s *Scheduler) schedule(ctx context.Context, key string) error {
@@ -86,10 +123,14 @@ func (s *Scheduler) schedule(ctx context.Context, key string) error {
 	if !ok || !pending(pod) {
 		return nil
 	}
-	node, reason := s.pickNode(pod, time.Now())
+	node, reason := s.framework.Schedule(pod, s.snapshot())
 	if node == "" {
 		s.markUnschedulable(ctx, pod, reason)
-		s.queue.AddAfter(key, retryInterval)
+		s.mu.Lock()
+		s.attempts[pod.UID]++
+		delay := Backoff(s.attempts[pod.UID])
+		s.mu.Unlock()
+		s.queue.AddAfter(key, delay)
 		return nil
 	}
 	if err := s.client.BindPod(ctx, ns, name, node); err != nil {
@@ -98,68 +139,14 @@ func (s *Scheduler) schedule(ctx context.Context, key string) error {
 		}
 		return err
 	}
+	assumed := deepcopy.Copy(pod)
+	assumed.Spec.NodeName = node
 	s.mu.Lock()
-	s.assumed[pod.UID] = node
+	s.assumed[pod.UID] = assumed
+	delete(s.attempts, pod.UID)
 	s.mu.Unlock()
 	s.recorder.Eventf(pod, corev1.EventTypeNormal, "Scheduled", "Successfully assigned %s/%s to %s", ns, name, node)
 	return nil
-}
-
-func (s *Scheduler) pickNode(pod *corev1.Pod, now time.Time) (string, string) {
-	load := map[string]int{}
-	bound := map[string]bool{}
-	for _, p := range s.pods.List("", nil) {
-		if p.Spec.NodeName != "" {
-			bound[p.UID] = true
-			if !corev1.IsPodTerminal(p) {
-				load[p.Spec.NodeName]++
-			}
-		}
-	}
-	s.mu.Lock()
-	for uid, node := range s.assumed {
-		if !bound[uid] {
-			load[node]++
-		}
-	}
-	s.mu.Unlock()
-	nodes := s.nodes.List("", nil)
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
-	best := ""
-	rejected := map[string]int{} // reason -> nodes
-	for _, n := range nodes {
-		if taint, ok := corev1.UntoleratedTaint(n.Spec.Taints, pod.Spec.Tolerations); ok {
-			rejected["had untolerated taint "+taint.String()]++
-			continue
-		}
-		switch {
-		case !corev1.IsNodeReady(n):
-			rejected["were not ready"]++
-		case n.Spec.Unschedulable:
-			rejected["were unschedulable"]++
-		case best == "" || load[n.Name] < load[best]:
-			best = n.Name
-		}
-	}
-	if best != "" {
-		return best, ""
-	}
-	return "", unschedulableMessage(len(nodes), rejected)
-}
-
-// unschedulableMessage explains why no node fits, like the Kubernetes
-// scheduler: "0/3 nodes are available: 1 node(s) had untolerated taint
-// {node-role.kubernetes.io/control-plane: }, 2 node(s) were unschedulable."
-func unschedulableMessage(total int, rejected map[string]int) string {
-	reasons := make([]string, 0, len(rejected))
-	for reason, n := range rejected {
-		reasons = append(reasons, fmt.Sprintf("%d node(s) %s", n, reason))
-	}
-	sort.Strings(reasons)
-	if len(reasons) == 0 {
-		return fmt.Sprintf("0/%d nodes are available.", total)
-	}
-	return fmt.Sprintf("0/%d nodes are available: %s.", total, strings.Join(reasons, ", "))
 }
 
 func (s *Scheduler) markUnschedulable(ctx context.Context, pod *corev1.Pod, reason string) {

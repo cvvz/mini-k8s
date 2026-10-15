@@ -343,3 +343,48 @@ func TestPodDNSAndHostname(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateScheduling(t *testing.T) {
+	term := func(reqs ...corev1.NodeSelectorRequirement) corev1.NodeSelectorTerm {
+		return corev1.NodeSelectorTerm{MatchExpressions: reqs}
+	}
+	ok := podSpec()
+	ok.NodeSelector = map[string]string{"disk": "ssd"}
+	ok.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{term(
+				corev1.NodeSelectorRequirement{Key: "zone", Operator: "In", Values: []string{"a"}},
+				corev1.NodeSelectorRequirement{Key: "cores", Operator: "Gt", Values: []string{"4"}})}},
+			Preferred: []corev1.PreferredSchedulingTerm{{Weight: 10, Preference: term(corev1.NodeSelectorRequirement{Key: "gpu", Operator: "Exists"})}},
+		},
+		PodAntiAffinity: &corev1.PodAntiAffinity{Required: []corev1.PodAffinityTerm{{TopologyKey: "kubernetes.io/hostname"}}},
+	}
+	if errs := ValidatePodSpec("spec", ok); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	bad := podSpec()
+	bad.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{term(
+				corev1.NodeSelectorRequirement{Key: "zone", Operator: "In"},
+				corev1.NodeSelectorRequirement{Key: "gpu", Operator: "Exists", Values: []string{"x"}},
+				corev1.NodeSelectorRequirement{Key: "cores", Operator: "Gt", Values: []string{"many"}},
+				corev1.NodeSelectorRequirement{Key: "x", Operator: "Near", Values: []string{"y"}})}},
+			Preferred: []corev1.PreferredSchedulingTerm{{Weight: 0, Preference: term(corev1.NodeSelectorRequirement{Key: "gpu", Operator: "Exists"})}},
+		},
+		PodAffinity: &corev1.PodAffinity{Required: []corev1.PodAffinityTerm{{}}},
+	}
+	got := strings.Join(ValidatePodSpec("spec", bad), "\n")
+	for _, want := range []string{
+		"nodeSelectorTerms[0].matchExpressions[0].values: Required value: must be specified when `operator` is 'In' or 'NotIn'",
+		"matchExpressions[1].values: Forbidden: may not be specified when `operator` is 'Exists' or 'DoesNotExist'",
+		`matchExpressions[2].values[0]: Invalid value: "many": must be an integer`,
+		`matchExpressions[3].operator: Unsupported value: "Near"`,
+		"preferredDuringSchedulingIgnoredDuringExecution[0].weight: Invalid value: 0: must be in the range 1-100",
+		"spec.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey: Required value: can not be empty",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in\n%s", want, got)
+		}
+	}
+}
