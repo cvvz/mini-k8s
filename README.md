@@ -169,40 +169,6 @@ container runtime) uses those open-source components as-is, configured but not m
 Ginkgo/Gomega. The project depends on neither client-go nor any Kubernetes component's
 implementation.
 
-## Code structure
-
-Directories and package names follow the Kubernetes source tree, so the two can be read
-side by side (full mapping in
-[v2 design specification §15](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)):
-
-```text
-cmd/mini/                    multi-call binary: mini kube-apiserver | kube-controller-manager | kube-scheduler |
-                             node-init | kube-proxy | ingress-controller | demo | pause | fetch;
-                             as mini-cni/loopback the CNI plugin
-cmd/kk/                      CLI (kubectl plus cluster lifecycle)
-build/images/<name>/         Dockerfiles: mini (components, demo), node, pause, etcd, kube-proxy
-build/manifests/<node role>  static Pod manifests (like /etc/kubernetes/manifests); addons/: cluster DNS
-pkg/apis/<group>/v1          resource types (metav1, corev1, appsv1, networkingv1) and validation
-pkg/api/resource, util/intstr quantities ("500m", "64Mi") and int-or-string values
-pkg/labels, fields, watch    selectors and watch event types (as in apimachinery)
-pkg/scheme                   resource registry
-pkg/apiserver                generic API server (as k8s.io/apiserver)
-pkg/registry/<group>/<res>   per-resource strategies: defaults, validation, mutability, field selectors;
-                             Service cluster IP and node port allocators with their repair loop
-pkg/storage/etcd3            etcd storage
-pkg/client/...               client, informers, workqueue, record (as client-go)
-pkg/controller/<name>        deployment, replicaset, endpoint, garbagecollector, namespace, nodeipam controllers
-pkg/scheduler                scheduler
-pkg/kubelet                  node agent and static Pods; kuberuntime (CRI client), prober, envvars,
-                             dns (Pod DNS configuration, node-local forwarder)
-pkg/network/{cni,hostgw}     CNI plugin and host-gw route agent
-pkg/proxy/iptables           kube-proxy (iptables mode)
-pkg/ingress                  Ingress controller
-pkg/dns                      cluster DNS server
-pkg/nodeinit                 node container entrypoint
-test/e2e, test/integration   end-to-end and integration tests
-```
-
 ## Prerequisites
 
 | Requirement | Notes |
