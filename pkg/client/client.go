@@ -26,6 +26,18 @@ type Client struct {
 	token  string
 	http   *http.Client
 	stream *http.Client
+	// impersonateUser and impersonateGroups are sent as Impersonate-*
+	// headers (kubectl --as and --as-group).
+	impersonateUser   string
+	impersonateGroups []string
+}
+
+// Impersonate returns a client that acts as another user (and groups),
+// which the API server allows to those who may impersonate them.
+func (c *Client) Impersonate(user string, groups []string) *Client {
+	cp := *c
+	cp.impersonateUser, cp.impersonateGroups = user, groups
+	return &cp
 }
 
 // New returns a client for base (e.g. http://127.0.0.1:18000).
@@ -90,6 +102,12 @@ func (c *Client) Request(ctx context.Context, method, path string, query url.Val
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.impersonateUser != "" {
+		req.Header.Set("Impersonate-User", c.impersonateUser)
+	}
+	for _, g := range c.impersonateGroups {
+		req.Header.Add("Impersonate-Group", g)
+	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -247,3 +265,6 @@ func (c *Client) BindPod(ctx context.Context, namespace, name, node string) erro
 	}
 	return c.Do(ctx, http.MethodPost, scheme.Pods.Path(namespace, name, "binding"), nil, "", b, nil)
 }
+
+// BaseURL is the API server address the client talks to.
+func (c *Client) BaseURL() string { return c.base }

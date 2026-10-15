@@ -36,6 +36,9 @@ type app struct {
 }
 
 func newApp(c *client.Client, out io.Writer, in io.Reader, a args) *app {
+	if as, groups := a.value("as", ""), a.values["as-group"]; as != "" || len(groups) > 0 {
+		c = c.Impersonate(as, groups)
+	}
 	return &app{
 		client: c, out: out, errOut: os.Stderr, in: in,
 		namespace: a.value("namespace", corev1.NamespaceDefault), explicitNS: len(a.values["namespace"]) > 0,
@@ -58,8 +61,19 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 		if len(p.positional) >= 1 && (p.positional[0] == "configmap" || p.positional[0] == "cm" || p.positional[0] == "secret") {
 			return a.createConfig(ctx, p)
 		}
-		if len(p.positional) >= 1 && p.positional[0] == "job" {
-			return a.createJob(ctx, p)
+		if len(p.positional) >= 1 {
+			switch p.positional[0] {
+			case "job":
+				return a.createJob(ctx, p)
+			case "serviceaccount", "sa":
+				return a.createServiceAccount(ctx, p)
+			case "token":
+				return a.createToken(ctx, p)
+			case "role", "clusterrole":
+				return a.createRole(ctx, p, p.positional[0] == "clusterrole")
+			case "rolebinding", "clusterrolebinding":
+				return a.createBinding(ctx, p, p.positional[0] == "clusterrolebinding")
+			}
 		}
 		return a.applyFiles(ctx, p, true)
 	case "delete":
@@ -70,6 +84,8 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 		return a.exec(ctx, p)
 	case "scale":
 		return a.scale(ctx, p)
+	case "auth":
+		return a.auth(ctx, p)
 	case "autoscale":
 		return a.autoscale(ctx, p)
 	case "top":

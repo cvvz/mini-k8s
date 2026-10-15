@@ -22,6 +22,7 @@ import (
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	networkingv1 "mini-k8s/pkg/apis/networking/v1"
+	rbacv1 "mini-k8s/pkg/apis/rbac/v1"
 	storagev1 "mini-k8s/pkg/apis/storage/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/scheme"
@@ -370,6 +371,40 @@ func columnsFor(res scheme.ResourceInfo) []column {
 				sel, _ := ds(o).Spec.Selector.AsSelector()
 				return sel.String()
 			}},
+		}
+	case scheme.ServiceAccounts.Resource:
+		return []column{nameColumn(), ageColumn()}
+	case scheme.Roles.Resource, scheme.ClusterRoles.Resource:
+		return []column{nameColumn(),
+			{header: "CREATED AT", value: func(o metav1.Object, _ time.Time) string {
+				return o.GetObjectMeta().CreationTimestamp.UTC().Format(time.RFC3339)
+			}},
+		}
+	case scheme.RoleBindings.Resource, scheme.ClusterRoleBindings.Resource:
+		binding := func(o metav1.Object) (rbacv1.RoleRef, []rbacv1.Subject) {
+			if b, ok := o.(*rbacv1.RoleBinding); ok {
+				return b.RoleRef, b.Subjects
+			}
+			b := o.(*rbacv1.ClusterRoleBinding)
+			return b.RoleRef, b.Subjects
+		}
+		subjects := func(pick int) func(metav1.Object, time.Time) string {
+			return func(o metav1.Object, _ time.Time) string {
+				_, s := binding(o)
+				cols := [3]string{}
+				cols[0], cols[1], cols[2] = bindingSubjectColumns(s)
+				return cols[pick]
+			}
+		}
+		return []column{nameColumn(),
+			{header: "ROLE", value: func(o metav1.Object, _ time.Time) string {
+				ref, _ := binding(o)
+				return ref.Kind + "/" + ref.Name
+			}},
+			ageColumn(),
+			{header: "USERS", wide: true, value: subjects(0)},
+			{header: "GROUPS", wide: true, value: subjects(1)},
+			{header: "SERVICEACCOUNTS", wide: true, value: subjects(2)},
 		}
 	case scheme.HorizontalPodAutoscalers.Resource:
 		hpa := func(o metav1.Object) *autoscalingv2.HorizontalPodAutoscaler {
@@ -789,6 +824,14 @@ func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj m
 		}
 	case *autoscalingv2.HorizontalPodAutoscaler:
 		describeHPA(tw, o)
+	case *rbacv1.Role:
+		describeRules(tw, o.Rules)
+	case *rbacv1.ClusterRole:
+		describeRules(tw, o.Rules)
+	case *rbacv1.RoleBinding:
+		describeBinding(tw, o.RoleRef, o.Subjects)
+	case *rbacv1.ClusterRoleBinding:
+		describeBinding(tw, o.RoleRef, o.Subjects)
 	case *batchv1.Job:
 		fmt.Fprintf(tw, "Selector:\t%s\n", formatSelector(o.Spec.Selector))
 		fmt.Fprintf(tw, "Parallelism:\t%s\n", int32Ptr(o.Spec.Parallelism))

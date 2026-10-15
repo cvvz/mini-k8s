@@ -22,6 +22,7 @@ import (
 	"mini-k8s/pkg/controller/podautoscaler"
 	"mini-k8s/pkg/controller/podgc"
 	"mini-k8s/pkg/controller/replicaset"
+	"mini-k8s/pkg/controller/serviceaccount"
 	"mini-k8s/pkg/controller/statefulset"
 	"mini-k8s/pkg/controller/tainteviction"
 	"mini-k8s/pkg/controller/ttlafterfinished"
@@ -45,6 +46,7 @@ func runControllers(ctx context.Context, c *client.Client) {
 	dsets := informers.New(client.DaemonSets(c, ""), client.ListOptions{}, 30*time.Second)
 	sets := informers.New(client.StatefulSets(c, ""), client.ListOptions{}, 30*time.Second)
 	hpas := informers.New(client.HorizontalPodAutoscalers(c, ""), client.ListOptions{}, 30*time.Second)
+	accounts := informers.New(client.ServiceAccounts(c, ""), client.ListOptions{}, 30*time.Second)
 	revisions := informers.New(client.ControllerRevisions(c, ""), client.ListOptions{}, 30*time.Second)
 	jobs := informers.New(client.Jobs(c, ""), client.ListOptions{}, 30*time.Second)
 	cronJobs := informers.New(client.CronJobs(c, ""), client.ListOptions{}, 30*time.Second)
@@ -69,6 +71,7 @@ func runControllers(ctx context.Context, c *client.Client) {
 		log.Fatal(err)
 	}
 	hpac := podautoscaler.NewController(c, hpas, pods, rec, hpaSync)
+	sac := serviceaccount.NewController(c, namespaces, accounts)
 	jc := job.NewController(c, jobs, pods, rec)
 	cjc := cronjob.NewController(c, cronJobs, jobs, rec)
 	ttl := ttlafterfinished.NewController(c, jobs)
@@ -84,16 +87,17 @@ func runControllers(ctx context.Context, c *client.Client) {
 	pvProtection := pvprotection.NewController(c, volumes)
 	go rec.Run(ctx)
 	for _, run := range []func(context.Context){pods.Run, deployments.Run, rsets.Run, namespaces.Run, nodes.Run, services.Run,
-		endpoints.Run, leases.Run, volumes.Run, claims.Run, classes.Run, dsets.Run, revisions.Run, jobs.Run, cronJobs.Run, sets.Run, hpas.Run} {
+		endpoints.Run, leases.Run, volumes.Run, claims.Run, classes.Run, dsets.Run, revisions.Run, jobs.Run, cronJobs.Run, sets.Run, hpas.Run, accounts.Run} {
 		go run(ctx)
 	}
 	informers.WaitForSync(ctx, pods.HasSynced, deployments.HasSynced, rsets.HasSynced, namespaces.HasSynced, nodes.HasSynced,
 		services.HasSynced, endpoints.HasSynced, leases.HasSynced, volumes.HasSynced, claims.HasSynced, classes.HasSynced,
-		dsets.HasSynced, revisions.HasSynced, jobs.HasSynced, cronJobs.HasSynced, sets.HasSynced, hpas.HasSynced)
+		dsets.HasSynced, revisions.HasSynced, jobs.HasSynced, cronJobs.HasSynced, sets.HasSynced, hpas.HasSynced, accounts.HasSynced)
 	go rc.Run(ctx, 4)
 	go dsc.Run(ctx, 2)
 	go ssc.Run(ctx, 2)
 	go hpac.Run(ctx, 2)
+	go sac.Run(ctx, 1)
 	go jc.Run(ctx, 4)
 	go cjc.Run(ctx, 2)
 	go ttl.Run(ctx, 2)

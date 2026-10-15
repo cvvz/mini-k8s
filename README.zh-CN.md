@@ -48,6 +48,10 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
 - **自动扩缩**：Deployment、ReplicaSet、StatefulSet 的 `scale` 子资源（`kk scale` 经由它）；autoscaling/v2
   HorizontalPodAutoscaler 按 CPU 或内存（相对 requests 的利用率或平均值，整个 Pod 或单个容器）扩缩，副本计算、
   稳定窗口与扩缩策略与 Kubernetes 相同；`kk autoscale`。
+- **身份与 RBAC**：ServiceAccount（每个命名空间有 `default`），kubelet 把 bound token（TokenRequest 签发的 JWT）
+  投射进 Pod 并定期轮换；Role、ClusterRole 及其绑定对每个请求授权，内置 Kubernetes 默认的
+  cluster-admin/admin/edit/view 角色，Forbidden 文案相同；支持 impersonation（`--as`）、`kk auth can-i|whoami`、
+  `kk create serviceaccount|token|role|rolebinding|...`。
 - **kind 式节点**：每个节点是一个运行自己 containerd 的特权容器；kubelet 通过 **CRI**
   管理 Pod（每个 Pod 先建沙箱，再建容器）；只有运行时、Pod 网络和沙箱镜像都就绪时节点才 Ready。
   `kk cluster up --workers N` 运行 1 到 10 个 worker；被移除的 worker 先 drain。
@@ -148,7 +152,7 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 
 | 组件 | 职责 | 状态 |
 | --- | --- | --- |
-| kube-apiserver | K8s 风格 REST、Watch、准入与校验、删除语义、子资源、ClusterIP 与 NodePort 分配 | 已实现 |
+| kube-apiserver | K8s 风格 REST、Watch、准入与校验、删除语义、子资源、ClusterIP 与 NodePort 分配、认证（集群 token、ServiceAccount JWT、impersonation）与 RBAC 授权 | 已实现 |
 | controller-manager | Deployment、ReplicaSet、DaemonSet、StatefulSet、HorizontalPodAutoscaler、Job、CronJob、TTL-after-finished、Endpoints、垃圾回收、Namespace、node IPAM、节点生命周期、污点驱逐、Pod 垃圾回收、PersistentVolume 与 PVC/PV 保护控制器 | 已实现，持续扩展 |
 | scheduler | 调度框架：PreFilter、Filter 与 Score 插件（污点、节点亲和、资源适配、Pod 亲和/反亲和、打散、卷绑定）、退避队列、binding 绑定（供给卷期间异步完成） | 已实现 |
 | kubelet | 节点注册与心跳、static Pod 与 mirror Pod、基于 CRI 的 Pod 生命周期（客户端一侧，`pkg/kubelet/kuberuntime`）、探针、状态上报、优雅终止、日志、CNI 配置、节点本地 DNS 转发、资源指标（`/metrics/resource`） | 已实现 |
@@ -211,7 +215,7 @@ Pod 使用由 `kk` 导入节点的本地镜像，运行示例不需要从镜像�
 第 5 步）。宿主机构建架构必须与 Linux 容器架构一致。
 
 > **仅用于可信的本地实验。** 节点容器以特权模式运行，具有较高的 Docker 主机权限。
-> API 使用共享 bearer token，没有 TLS 或 RBAC。不要对外暴露，也不要运行不可信的工作负载。
+> API 是明文 HTTP（没有 TLS）；`kk` 与各组件使用共享的管理员 token，Pod 使用受 RBAC 约束的 ServiceAccount token。不要对外暴露，也不要运行不可信的工作负载。
 
 ## Quick Start
 
@@ -350,6 +354,10 @@ kk scale statefulset kv --replicas 1     # kv-1 被删除，PVC data-kv-1 保留
 kk top nodes                             # 来自 metrics-server 的用量，每 10 秒刷新
 kk top pods -A --sort-by cpu
 kk autoscale deployment web --min 2 --max 5 --cpu-percent 50   # 创建 HorizontalPodAutoscaler
+kk auth can-i list pods --as system:serviceaccount:default:default   # no
+kk create rolebinding view --clusterrole=view --serviceaccount=default:default
+kk exec POD_NAME -- /mini fetch --token-file /var/run/secrets/kubernetes.io/serviceaccount/token \
+  http://kubernetes.default.svc:443/api/v1/namespaces/default/pods    # 有绑定时 200，否则 403
 kk get hpa                               # TARGETS：cpu: 3%/50%
 
 kk create namespace team
@@ -419,18 +427,18 @@ kk image load my-app:v1
 
 ## 当前限制（后续里程碑会解决）
 
-- 不支持 `subPath`、`hostPort`、ServiceAccount 与投射的 ServiceAccount token；不支持卷扩容、CSI、块设备卷与卷回收（Recycle）。`kk exec` 把命令执行完再返回输出，
+- 不支持 `subPath`、`hostPort`；不支持卷扩容、CSI、块设备卷与卷回收（Recycle）。`kk exec` 把命令执行完再返回输出，
   不支持交互式会话（stdin/tty），与 Kubernetes 的流式 exec 不同。
 - 滚动更新过程中修改 `replicas` 不做按比例扩缩；ReplicaSet 不收养孤儿 Pod。`kk apply` 是 merge patch：
   把 Deployment 改成 `Recreate` 时需要在清单中写 `rollingUpdate: null`。
 - 不支持 LoadBalancer 类型、EndpointSlice、`externalTrafficPolicy` 和 IPv6（AAAA 查询返回空应答）；
   集群 DNS 没有缓存和反向（PTR）记录。NodePort 与 kind 一样从 Linux 宿主机经节点地址访问，不在 `127.0.0.1`
-  上发布。API、`kubernetes` Service（443 端口）与 Ingress 控制器都是明文 HTTP；没有 ServiceAccount，DNS 插件
-  从所在节点读取 API token。
+  上发布。API、`kubernetes` Service（443 端口）与 Ingress 控制器都是明文 HTTP，因此 Pod 中没有 `ca.crt`；
+  各插件仍从所在节点读取管理员 token。
 - 调度器没有抢占、优先级与 `topologySpreadConstraints`（副本默认打散）；没有 PodDisruptionBudget（驱逐总是成功）。心跳比 Kubernetes
   默认值快：每 2 秒续约 Lease，15 秒没有续约的节点即为 Unknown。
 - 一个 control-plane 节点（无高可用），最多 10 个 worker；节点是共享宿主机内核的容器。e2e 套件要求默认的两个 worker。
-- 没有 RBAC 和控制面高可用；指标管道只有资源指标，HPA 只支持 Resource 与 ContainerResource 指标（不支持 Pods、Object、External）。Job 不支持 `podFailurePolicy`、`successPolicy` 与按索引退避，且不使用
+- 没有控制面高可用；RBAC 不防止通过角色提权，也不支持聚合 ClusterRole；指标管道只有资源指标，HPA 只支持 Resource 与 ContainerResource 指标（不支持 Pods、Object、External）。Job 不支持 `podFailurePolicy`、`successPolicy` 与按索引退避，且不使用
   job-tracking finalizer 跟踪 Pod。StatefulSet 不支持 `maxUnavailable`（Kubernetes 中为 alpha）。
 
 ## 开发与测试
@@ -521,10 +529,12 @@ unset MINI_TOKEN
 | M10a | 资源指标：kubelet `/metrics/resource`、metrics-server、metrics.k8s.io API、`kk top` | ✅ |
 | M10b | HorizontalPodAutoscaler、scale 子资源、`kk autoscale` | ✅ |
 | M10c | kube-controller-manager 与 kube-scheduler 的 Leader Election | ✅ |
+| M10d | ServiceAccount、bound token、RBAC、impersonation、`kk auth` | ✅ |
 
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M10d ServiceAccount 与 RBAC 计划](docs/superpowers/plans/2026-10-15-m10d-rbac.md)
 - [M10c Leader Election 计划](docs/superpowers/plans/2026-10-15-m10c-leader-election.md)
 - [M10b 自动扩缩计划](docs/superpowers/plans/2026-10-15-m10b-hpa.md)
 - [M10a 资源指标计划](docs/superpowers/plans/2026-10-15-m10a-metrics.md)

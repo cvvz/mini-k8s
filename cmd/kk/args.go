@@ -26,6 +26,8 @@ type args struct {
 var globalFlags = []flagSpec{
 	{long: "namespace", short: "n", takesValue: true},
 	{long: "all-namespaces", short: "A"},
+	{long: "as", takesValue: true},
+	{long: "as-group", takesValue: true},
 }
 
 var commandFlags = map[string][]flagSpec{
@@ -34,7 +36,11 @@ var commandFlags = map[string][]flagSpec{
 	"apply":    {{long: "filename", short: "f", takesValue: true}},
 	"create": {{long: "filename", short: "f", takesValue: true}, {long: "from-literal", takesValue: true},
 		{long: "from-file", takesValue: true}, {long: "type", takesValue: true}, {long: "cert", takesValue: true},
-		{long: "key", takesValue: true}, {long: "image", takesValue: true}, {long: "from", takesValue: true}},
+		{long: "key", takesValue: true}, {long: "image", takesValue: true}, {long: "from", takesValue: true},
+		{long: "verb", takesValue: true}, {long: "resource", takesValue: true}, {long: "resource-name", takesValue: true},
+		{long: "non-resource-url", takesValue: true}, {long: "role", takesValue: true}, {long: "clusterrole", takesValue: true},
+		{long: "user", takesValue: true}, {long: "group", takesValue: true}, {long: "serviceaccount", takesValue: true},
+		{long: "duration", takesValue: true}},
 	"delete": {{long: "filename", short: "f", takesValue: true}, {long: "selector", short: "l", takesValue: true},
 		{long: "grace-period", takesValue: true}, {long: "force"}, {long: "cascade", takesValue: true}, {long: "wait"},
 		{long: "ignore-not-found"}, {long: "all"}},
@@ -43,6 +49,7 @@ var commandFlags = map[string][]flagSpec{
 	"exec":    {{long: "container", short: "c", takesValue: true}},
 	"scale":   {{long: "replicas", takesValue: true}},
 	"rollout": {{long: "to-revision", takesValue: true}, {long: "timeout", takesValue: true}, {long: "revision", takesValue: true}},
+	"auth":    {{long: "subresource", takesValue: true}},
 	"autoscale": {{long: "max", takesValue: true}, {long: "min", takesValue: true}, {long: "cpu-percent", takesValue: true},
 		{long: "cpu", takesValue: true}, {long: "name", takesValue: true}},
 	"top":      {{long: "selector", short: "l", takesValue: true}, {long: "containers"}, {long: "sort-by", takesValue: true}},

@@ -38,6 +38,9 @@ Resources:
   kk create secret generic NAME [--type TYPE] [--from-literal=KEY=VALUE] [--from-file=[KEY=]PATH] ...
   kk create secret tls NAME --cert FILE --key FILE
   kk create job NAME --image IMAGE [-- COMMAND [ARG...]] | kk create job NAME --from=cronjob/NAME
+  kk create serviceaccount NAME | kk create token SERVICEACCOUNT [--duration D]
+  kk create role|clusterrole NAME --verb=VERB[,...] --resource=TYPE[/SUB][,...] [--resource-name=N] [--non-resource-url=U]
+  kk create rolebinding|clusterrolebinding NAME --role=R|--clusterrole=R [--user=U] [--group=G] [--serviceaccount=NS:NAME]
   kk delete -f FILE | TYPE NAME... | TYPE -l SELECTOR | TYPE --all
             [--grace-period N] [--force] [--cascade background|foreground|orphan] [--wait=false]
   kk logs POD [-c CONTAINER] [-f] [--tail N] [-p]
@@ -51,12 +54,14 @@ Resources:
   kk drain NODE [--force] [--delete-emptydir-data] [--ignore-daemonsets] [--grace-period N] [--timeout D]
   kk taint nodes NODE key[=value]:Effect ... | key[:Effect]- ...   [--overwrite]
   kk label TYPE NAME key=value ... | key- ...                  [--overwrite]
+  kk auth can-i VERB TYPE[/NAME] [NAME] [--subresource S] | kk auth can-i VERB /PATH | kk auth whoami
   kk api-resources
   kk version
 
 Global flags:
   -n, --namespace NS     namespace (default "default")
   -A, --all-namespaces   list across all namespaces
+  --as USER, --as-group GROUP   act as another user or service account (system:serviceaccount:NS:NAME)
 
 TYPE accepts kubectl-style names: pods/pod/po, deployments/deploy, replicasets/rs, daemonsets/ds,
 statefulsets/sts, jobs, cronjobs/cj, horizontalpodautoscalers/hpa, services/svc, nodes/no, namespaces/ns, events/ev, configmaps/cm,
@@ -112,6 +117,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := execute(ctx, os.Args[1:]); err != nil {
+		var silent silentExit
+		if errors.As(err, &silent) {
+			os.Exit(silent.code) // the output said it all, like kubectl auth can-i
+		}
 		var exit exitCodeError
 		if errors.As(err, &exit) {
 			// Like kubectl exec: report and pass on the command's exit code.

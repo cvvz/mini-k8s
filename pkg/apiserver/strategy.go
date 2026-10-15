@@ -29,6 +29,9 @@ type Strategy struct {
 	// NameIsDNSLabel requires names to be DNS labels (63 characters, no dots)
 	// instead of DNS subdomains.
 	NameIsDNSLabel bool
+	// NameIsPathSegment allows any name usable in a URL path segment, like
+	// "system:discovery" (RBAC objects), as Kubernetes' ValidatePathSegmentName.
+	NameIsPathSegment bool
 	// Fields returns selectable fields beyond metadata.name and metadata.namespace.
 	Fields func(obj metav1.Object) map[string]string
 	// BeginCreate and BeginUpdate run after validation and reserve what the
@@ -55,6 +58,19 @@ func validName(name string, label bool) bool {
 		return validation.IsDNS1123Label(name)
 	}
 	return validation.IsDNS1123Subdomain(name)
+}
+
+// validPathSegment rejects only names that cannot be a path segment.
+func validPathSegment(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/%")
+}
+
+// validObjectName applies a strategy's name rules.
+func validObjectName(st Strategy, name string) bool {
+	if st.NameIsPathSegment {
+		return validPathSegment(name)
+	}
+	return validName(name, st.NameIsDNSLabel)
 }
 
 // fieldsOf returns the selectable fields of an object.

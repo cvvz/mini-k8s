@@ -81,7 +81,7 @@ func (m *Manager) setupVolumes(pod *corev1.Pod) (mountedVolumes, error) {
 			vols.paths[v.Name] = path
 			vols.readOnly[v.Name] = v.PersistentVolumeClaim.ReadOnly
 		default:
-			src := volume.Source{Pod: pod, Objects: m.Objects, Allocatable: m.Allocatable}
+			src := volume.Source{Pod: pod, Objects: m.Objects, Tokens: m.Tokens, Allocatable: m.Allocatable}
 			if m.Objects == nil {
 				src.Objects = noObjects{}
 			}

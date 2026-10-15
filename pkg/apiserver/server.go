@@ -7,7 +7,6 @@ package apiserver
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +16,7 @@ import (
 
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
+	"mini-k8s/pkg/auth/authorizer/rbac"
 	"mini-k8s/pkg/scheme"
 	"mini-k8s/pkg/storage/etcd3"
 )
@@ -43,6 +43,9 @@ type Config struct {
 type Server struct {
 	cfg     Config
 	kubelet *http.Client
+	// saKey signs and checks service account tokens.
+	saKey      []byte
+	authorizer *rbac.Authorizer
 
 	leaseMu      sync.Mutex
 	eventLease   int64
@@ -69,7 +72,9 @@ func New(cfg Config) *Server {
 	if cfg.WatchTimeout == 0 {
 		cfg.WatchTimeout = 5 * time.Minute
 	}
-	return &Server{cfg: cfg, kubelet: &http.Client{}}
+	s := &Server{cfg: cfg, kubelet: &http.Client{}}
+	s.authorizer = &rbac.Authorizer{Store: rbacStore{s}}
+	return s
 }
 
 // Bootstrap creates the namespaces every cluster has.
@@ -83,6 +88,12 @@ func (s *Server) Bootstrap(ctx context.Context) error {
 			}
 		}
 	}
+	if err := s.bootstrapAuth(ctx); err != nil {
+		return err
+	}
+	for _, name := range []string{corev1.NamespaceDefault, corev1.NamespaceSystem, corev1.NamespaceNodeLease} {
+		s.ensureDefaultServiceAccount(ctx, name)
+	}
 	return nil
 }
 
@@ -95,20 +106,37 @@ type requestInfo struct {
 	allNamespaces bool
 }
 
-func (s *Server) authenticate(r *http.Request) bool {
-	got := r.Header.Get("Authorization")
-	return s.cfg.Token != "" && subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+s.cfg.Token)) == 1
-}
-
 // ServeHTTP routes a request.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Health checks are public, as in Kubernetes, so probes need no token.
 	public := r.Method == http.MethodGet && (r.URL.Path == "/healthz" || r.URL.Path == "/livez" || r.URL.Path == "/readyz")
-	if !public && !s.authenticate(r) {
-		writeError(w, newStatus(http.StatusUnauthorized, metav1.ReasonUnauthorized, "Unauthorized"))
-		return
+	if !public {
+		u, err := s.authenticate(r)
+		if err != nil {
+			writeError(w, newStatus(http.StatusUnauthorized, metav1.ReasonUnauthorized, "Unauthorized"))
+			return
+		}
+		if u, err = s.impersonate(r, u); err != nil {
+			writeError(w, err)
+			return
+		}
+		attrs := requestAttributes(r, u)
+		allowed, _, err := s.authorizer.Authorize(r.Context(), attrs)
+		if err != nil {
+			writeError(w, newStatus(http.StatusInternalServerError, metav1.ReasonInternalError, "authorization failed: %v", err))
+			return
+		}
+		if !allowed {
+			writeError(w, forbidden(attrs))
+			return
+		}
+		r = r.WithContext(withUser(r.Context(), u))
 	}
 	path := strings.TrimSuffix(r.URL.Path, "/")
+	if path == selfSubjectAccessReviewsPath || path == selfSubjectReviewsPath {
+		s.handleReview(w, r, path)
+		return
+	}
 	switch path {
 	case "/livez":
 		// The process is alive; a broken etcd must not get it restarted.
@@ -198,7 +226,7 @@ func parseResourcePath(group, version string, rest []string) (requestInfo, error
 	if namespaced && !validName(info.namespace, true) {
 		return info, errBadRequest("invalid namespace %q", info.namespace)
 	}
-	if info.name != "" && !validName(info.name, false) {
+	if info.name != "" && !validPathSegment(info.name) {
 		return info, errBadRequest("invalid name %q", info.name)
 	}
 	return info, nil
@@ -209,6 +237,10 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, info requestIn
 	dryRun := q.Get("dryRun") == "All"
 	sub := info.subresource
 	action := sub == "binding" || sub == "log" || sub == "exec" || sub == "eviction" // Pod subresources that are not the object
+	if sub == "token" && info.res.Resource == scheme.ServiceAccounts.Resource && r.Method == http.MethodPost {
+		s.handleTokenRequest(w, r, info)
+		return
+	}
 	if sub == "scale" && scalable[info.res.Resource] {
 		if r.Method != http.MethodGet && r.Method != http.MethodPut && r.Method != http.MethodPatch {
 			writeError(w, newStatus(http.StatusMethodNotAllowed, metav1.ReasonMethodNotAllowed, "%s is not supported on this path", r.Method))
@@ -303,6 +335,10 @@ func apiGroupList() map[string]any {
 		gv := map[string]string{"groupVersion": a.groupVersion(), "version": a.version}
 		list = append(list, map[string]any{"name": a.group, "versions": []any{gv}, "preferredVersion": gv})
 	}
+	for _, g := range []string{"authentication.k8s.io", "authorization.k8s.io"} {
+		gv := map[string]string{"groupVersion": g + "/v1", "version": "v1"}
+		list = append(list, map[string]any{"name": g, "versions": []any{gv}, "preferredVersion": gv})
+	}
 	return map[string]any{"kind": "APIGroupList", "apiVersion": "v1", "groups": list}
 }
 
@@ -331,6 +367,14 @@ func resourceList(group, version string) (map[string]any, bool) {
 				map[string]any{"name": "pods/binding", "namespaced": true, "kind": "Binding", "verbs": []string{"create"}},
 				map[string]any{"name": "pods/log", "namespaced": true, "kind": "Pod", "verbs": []string{"get"}})
 		}
+		if r.Resource == scheme.ServiceAccounts.Resource {
+			resources = append(resources, map[string]any{"name": "serviceaccounts/token", "namespaced": true, "group": "authentication.k8s.io",
+				"version": "v1", "kind": "TokenRequest", "verbs": []string{"create"}})
+		}
+	}
+	if review, ok := reviewResources[group+"/"+version]; ok && gv == "" {
+		return map[string]any{"kind": "APIResourceList", "apiVersion": "v1", "groupVersion": group + "/" + version,
+			"resources": []any{review}}, true
 	}
 	if gv == "" {
 		return nil, false
