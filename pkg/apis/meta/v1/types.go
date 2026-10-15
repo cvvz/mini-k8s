@@ -153,6 +153,30 @@ func (t *Time) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// MicroTime is Time with microsecond precision, as used by Leases.
+type MicroTime struct{ time.Time }
+
+// NowMicro returns the current time truncated to microseconds.
+func NowMicro() MicroTime { return MicroTime{time.Now().UTC().Truncate(time.Microsecond)} }
+
+// MarshalJSON implements json.Marshaler.
+func (t MicroTime) MarshalJSON() ([]byte, error) {
+	if t.IsZero() {
+		return []byte("null"), nil
+	}
+	return json.Marshal(t.UTC().Format("2006-01-02T15:04:05.000000Z07:00"))
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (t *MicroTime) UnmarshalJSON(b []byte) error {
+	var parsed Time
+	if err := parsed.UnmarshalJSON(b); err != nil {
+		return err
+	}
+	t.Time = parsed.Time
+	return nil
+}
+
 // StatusReason is a machine-readable error category.
 type StatusReason string
 

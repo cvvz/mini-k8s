@@ -52,7 +52,7 @@ func New(c *client.Client, pods *informers.Informer[corev1.Pod, *corev1.Pod], no
 		}
 	}
 	nodes.AddHandler(informers.Handler[*corev1.Node]{OnAdd: requeuePending, OnUpdate: func(old, cur *corev1.Node) {
-		if corev1.IsNodeReady(old, time.Now()) != corev1.IsNodeReady(cur, time.Now()) || old.Spec.Unschedulable != cur.Spec.Unschedulable {
+		if corev1.IsNodeReady(old) != corev1.IsNodeReady(cur) || old.Spec.Unschedulable != cur.Spec.Unschedulable {
 			requeuePending(cur)
 		}
 	}})
@@ -133,7 +133,7 @@ func (s *Scheduler) pickNode(pod *corev1.Pod, now time.Time) (string, string) {
 			continue
 		}
 		switch {
-		case !corev1.IsNodeReady(n, now):
+		case !corev1.IsNodeReady(n):
 			rejected["were not ready"]++
 		case n.Spec.Unschedulable:
 			rejected["were unschedulable"]++

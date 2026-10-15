@@ -23,7 +23,7 @@ var _ = framework.SIGDescribe("node", "Nodes", func() {
 		names := map[string]bool{}
 		for i := range nodes.Items {
 			n := &nodes.Items[i]
-			Expect(corev1.IsNodeReady(n, time.Now())).To(BeTrue(), "node %s: %+v", n.Name, n.Status)
+			Expect(corev1.IsNodeReady(n)).To(BeTrue(), "node %s: %+v", n.Name, n.Status)
 			Expect(n.InternalIP()).NotTo(BeEmpty())
 			Expect(n.Status.NodeInfo.ContainerRuntimeVersion).To(HavePrefix("containerd://"))
 			Expect(n.Labels).To(HaveKeyWithValue(corev1.LabelHostname, n.Name))

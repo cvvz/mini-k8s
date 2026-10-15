@@ -4,7 +4,6 @@ package v1
 
 import (
 	"fmt"
-	"time"
 
 	"mini-k8s/pkg/api/resource"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
@@ -37,6 +36,8 @@ const (
 const (
 	NamespaceDefault = "default"
 	NamespaceSystem  = "kube-system"
+	// NamespaceNodeLease holds the kubelets' Leases.
+	NamespaceNodeLease = "kube-node-lease"
 )
 
 // FinalizerKubernetes is held by every namespace until the namespace
@@ -694,14 +695,12 @@ type PodTemplateSpec struct {
 	Spec              PodSpec `json:"spec"`
 }
 
-// NodeHeartbeatGrace is how stale a Ready heartbeat may be before the node is
-// treated as not ready by consumers that read Node status directly.
-const NodeHeartbeatGrace = 20 * time.Second
-
-// IsNodeReady reports whether the node's Ready condition is True and fresh.
-func IsNodeReady(n *Node, now time.Time) bool {
+// IsNodeReady reports whether the node's Ready condition is True. A node
+// that stops renewing its Lease is set to Unknown by the node lifecycle
+// controller, so the condition is current.
+func IsNodeReady(n *Node) bool {
 	c := n.Status.Condition(NodeReady)
-	return c != nil && c.Status == ConditionTrue && now.Sub(c.LastHeartbeatTime.Time) <= NodeHeartbeatGrace
+	return c != nil && c.Status == ConditionTrue
 }
 
 // IsPodTerminal reports whether the Pod has finished for good.

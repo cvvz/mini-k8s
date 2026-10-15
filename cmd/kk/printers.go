@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	coordinationv1 "mini-k8s/pkg/apis/coordination/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	networkingv1 "mini-k8s/pkg/apis/networking/v1"
@@ -186,7 +187,7 @@ func orNone(s string) string {
 
 func nodeStatus(n *corev1.Node, now time.Time) string {
 	s := "NotReady"
-	if corev1.IsNodeReady(n, now) {
+	if corev1.IsNodeReady(n) {
 		s = "Ready"
 	}
 	if n.Spec.Unschedulable {
@@ -325,6 +326,16 @@ func columnsFor(res scheme.ResourceInfo) []column {
 	case scheme.Endpoints.Resource:
 		return []column{nameColumn(),
 			{header: "ENDPOINTS", value: func(o metav1.Object, _ time.Time) string { return formatEndpoints(o.(*corev1.Endpoints)) }},
+			ageColumn(),
+		}
+	case scheme.Leases.Resource:
+		return []column{nameColumn(),
+			{header: "HOLDER", value: func(o metav1.Object, _ time.Time) string {
+				if h := o.(*coordinationv1.Lease).Spec.HolderIdentity; h != nil {
+					return *h
+				}
+				return ""
+			}},
 			ageColumn(),
 		}
 	case scheme.Ingresses.Resource:

@@ -112,7 +112,7 @@ func WaitForClusterReady(ctx context.Context, workers int) {
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		ready := 0
 		for i := range nodes.Items {
-			if corev1.IsNodeReady(&nodes.Items[i], time.Now()) {
+			if corev1.IsNodeReady(&nodes.Items[i]) {
 				ready++
 			}
 		}

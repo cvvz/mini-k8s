@@ -66,6 +66,12 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 		return a.scale(ctx, p)
 	case "rollout":
 		return a.rollout(ctx, p)
+	case "cordon", "uncordon":
+		return a.cordon(ctx, p, command == "cordon")
+	case "drain":
+		return a.drain(ctx, p)
+	case "taint":
+		return a.taint(ctx, p)
 	case "api-resources":
 		return a.apiResources(ctx)
 	case "version":

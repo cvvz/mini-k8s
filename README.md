@@ -29,6 +29,12 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   history, rollback, pause/resume, Available/Progressing conditions with a progress
   deadline); Endpoints controller; garbage collector; namespace controller; scheduler binding through the `binding` subresource, honouring
   taints and tolerations, and reporting unschedulable Pods with conditions and events.
+- **Node lifecycle**: kubelets renew a Lease in `kube-node-lease`; when one stops, the node
+  lifecycle controller marks the node Unknown, taints it `node.kubernetes.io/unreachable`
+  and takes its Pods out of Services; the taint-eviction controller evicts Pods once their
+  `tolerationSeconds` run out (300 s by default, as every Pod gets the default
+  tolerations); NoExecute taints evict untolerating Pods; the `pods/eviction` subresource
+  and `kk cordon/uncordon/drain/taint` maintain nodes.
 - **Self-hosted like kubeadm**: etcd, kube-apiserver, kube-controller-manager,
   kube-scheduler and the Ingress controller are **static Pods** of the `control-plane`
   node, and kube-proxy is a static Pod of every node, all visible as mirror Pods in
@@ -44,7 +50,7 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   tcpSocket, exec); CPU and memory requests/limits enforced through cgroups (`OOMKilled`)
   and QoS classes; `emptyDir` (disk or memory) and `hostPath` volumes; `hostNetwork`;
   `kk exec` runs commands in containers.
-- **kubelet**: node registration and heartbeats; static Pods from a manifest directory
+- **kubelet**: node registration, Lease renewal and status reports; static Pods from a manifest directory
   with mirror Pods; one worker per Pod; restarts with backoff (CrashLoopBackOff);
   `imagePullPolicy` and image pull errors (ErrImagePull/ImagePullBackOff); sandbox
   recreation after a node restart; logs with follow/tail/`--previous`; orphan cleanup;
@@ -72,7 +78,7 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   hour by an etcd lease); `kk describe` shows an object's events.
 - **kk**: `get` (`-o wide|json|yaml|name`, `-l`, `--field-selector`, `-A`, `-w`),
   `describe`, `apply`/`create` (server-side dry run of the whole batch first), `delete`
-  (`--grace-period`, `--force`, `--cascade`), `logs -f/-p/-c`, `exec`, `scale`, `rollout status|history|undo|pause|resume|restart`, `api-resources`,
+  (`--grace-period`, `--force`, `--cascade`), `logs -f/-p/-c`, `exec`, `scale`, `rollout status|history|undo|pause|resume|restart`, `cordon`/`uncordon`/`drain`/`taint`, `api-resources`,
   `version`, cluster lifecycle and `image load` (copy local images into the nodes).
 
 ```mermaid
@@ -140,7 +146,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | Component | Responsibility | Status |
 | --- | --- | --- |
 | kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation | done |
-| controller-manager | Deployment, ReplicaSet, Endpoints, garbage collector, namespace and node IPAM controllers; later node lifecycle and more | done, growing |
+| controller-manager | Deployment, ReplicaSet, Endpoints, garbage collector, namespace, node IPAM, node lifecycle and taint-eviction controllers | done, growing |
 | scheduler | Picks a node for each Pod (honouring taints and tolerations) and binds it | done |
 | kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
@@ -303,6 +309,12 @@ kk rollout history deployment/web
 kk rollout undo deployment/web           # back to the previous revision
 kk delete pod POD_NAME                   # graceful; the Deployment replaces it
 kk delete pod POD_NAME --force           # removed from the API immediately
+kk get leases -n kube-node-lease         # each kubelet renews its Lease every 2s
+kk drain worker-2                        # cordon worker-2 and move its Pods to worker-1
+kk get pods -o wide                      # the web Pods now all run on worker-1
+kk uncordon worker-2
+kk taint nodes worker-2 dedicated=demo:NoExecute   # evicts Pods that do not tolerate it
+kk taint nodes worker-2 dedicated-                  # remove it again
 
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # another namespace, exposed by a NodePort Service
@@ -353,7 +365,8 @@ into the nodes), also delete the volumes:
 | Resource | apiVersion | Supported fields and behaviour |
 | --- | --- | --- |
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
-| Node | `v1` | Registered and heartbeated by kubelets with `capacity`/`allocatable` (cpu, memory, pods) and role labels; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` and `spec.taints` (NoSchedule, PreferNoSchedule, NoExecute) are honoured by the scheduler; the control-plane node is tainted `node-role.kubernetes.io/control-plane:NoSchedule`. |
+| Node | `v1` | Registered by kubelets with `capacity`/`allocatable` (cpu, memory, pods) and role labels; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` and `spec.taints` (NoSchedule, PreferNoSchedule, NoExecute with `timeAdded`) are honoured by the scheduler and the taint-eviction controller; the control-plane node is tainted `node-role.kubernetes.io/control-plane:NoSchedule`; lost nodes become `Unknown` with the `node.kubernetes.io/unreachable` taints. |
+| Lease | `coordination.k8s.io/v1` | `holderIdentity`, `leaseDurationSeconds`, `renewTime`; each kubelet renews `kube-node-lease/<node>`. |
 | Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`); `hostNetwork`; `hostname`, `subdomain`; `dnsPolicy` (ClusterFirst, ClusterFirstWithHostNet, Default, None) and `dnsConfig`; `enableServiceLinks`; `tolerations`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
 | Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always), `strategy` (RollingUpdate with `maxSurge`/`maxUnavailable`, 25% each by default, or Recreate), `minReadySeconds`, `revisionHistoryLimit` (10), `paused`, `progressDeadlineSeconds` (600). Each template version runs as a ReplicaSet; annotations `deployment.kubernetes.io/revision` and `kubernetes.io/change-cause`. |
 | ReplicaSet | `apps/v1` | `replicas`, `selector` (immutable), `template`, `minReadySeconds`; usually owned by a Deployment. |
@@ -384,8 +397,9 @@ still not a cross-resource transaction.
   there are no ServiceAccounts, so the DNS add-on reads the API token from its node.
 - One control-plane node and two workers, fixed in `compose.yaml`; nodes are containers
   sharing the host kernel.
-- Lost nodes are not marked NotReady and their Pods are not evicted (nor by NoExecute
-  taints), so their Pods stay in Endpoints; no resource-aware scheduling or affinity.
+- No resource-aware scheduling, node selectors or affinity yet (M7b); no PodDisruptionBudgets
+  (evictions always succeed). Heartbeats are faster than Kubernetes' defaults: Leases are
+  renewed every 2 s and a node is Unknown after 15 s without one.
 - No DaemonSets, Jobs, CronJobs, StatefulSets, HPA, RBAC or control-plane HA.
 
 ## Development
@@ -411,8 +425,9 @@ make e2e E2E_FOCUS='sig-apps'     # run a subset by name
 ```
 
 **Run them only against a disposable project cluster.** Disruptive specs restart the
-control-plane node, a control-plane component and a worker, cordon the workers for a moment,
-flush kube-proxy's rules on a node and run `cluster down/up`. Specs use their own
+control-plane node, a control-plane component and a worker, stop a worker for a minute,
+cordon, drain and taint the workers, flush kube-proxy's rules on a node and run
+`cluster down/up`. Specs use their own
 namespaces and Ingress hosts, so the quick-start example may stay deployed.
 
 Every new feature ships with e2e specs.
@@ -426,7 +441,7 @@ Every new feature ships with e2e specs.
 | etcd download fails | Check access to `storage.googleapis.com`, or provide a Linux etcd v3.5.17 binary at `bin/etcd`. |
 | Pod shows `ErrImagePull`/`ImagePullBackOff` | `kk describe pod NAME` shows the events. Nodes pull public images themselves; local or private images must be copied in with `kk image load IMAGE`. |
 | `kk` cannot reach the API after `cluster up` | The control plane runs inside the control-plane node: `docker logs mini-k8s-control-plane-1` shows its kubelet, `docker exec mini-k8s-control-plane-1 crictl ps -a` its static Pods and `docker exec mini-k8s-control-plane-1 crictl logs CONTAINER` their output. |
-| Node stays `NotReady` | `kk describe node NAME` shows the reason (runtime, network plugin or sandbox image not ready); `docker logs mini-k8s-worker-1-1` shows containerd and kubelet output; `docker exec mini-k8s-worker-1-1 crictl pods` lists sandboxes. |
+| Node stays `NotReady` | `Unknown` with `Kubelet stopped posting node status.` means the kubelet stopped renewing its Lease (the node container is down: `docker ps -a`); otherwise `kk describe node NAME` shows the reason (runtime, network plugin or sandbox image not ready); `docker logs mini-k8s-worker-1-1` shows containerd and kubelet output; `docker exec mini-k8s-worker-1-1 crictl pods` lists sandboxes. |
 | Pod shows `CreatePodSandboxError` | The message comes from containerd and the CNI plugin; check the node's logs as above. |
 | Node build fails at `apt-get` or the crictl download | The node image needs Docker Hub, the Ubuntu archive and GitHub on first build; retry or configure a proxy/mirror. |
 | Node containers exit at start with a cgroup error | The host must use cgroup v2 and allow privileged containers. |
@@ -468,13 +483,15 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M5 | ReplicaSets, rolling updates and rollbacks, `kk rollout` | ✅ |
 | M6a | ClusterIP and NodePort Services, Endpoints, iptables kube-proxy, Ingress | ✅ |
 | M6b | Cluster DNS, headless and ExternalName Services, the `kubernetes` Service, Pod DNS configuration and Service environment variables | ✅ |
-| M7 | Scheduling framework, node leases and eviction, taints, cordon/drain | planned |
+| M7a | Node leases and lifecycle, taint-based eviction, eviction API, cordon/drain/taint | ✅ |
+| M7b | Scheduling framework: resource fit, node selectors and affinity, spreading; more workers | planned |
 | M8 | ConfigMaps, Secrets, volumes, PVCs | planned |
 | M9 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M7a node lifecycle plan (Chinese)](docs/superpowers/plans/2026-10-15-m7a-node-lifecycle.md)
 - [M6b cluster DNS plan (Chinese)](docs/superpowers/plans/2026-10-15-m6b-cluster-dns.md)
 - [M6a Services, kube-proxy and Ingress plan (Chinese)](docs/superpowers/plans/2026-10-15-m6a-services-kube-proxy-ingress.md)
 - [M5 ReplicaSets and rollouts plan (Chinese)](docs/superpowers/plans/2026-10-15-m5-replicaset-rollout.md)

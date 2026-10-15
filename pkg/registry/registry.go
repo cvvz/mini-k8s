@@ -6,6 +6,7 @@ import (
 	"mini-k8s/pkg/apiserver"
 	"mini-k8s/pkg/registry/apps/deployment"
 	"mini-k8s/pkg/registry/apps/replicaset"
+	"mini-k8s/pkg/registry/coordination/lease"
 	"mini-k8s/pkg/registry/core/endpoints"
 	"mini-k8s/pkg/registry/core/event"
 	"mini-k8s/pkg/registry/core/namespace"
@@ -46,6 +47,7 @@ func New(store *etcd3.Store, prefix string) *Registry {
 			scheme.Deployments.Resource: deployment.Strategy,
 			scheme.ReplicaSets.Resource: replicaset.Strategy,
 			scheme.Ingresses.Resource:   ingress.Strategy,
+			scheme.Leases.Resource:      lease.Strategy,
 		},
 		ServiceAllocators: allocators,
 		ServiceRepair:     service.NewRepair(store, prefix, allocators),

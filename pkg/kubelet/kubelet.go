@@ -410,65 +410,6 @@ func (k *Kubelet) cleanupOrphans(ctx context.Context) {
 	}
 }
 
-func (k *Kubelet) heartbeatLoop(ctx context.Context) {
-	for {
-		if err := k.heartbeat(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("kubelet: heartbeat: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(5 * time.Second):
-		}
-	}
-}
-
-// heartbeat registers the Node if needed and refreshes its Ready condition,
-// which is True only when the runtime, its network plugin and the sandbox
-// image are ready.
-func (k *Kubelet) heartbeat(ctx context.Context) error {
-	nodes := client.Nodes(k.client)
-	node, err := nodes.Get(ctx, k.cfg.NodeName)
-	if client.IsNotFound(err) {
-		labels := map[string]string{
-			corev1.LabelHostname: k.cfg.NodeName, corev1.LabelOSStable: "linux", corev1.LabelArchStable: runtime.GOARCH,
-		}
-		var taints []corev1.Taint
-		if k.cfg.Role != "" {
-			labels[corev1.LabelNodeRolePrefix+k.cfg.Role] = ""
-		}
-		if k.cfg.Role == "control-plane" {
-			taints = append(taints, corev1.Taint{Key: corev1.TaintNodeRoleControlPlane, Effect: corev1.TaintEffectNoSchedule})
-		}
-		node, err = nodes.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: k.cfg.NodeName, Labels: labels},
-			Spec: corev1.NodeSpec{Taints: taints}})
-	}
-	if err != nil {
-		return err
-	}
-	readiness := k.runtime.Status(ctx, k.cfg.SandboxImage)
-	now := metav1.Now()
-	ready := corev1.NodeCondition{Type: corev1.NodeReady, Status: corev1.ConditionTrue, Reason: "KubeletReady",
-		Message: "kubelet is posting ready status", LastHeartbeatTime: now, LastTransitionTime: now}
-	if !readiness.Ready {
-		ready.Status, ready.Reason, ready.Message = corev1.ConditionFalse, "KubeletNotReady", readiness.Message
-	}
-	if prev := node.Status.Condition(corev1.NodeReady); prev != nil && prev.Status == ready.Status {
-		ready.LastTransitionTime = prev.LastTransitionTime
-	}
-	runtimeVersion, _ := k.runtime.Version(ctx)
-	capacity := NodeCapacity("/proc/meminfo")
-	node.Status = corev1.NodeStatus{
-		Capacity: capacity, Allocatable: capacity,
-		Conditions: []corev1.NodeCondition{ready},
-		Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: k.cfg.Address}, {Type: corev1.NodeHostName, Address: k.cfg.NodeName}},
-		NodeInfo: corev1.NodeSystemInfo{KubeletVersion: Version, ContainerRuntimeVersion: runtimeVersion,
-			OperatingSystem: "linux", Architecture: runtime.GOARCH},
-	}
-	_, err = nodes.UpdateStatus(ctx, node)
-	return err
-}
-
 // Exec timeouts: the default, and the most a request may ask for.
 const (
 	DefaultExecTimeout = time.Minute

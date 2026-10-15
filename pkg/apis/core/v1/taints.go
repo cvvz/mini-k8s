@@ -1,6 +1,10 @@
 package v1
 
-import "fmt"
+import (
+	"fmt"
+
+	metav1 "mini-k8s/pkg/apis/meta/v1"
+)
 
 // Taint effects.
 const (
@@ -8,7 +12,7 @@ const (
 	TaintEffectNoSchedule = "NoSchedule"
 	// TaintEffectPreferNoSchedule is a soft NoSchedule (ignored by the scheduler here).
 	TaintEffectPreferNoSchedule = "PreferNoSchedule"
-	// TaintEffectNoExecute also evicts running Pods (eviction arrives in M7).
+	// TaintEffectNoExecute also evicts running Pods that do not tolerate it.
 	TaintEffectNoExecute = "NoExecute"
 )
 
@@ -23,6 +27,13 @@ const (
 	LabelNodeRolePrefix       = "node-role.kubernetes.io/"
 	LabelNodeRoleControlPlane = "node-role.kubernetes.io/control-plane"
 	TaintNodeRoleControlPlane = "node-role.kubernetes.io/control-plane"
+	// TaintNodeNotReady and TaintNodeUnreachable mirror a Ready condition
+	// of False and Unknown; the node lifecycle controller keeps them.
+	TaintNodeNotReady    = "node.kubernetes.io/not-ready"
+	TaintNodeUnreachable = "node.kubernetes.io/unreachable"
+	// DefaultTolerationSeconds is how long Pods tolerate those taints by
+	// default before they are evicted.
+	DefaultTolerationSeconds int64 = 300
 )
 
 // Taint repels Pods that do not tolerate it from a node.
@@ -30,6 +41,9 @@ type Taint struct {
 	Key    string `json:"key"`
 	Value  string `json:"value,omitempty"`
 	Effect string `json:"effect"`
+	// TimeAdded is when a NoExecute taint was added; tolerationSeconds
+	// count from it.
+	TimeAdded *metav1.Time `json:"timeAdded,omitempty"`
 }
 
 // String formats a taint like the scheduler's messages: "{key: value}".
@@ -84,4 +98,25 @@ func UntoleratedTaint(taints []Taint, tolerations []Toleration) (Taint, bool) {
 		}
 	}
 	return Taint{}, false
+}
+
+// AddDefaultTolerations gives a Pod the tolerations the
+// DefaultTolerationSeconds admission plugin adds: it stays on a node that
+// is not ready or unreachable for 300 seconds before it is evicted, unless
+// it tolerates those taints itself.
+func AddDefaultTolerations(spec *PodSpec) {
+	for _, key := range []string{TaintNodeNotReady, TaintNodeUnreachable} {
+		taint := Taint{Key: key, Effect: TaintEffectNoExecute}
+		covered := false
+		for _, t := range spec.Tolerations {
+			if t.ToleratesTaint(taint) {
+				covered = true
+			}
+		}
+		if !covered {
+			seconds := DefaultTolerationSeconds
+			spec.Tolerations = append(spec.Tolerations, Toleration{Key: key, Operator: TolerationOpExists,
+				Effect: TaintEffectNoExecute, TolerationSeconds: &seconds})
+		}
+	}
 }

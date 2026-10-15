@@ -436,7 +436,7 @@ func (c cluster) waitReady(ctx context.Context, since time.Time) error {
 				ready := map[string]bool{}
 				for i := range nodes.Items {
 					cond := nodes.Items[i].Status.Condition(corev1.NodeReady)
-					if corev1.IsNodeReady(&nodes.Items[i], time.Now()) && cond.LastHeartbeatTime.After(since) {
+					if corev1.IsNodeReady(&nodes.Items[i]) && cond.LastHeartbeatTime.After(since) {
 						ready[nodes.Items[i].Name] = true
 					}
 				}
