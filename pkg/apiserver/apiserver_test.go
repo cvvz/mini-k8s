@@ -380,3 +380,38 @@ func TestUnconditionalWritesRetryLostRaces(t *testing.T) {
 		t.Fatalf("conditional patch must not be retried into success: %v", err)
 	}
 }
+
+func TestKubernetesServiceIsKeptCurrent(t *testing.T) {
+	store, prefix := etcd3.New(etcdtesting.URL(t)), etcdtesting.Prefix(t)
+	s := apiserver.New(apiserver.Config{Strategies: registry.New(store, prefix).Strategies, Store: store, Token: "secret", Prefix: prefix})
+	ctx := context.Background()
+	if err := s.Bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewServer(s)
+	t.Cleanup(hs.Close)
+	c := client.New(hs.URL, "secret")
+	k := apiserver.KubernetesService{ClusterIP: "10.96.0.1", Address: "172.18.0.2", Port: 8080}
+	for range 2 { // idempotent
+		if err := s.EnsureKubernetesService(ctx, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc, err := client.Services(c, "default").Get(ctx, "kubernetes")
+	if err != nil || svc.Spec.ClusterIP != "10.96.0.1" || svc.Spec.Ports[0].Port != 443 || svc.Spec.Ports[0].Name != "https" ||
+		svc.Spec.Ports[0].TargetPort.IntVal != 8080 || svc.Labels["provider"] != "kubernetes" {
+		t.Fatalf("Service: %v %+v", err, svc)
+	}
+	ep, err := client.Endpoints(c, "default").Get(ctx, "kubernetes")
+	if err != nil || ep.Subsets[0].Addresses[0].IP != "172.18.0.2" || ep.Subsets[0].Ports[0].Port != 8080 {
+		t.Fatalf("Endpoints: %v %+v", err, ep)
+	}
+	// The API server moved: the Endpoints follow.
+	k.Address = "172.18.0.9"
+	if err := s.EnsureKubernetesService(ctx, k); err != nil {
+		t.Fatal(err)
+	}
+	if ep, _ := client.Endpoints(c, "default").Get(ctx, "kubernetes"); ep.Subsets[0].Addresses[0].IP != "172.18.0.9" {
+		t.Fatalf("Endpoints not updated: %+v", ep.Subsets)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"mini-k8s/pkg/apis/core/validation"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	"mini-k8s/pkg/apiserver"
+	"mini-k8s/pkg/util/deepcopy"
 )
 
 // Strategy defaults and validates Pods; new Pods start Pending with their QoS
@@ -20,7 +21,10 @@ var Strategy = apiserver.Strategy{
 	},
 	Validate: func(obj metav1.Object) []string { return validation.ValidatePodSpec("spec", &obj.(*corev1.Pod).Spec) },
 	ValidateUpdate: func(obj, old metav1.Object) []string {
-		if !reflect.DeepEqual(obj.(*corev1.Pod).Spec, old.(*corev1.Pod).Spec) {
+		// Pods stored before a field gained a default compare as defaulted.
+		oldSpec := deepcopy.Copy(&old.(*corev1.Pod).Spec)
+		corev1.SetDefaultsPodSpec(oldSpec)
+		if !reflect.DeepEqual(obj.(*corev1.Pod).Spec, *oldSpec) {
 			return []string{"spec: Forbidden: pod spec is immutable after creation"}
 		}
 		return nil

@@ -27,6 +27,7 @@ import (
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/client/informers"
 	"mini-k8s/pkg/client/record"
+	"mini-k8s/pkg/kubelet/envvars"
 	"mini-k8s/pkg/kubelet/kuberuntime"
 	"mini-k8s/pkg/kubelet/prober"
 	"mini-k8s/pkg/network/hostgw"
@@ -79,6 +80,7 @@ type Kubelet struct {
 	recorder *record.Recorder
 	pods     *informers.Informer[corev1.Pod, *corev1.Pod]
 	nodes    *informers.Informer[corev1.Node, *corev1.Node]
+	services *informers.Informer[corev1.Service, *corev1.Service]
 	network  chan struct{}
 	probes   *prober.Manager
 
@@ -117,6 +119,7 @@ func New(c *client.Client, rt Runtime, recorder *record.Recorder, cfg Config) *K
 		default:
 		}
 	}
+	k.services = informers.New(client.Services(c, ""), client.ListOptions{}, 0)
 	k.nodes = informers.New(client.Nodes(c), client.ListOptions{}, 0)
 	k.nodes.AddHandler(informers.Handler[*corev1.Node]{
 		OnAdd: func(*corev1.Node) { poke() }, OnUpdate: func(_, _ *corev1.Node) { poke() }, OnDelete: func(*corev1.Node) { poke() },
@@ -149,11 +152,13 @@ func (k *Kubelet) Run(ctx context.Context) {
 	go k.nodes.Run(ctx)
 	go k.networkLoop(ctx)
 	go k.pods.Run(ctx)
+	go k.services.Run(ctx)
 	// Static Pods run without the API, which may itself be one of them.
 	if k.cfg.StaticPodPath != "" {
 		go k.staticLoop(ctx)
 	}
-	if !informers.WaitForSync(ctx, k.pods.HasSynced) {
+	// Containers get the variables of the Services that exist when they start.
+	if !informers.WaitForSync(ctx, k.pods.HasSynced, k.services.HasSynced) {
 		return
 	}
 	poll := time.NewTicker(time.Second)
@@ -565,4 +570,9 @@ func containerStatus(list []corev1.ContainerStatus, name string) *corev1.Contain
 		}
 	}
 	return nil
+}
+
+// ServiceEnv returns the Service environment variables of a Pod's containers.
+func (k *Kubelet) ServiceEnv(pod *corev1.Pod) []corev1.EnvVar {
+	return envvars.ForPod(pod, k.services.List("", nil))
 }

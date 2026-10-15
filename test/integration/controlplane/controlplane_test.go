@@ -547,3 +547,39 @@ func TestPodsOwnedDirectlyByADeploymentAreReplaced(t *testing.T) {
 		return ok && client.IsNotFound(err), detail
 	})
 }
+
+// A ReplicaSet whose hash an older version computed (before new Pod
+// defaults existed) but whose template is the Deployment's stays the new
+// ReplicaSet: upgrading must not roll every Deployment.
+func TestReplicaSetWithAnOlderHashIsStillCurrent(t *testing.T) {
+	c := framework.StartTestServer(t)
+	ctx := startControlPlane(t, c, "worker-1")
+	d := newDeployment("legacy", 2, "img:1")
+	tpl := d.Spec.Template
+	tpl.Labels = map[string]string{"app": "legacy", appsv1.DefaultDeploymentUniqueLabelKey: "older"}
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy-older", Labels: tpl.Labels, Annotations: map[string]string{appsv1.RevisionAnnotation: "1"}},
+		Spec: appsv1.ReplicaSetSpec{Replicas: ptr.To[int32](2), Template: tpl,
+			Selector: &metav1.LabelSelector{MatchLabels: tpl.Labels}},
+	}
+	if _, err := client.ReplicaSets(c, "default").Create(ctx, rs); err != nil {
+		t.Fatal(err)
+	}
+	created, err := client.Deployments(c, "default").Create(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Deployment adopts the ReplicaSet as its current one", func() (bool, string) {
+		ok, detail := rolledOut(t, c, "legacy", "img:1", 2)
+		rsets := replicaSetsOf(t, c, "legacy")
+		if len(rsets) != 1 || rsets[0].Name != "legacy-older" {
+			return false, fmt.Sprintf("%d replica sets", len(rsets))
+		}
+		ref := metav1.ControllerOf(&rsets[0].ObjectMeta)
+		return ok && ref != nil && ref.UID == created.UID, detail
+	})
+	time.Sleep(2 * time.Second)
+	if rsets := replicaSetsOf(t, c, "legacy"); len(rsets) != 1 {
+		t.Fatalf("a new ReplicaSet was created: %d", len(rsets))
+	}
+}

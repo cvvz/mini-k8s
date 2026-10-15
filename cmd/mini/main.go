@@ -1,8 +1,8 @@
 // Command mini is a multi-call binary, like Kubernetes' former hyperkube:
 // its first argument selects the component to run.
 //
-//	mini kube-apiserver | kube-controller-manager | kube-scheduler | node-init | kube-proxy | ingress-controller
-//	mini demo | pause | fetch URL | sleep DURATION | cat FILE... | write FILE TEXT | alloc SIZE
+//	mini kube-apiserver | kube-controller-manager | kube-scheduler | node-init | kube-proxy | ingress-controller | cluster-dns
+//	mini demo | pause | fetch URL | lookup [-t TYPE] NAME | sleep DURATION | cat FILE... | write FILE TEXT | alloc SIZE
 //
 // Invoked as mini-cni or loopback (through symlinks in /opt/cni/bin) it is
 // the CNI plugin.
@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,10 +37,11 @@ var components = map[string]component{
 	"node-init":               runNodeInit,
 	"kube-proxy":              runKubeProxy,
 	"ingress-controller":      runIngressController,
+	"cluster-dns":             runClusterDNS,
 }
 
 func usage() string {
-	names := []string{"demo", "pause", "fetch URL", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE"}
+	names := []string{"demo", "pause", "fetch URL", "lookup [-t TYPE] NAME", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE"}
 	for name := range components {
 		names = append(names, name)
 	}
@@ -70,6 +72,8 @@ func main() {
 		return
 	case "fetch":
 		os.Exit(runFetch(os.Args[2:]))
+	case "lookup":
+		os.Exit(runLookup(os.Args[2:]))
 	case "sleep":
 		os.Exit(runSleep(os.Args[2:]))
 	case "cat":
@@ -89,7 +93,19 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	run(ctx, client.New(env("MINI_API", "http://apiserver:8080"), token), token)
+	run(ctx, client.New(apiURL(), token), token)
+}
+
+// apiURL is MINI_API, or inside a Pod the kubernetes Service from the
+// environment the kubelet injects (mini's API is plain HTTP).
+func apiURL() string {
+	if url := os.Getenv("MINI_API"); url != "" {
+		return url
+	}
+	if host := os.Getenv("KUBERNETES_SERVICE_HOST"); host != "" {
+		return "http://" + net.JoinHostPort(host, env("KUBERNETES_SERVICE_PORT", "443"))
+	}
+	return "http://control-plane:8080"
 }
 
 // loadToken returns the API token from MINI_TOKEN or, for static Pods that

@@ -38,7 +38,7 @@ test/e2e/
 │   └── debug.go       # 失败时输出资源、容器与组件日志
 ├── apimachinery/      # [sig-api-machinery] 并发控制、校验、认证
 ├── apps/              # [sig-apps] 工作负载控制器
-├── network/           # [sig-network] Pod 网络、Service、kube-proxy 与 Ingress
+├── network/           # [sig-network] Pod 网络、Service、kube-proxy、集群 DNS 与 Ingress
 ├── node/              # [sig-node] Node 与 kubelet
 └── lifecycle/         # [sig-cluster-lifecycle] 控制面重启、down/up（Disruptive）
 ```

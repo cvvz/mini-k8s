@@ -317,7 +317,7 @@ func columnsFor(res scheme.ResourceInfo) []column {
 		return []column{nameColumn(),
 			{header: "TYPE", value: func(o metav1.Object, _ time.Time) string { return svc(o).Spec.Type }},
 			{header: "CLUSTER-IP", value: func(o metav1.Object, _ time.Time) string { return orNone(svc(o).Spec.ClusterIP) }},
-			{header: "EXTERNAL-IP", value: func(metav1.Object, time.Time) string { return "<none>" }},
+			{header: "EXTERNAL-IP", value: func(o metav1.Object, _ time.Time) string { return orNone(svc(o).Spec.ExternalName) }},
 			{header: "PORT(S)", value: func(o metav1.Object, _ time.Time) string { return servicePorts(svc(o)) }},
 			ageColumn(),
 			{header: "SELECTOR", wide: true, value: func(o metav1.Object, _ time.Time) string { return orNone(labelsString(svc(o).Spec.Selector)) }},

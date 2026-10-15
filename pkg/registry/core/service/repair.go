@@ -59,13 +59,15 @@ func (r *Repair) RunOnce(ctx context.Context) error {
 		if err := json.Unmarshal(kv.Value, &svc); err != nil {
 			return err
 		}
-		if svc.Spec.ClusterIP == "" {
+		if svc.Spec.ClusterIP == "" && svc.Spec.Type != corev1.ServiceTypeExternalName {
 			if err := r.migrate(ctx, kv, &svc); err != nil {
 				log.Printf("service repair: assign a cluster IP to %s/%s: %v", svc.Namespace, svc.Name, err)
 				continue
 			}
 		}
-		usedIPs[svc.Spec.ClusterIP] = true
+		if corev1.IsServiceIPSet(&svc) {
+			usedIPs[svc.Spec.ClusterIP] = true
+		}
 		for _, p := range nodePorts(&svc.Spec) {
 			usedPorts[p] = true
 		}

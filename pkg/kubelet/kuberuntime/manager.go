@@ -6,6 +6,7 @@ package kuberuntime
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -48,8 +49,14 @@ const DefaultPodLogsDir = "/var/log/pods"
 type Manager struct {
 	runtime runtimeapi.RuntimeServiceClient
 	images  runtimeapi.ImageServiceClient
-	// DNS is applied to every sandbox when set.
-	DNS *runtimeapi.DNSConfig
+	// DNS returns the resolver configuration of a Pod's sandbox; nil leaves
+	// the node's own (what hostNetwork Pods use by default).
+	DNS func(pod *corev1.Pod) *runtimeapi.DNSConfig
+	// Env returns the variables every container of a Pod gets (the Service
+	// links); the container's own variables override them.
+	Env func(pod *corev1.Pod) []corev1.EnvVar
+	// ClusterDomain names Pods in the kubelet-managed /etc/hosts.
+	ClusterDomain string
 	// PodLogsDir is the root of Pod log directories.
 	PodLogsDir string
 	// PodsDir is the root of per-Pod kubelet data (emptyDir volumes).
@@ -165,24 +172,31 @@ func namespaces(pod *corev1.Pod) *runtimeapi.NamespaceOption {
 func (m *Manager) sandboxConfig(pod *corev1.Pod, attempt uint32) *runtimeapi.PodSandboxConfig {
 	cfg := &runtimeapi.PodSandboxConfig{
 		Metadata:     &runtimeapi.PodSandboxMetadata{Name: pod.Name, Namespace: pod.Namespace, Uid: pod.UID, Attempt: attempt},
-		Hostname:     podHostname(pod.Name),
+		Hostname:     podHostname(pod),
 		LogDirectory: m.PodLogDir(pod),
-		DnsConfig:    m.DNS,
 		Labels:       podLabels(pod),
 		Linux: &runtimeapi.LinuxPodSandboxConfig{SecurityContext: &runtimeapi.LinuxSandboxSecurityContext{
 			NamespaceOptions: namespaces(pod), Privileged: hasPrivilegedContainer(pod)}},
 	}
+	if m.DNS != nil {
+		cfg.DnsConfig = m.DNS(pod)
+	}
 	if pod.Spec.HostNetwork {
-		// The node's hostname and resolver apply, as for host-network Pods
-		// in Kubernetes.
-		cfg.Hostname, cfg.DnsConfig = "", nil
+		cfg.Hostname = "" // the node's hostname, as for host-network Pods in Kubernetes
 	}
 	return cfg
 }
 
+// containerExtras is what a container gets beyond its spec: the
+// kubelet-managed /etc/hosts and the Service environment variables.
+type containerExtras struct {
+	hostsFile string
+	env       []corev1.EnvVar
+}
+
 // containerConfig describes one instance of c; volumes maps the Pod's volume
 // names to their node paths.
-func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32, volumes map[string]string) *runtimeapi.ContainerConfig {
+func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32, volumes map[string]string, extras containerExtras) *runtimeapi.ContainerConfig {
 	labels := podLabels(pod)
 	labels[LabelContainerName] = c.Name
 	cfg := &runtimeapi.ContainerConfig{
@@ -195,11 +209,25 @@ func containerConfig(pod *corev1.Pod, c corev1.Container, attempt uint32, volume
 		Linux: &runtimeapi.LinuxContainerConfig{Resources: linuxResources(c.Resources),
 			SecurityContext: securityContext(pod, c)},
 	}
+	own := map[string]bool{}
+	for _, e := range c.Env {
+		own[e.Name] = true
+	}
+	for _, e := range extras.env {
+		if !own[e.Name] {
+			cfg.Envs = append(cfg.Envs, &runtimeapi.KeyValue{Key: e.Name, Value: []byte(e.Value)})
+		}
+	}
 	for _, e := range c.Env {
 		cfg.Envs = append(cfg.Envs, &runtimeapi.KeyValue{Key: e.Name, Value: []byte(e.Value)})
 	}
+	mounted := map[string]bool{}
 	for _, vm := range c.VolumeMounts {
 		cfg.Mounts = append(cfg.Mounts, &runtimeapi.Mount{ContainerPath: vm.MountPath, HostPath: volumes[vm.Name], Readonly: vm.ReadOnly})
+		mounted[filepath.Clean(vm.MountPath)] = true
+	}
+	if extras.hostsFile != "" && !mounted["/etc/hosts"] {
+		cfg.Mounts = append(cfg.Mounts, &runtimeapi.Mount{ContainerPath: "/etc/hosts", HostPath: extras.hostsFile})
 	}
 	return cfg
 }
@@ -256,9 +284,13 @@ func linuxResources(r corev1.ResourceRequirements) *runtimeapi.LinuxContainerRes
 	return res
 }
 
-// podHostname derives a valid hostname (at most 63 characters, not ending in
-// '-' or '.') from the Pod name.
-func podHostname(name string) string {
+// podHostname is spec.hostname, or a valid hostname (at most 63
+// characters, not ending in '-' or '.') derived from the Pod name.
+func podHostname(pod *corev1.Pod) string {
+	if pod.Spec.Hostname != "" {
+		return pod.Spec.Hostname
+	}
+	name := pod.Name
 	if len(name) > 63 {
 		name = name[:63]
 	}

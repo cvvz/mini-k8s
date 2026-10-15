@@ -151,6 +151,39 @@ type PodSpec struct {
 	HostNetwork bool `json:"hostNetwork,omitempty"`
 	// Tolerations let the Pod run on nodes with matching taints.
 	Tolerations []Toleration `json:"tolerations,omitempty"`
+	// Hostname is the Pod's host name (default: its name); with Subdomain
+	// set to a headless Service's name the Pod gets the DNS name
+	// <hostname>.<subdomain>.<namespace>.svc.<cluster domain>.
+	Hostname  string `json:"hostname,omitempty"`
+	Subdomain string `json:"subdomain,omitempty"`
+	// DNSPolicy is ClusterFirst (default: the cluster DNS), ClusterFirstWithHostNet,
+	// Default (the node's resolver) or None (only DNSConfig).
+	DNSPolicy string        `json:"dnsPolicy,omitempty"`
+	DNSConfig *PodDNSConfig `json:"dnsConfig,omitempty"`
+	// EnableServiceLinks injects the environment variables of the Services
+	// in the Pod's namespace (default true).
+	EnableServiceLinks *bool `json:"enableServiceLinks,omitempty"`
+}
+
+// DNS policies.
+const (
+	DNSClusterFirstWithHostNet = "ClusterFirstWithHostNet"
+	DNSClusterFirst            = "ClusterFirst"
+	DNSDefault                 = "Default"
+	DNSNone                    = "None"
+)
+
+// PodDNSConfig is merged into the resolver configuration the policy yields.
+type PodDNSConfig struct {
+	Nameservers []string             `json:"nameservers,omitempty"`
+	Searches    []string             `json:"searches,omitempty"`
+	Options     []PodDNSConfigOption `json:"options,omitempty"`
+}
+
+// PodDNSConfigOption is a resolv.conf option such as ndots:2.
+type PodDNSConfigOption struct {
+	Name  string  `json:"name"`
+	Value *string `json:"value,omitempty"`
 }
 
 // Annotations of static Pods and their mirror Pods.
@@ -462,6 +495,12 @@ func IsPodReady(p *Pod) bool {
 	return c != nil && c.Status == ConditionTrue
 }
 
+// IsServiceIPSet reports whether a Service has a cluster IP (not headless,
+// not ExternalName).
+func IsServiceIPSet(s *Service) bool {
+	return s.Spec.ClusterIP != "" && s.Spec.ClusterIP != ClusterIPNone
+}
+
 // FindPort resolves a Service port's targetPort for a Pod: a number is used
 // as is, a name is looked up among the container ports with the same
 // protocol (like FindPort in k8s.io/kubernetes/pkg/api/v1/pod).
@@ -493,8 +532,11 @@ type Service struct {
 
 // Service types.
 const (
-	ServiceTypeClusterIP = "ClusterIP"
-	ServiceTypeNodePort  = "NodePort"
+	ServiceTypeClusterIP    = "ClusterIP"
+	ServiceTypeNodePort     = "NodePort"
+	ServiceTypeExternalName = "ExternalName"
+	// ClusterIPNone makes a Service headless: DNS returns its endpoints.
+	ClusterIPNone = "None"
 )
 
 // Service session affinities.
@@ -513,15 +555,21 @@ const (
 
 // ServiceSpec selects backends and ports.
 type ServiceSpec struct {
-	// Type is ClusterIP (the default) or NodePort.
+	// Type is ClusterIP (the default), NodePort or ExternalName (a DNS
+	// alias for ExternalName).
 	Type string `json:"type,omitempty"`
 	// Selector picks the backend Pods; without one the Endpoints are
 	// managed by the user.
 	Selector map[string]string `json:"selector,omitempty"`
 	Ports    []ServicePort     `json:"ports"`
 	// ClusterIP is allocated from the Service CIDR unless given; it never
-	// changes afterwards.
+	// changes afterwards. "None" makes the Service headless.
 	ClusterIP string `json:"clusterIP,omitempty"`
+	// ExternalName is the DNS name an ExternalName Service is an alias for.
+	ExternalName string `json:"externalName,omitempty"`
+	// PublishNotReadyAddresses lists every Pod as ready in the Endpoints,
+	// for peers that must find each other before they are ready.
+	PublishNotReadyAddresses bool `json:"publishNotReadyAddresses,omitempty"`
 	// SessionAffinity is None or ClientIP (each client sticks to one backend).
 	SessionAffinity       string                 `json:"sessionAffinity,omitempty"`
 	SessionAffinityConfig *SessionAffinityConfig `json:"sessionAffinityConfig,omitempty"`

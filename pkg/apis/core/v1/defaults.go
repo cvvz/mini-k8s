@@ -15,6 +15,12 @@ func SetDefaultsPodSpec(spec *PodSpec) {
 	if spec.RestartPolicy == "" {
 		spec.RestartPolicy = RestartPolicyAlways
 	}
+	if spec.DNSPolicy == "" {
+		spec.DNSPolicy = DNSClusterFirst
+	}
+	if spec.EnableServiceLinks == nil {
+		spec.EnableServiceLinks = ptr.To(true)
+	}
 	for _, list := range [][]Container{spec.InitContainers, spec.Containers} {
 		for i := range list {
 			c := &list[i]

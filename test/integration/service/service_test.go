@@ -323,3 +323,48 @@ func TestServicesWithoutSelectorKeepUserEndpoints(t *testing.T) {
 		t.Fatalf("user Endpoints changed: %v %+v", err, e)
 	}
 }
+
+func TestHeadlessAndExternalNameServices(t *testing.T) {
+	c, reg := framework.StartTestServerWithRegistry(t)
+	startEndpointsController(t, c)
+	ctx := context.Background()
+	svcs := client.Services(c, "default")
+
+	headless, err := svcs.Create(ctx, newService("db", func(s *corev1.Service) {
+		s.Spec.ClusterIP = corev1.ClusterIPNone
+		s.Spec.PublishNotReadyAddresses = true
+	}))
+	if err != nil || headless.Spec.ClusterIP != corev1.ClusterIPNone {
+		t.Fatalf("headless: %v %+v", err, headless)
+	}
+	labels := map[string]string{"app": "db"}
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-0", Labels: labels},
+		Spec: corev1.PodSpec{NodeName: "n1", Hostname: "db-0", Subdomain: "db", Containers: []corev1.Container{{Name: "c", Image: "img"}}}}
+	p, err = client.Pods(c, "default").Create(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setReady(t, c, p, "10.244.1.9", false)
+	e := waitEndpoints(t, c, "db", []epView{{Ready: "10.244.1.9(db-0) ", Ports: ":80 "}})
+	if e.Subsets[0].Addresses[0].Hostname != "db-0" {
+		t.Fatalf("hostname: %+v", e.Subsets[0].Addresses[0])
+	}
+
+	// A ClusterIP Service turned into an ExternalName gives its address back,
+	// and gets a new one when it turns back.
+	web, err := svcs.Create(ctx, newService("web", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, err := svcs.Patch(ctx, "web", map[string]any{"spec": map[string]any{"type": "ExternalName", "externalName": "web.example.com"}})
+	if err != nil || external.Spec.ClusterIP != "" {
+		t.Fatalf("to ExternalName: %v %+v", err, external)
+	}
+	if ips, _ := reg.ServiceAllocators.IPs.Allocated(ctx); ips[web.Spec.ClusterIP] {
+		t.Fatalf("%s still allocated", web.Spec.ClusterIP)
+	}
+	back, err := svcs.Patch(ctx, "web", map[string]any{"spec": map[string]any{"type": "ClusterIP"}})
+	if err != nil || back.Spec.ClusterIP == "" || back.Spec.ExternalName != "" {
+		t.Fatalf("back to ClusterIP: %v %+v", err, back)
+	}
+}

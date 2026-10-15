@@ -171,8 +171,8 @@ func BuildRules(services []*corev1.Service, endpoints []*corev1.Endpoints, clust
 
 	active := map[string]bool{}
 	for _, svc := range sorted {
-		if svc.Spec.ClusterIP == "" {
-			continue // stored before cluster IPs existed; the API server's repair assigns one
+		if !corev1.IsServiceIPSet(svc) {
+			continue // headless, ExternalName, or stored before cluster IPs existed (the repair assigns one)
 		}
 		for i := range svc.Spec.Ports {
 			port := &svc.Spec.Ports[i]

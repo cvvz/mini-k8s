@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	"mini-k8s/pkg/client"
+	"mini-k8s/test/integration/framework"
 )
 
 func TestTokenCreationAndReuse(t *testing.T) {
@@ -201,7 +203,7 @@ func TestClusterUpRestartsStaticPodsRunningAnOldImage(t *testing.T) {
 			return "", nil
 		},
 	}
-	if err := c.restartStaleStaticPods(context.Background(), "control-plane"); err != nil {
+	if err := c.restartStaleSystemPods(context.Background(), "control-plane"); err != nil {
 		t.Fatal(err)
 	}
 	var stops []string
@@ -212,5 +214,26 @@ func TestClusterUpRestartsStaticPodsRunningAnOldImage(t *testing.T) {
 	}
 	if len(stops) != 1 || !strings.HasSuffix(stops[0], " old") {
 		t.Fatalf("only the container on the old image restarts: %v", stops)
+	}
+}
+
+func TestClusterUpAppliesTheAddons(t *testing.T) {
+	var out bytes.Buffer
+	c := cluster{client: framework.StartTestServer(t), out: &out, addons: filepath.Join("..", "..", "build", "manifests", "addons")}
+	ctx := context.Background()
+	for range 2 { // cluster up runs on every start
+		if err := c.applyAddons(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc, err := client.Services(c.client, "kube-system").Get(ctx, "kube-dns")
+	if err != nil || svc.Spec.ClusterIP != "10.96.0.10" {
+		t.Fatalf("kube-dns Service: %v %+v", err, svc)
+	}
+	if _, err := client.Deployments(c.client, "kube-system").Get(ctx, "kube-dns"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "deployment.apps/kube-dns unchanged") {
+		t.Fatalf("re-applying changes nothing:\n%s", out.String())
 	}
 }

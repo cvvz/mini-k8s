@@ -48,7 +48,14 @@ func runKubelet(ctx context.Context, c *client.Client, token string) {
 			log.Printf("kubelet: dns forwarder: %v", err)
 		}
 	}()
-	rt.DNS = &runtimeapi.DNSConfig{Servers: []string{address}}
+	searches, err := dns.Searches("/etc/resolv.conf")
+	if err != nil {
+		log.Fatal(err)
+	}
+	domain := env("MINI_CLUSTER_DOMAIN", "cluster.local")
+	dnsConfigurer := &dns.Configurer{ClusterDNS: []string{env("MINI_CLUSTER_DNS", "10.96.0.10")}, ClusterDomain: domain,
+		HostServers: []string{address}, HostSearches: searches}
+	rt.DNS, rt.ClusterDomain = dnsConfigurer.For, domain
 	rec := record.New(c, "kubelet", node)
 	k := kubelet.New(c, rt, rec, kubelet.Config{
 		NodeName:     node,
@@ -63,6 +70,7 @@ func runKubelet(ctx context.Context, c *client.Client, token string) {
 			ClusterCIDR: env("MINI_CLUSTER_CIDR", nodeipam.DefaultClusterCIDR)},
 	})
 	rt.Probes = k.Probes()
+	rt.Env = k.ServiceEnv
 	go rec.Run(ctx)
 	go k.Run(ctx)
 	serve(ctx, ":10250", k.Handler())

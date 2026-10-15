@@ -43,6 +43,12 @@ func (m *Manager) SyncPod(ctx context.Context, pod *corev1.Pod) corev1.PodStatus
 	// Volumes are prepared before containers start; a failure only keeps new
 	// containers from starting.
 	r.volumes, r.volumeErr = m.setupVolumes(pod)
+	if r.volumeErr == nil {
+		r.extras.hostsFile, r.volumeErr = m.ensureHostsFile(pod, ip)
+	}
+	if m.Env != nil {
+		r.extras.env = m.Env(pod)
+	}
 	if r.containersStarted() {
 		// Init containers finished before any container was created in this
 		// sandbox; never re-run them (a transient runtime error must not send
@@ -73,6 +79,7 @@ type podRun struct {
 	sandbox   *runtimeapi.PodSandboxConfig
 	volumes   map[string]string // node paths by volume name
 	volumeErr error
+	extras    containerExtras
 }
 
 // outcome is a container's situation after one sync step.
@@ -307,7 +314,7 @@ func (r *podRun) start(c corev1.Container, cs *corev1.ContainerStatus, attempt u
 		return outcomeWaiting
 	}
 	created, err := m.runtime.CreateContainer(ctx, &runtimeapi.CreateContainerRequest{
-		PodSandboxId: r.sandboxID, Config: containerConfig(r.pod, c, attempt, r.volumes), SandboxConfig: r.sandbox})
+		PodSandboxId: r.sandboxID, Config: containerConfig(r.pod, c, attempt, r.volumes, r.extras), SandboxConfig: r.sandbox})
 	if err != nil {
 		cs.State = waitingState(ReasonCreateContainerError, err.Error())
 		return outcomeWaiting

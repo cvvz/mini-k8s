@@ -1,0 +1,87 @@
+# The cluster DNS add-on, applied by `kk cluster up` once the nodes are
+# Ready (like kubeadm's CoreDNS add-on): two replicas of `mini cluster-dns`
+# behind the kube-dns Service, whose address every Pod with the default
+# dnsPolicy (ClusterFirst) gets as its nameserver. The DNS Pods themselves
+# use the node's resolver as upstream and reach the API through the
+# kubernetes Service; mini has no ServiceAccounts, so they read the token
+# from the node.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-dns
+  namespace: kube-system
+  labels:
+    k8s-app: kube-dns
+spec:
+  clusterIP: 10.96.0.10
+  selector:
+    k8s-app: kube-dns
+  ports:
+  - name: dns
+    port: 53
+    protocol: UDP
+  - name: dns-tcp
+    port: 53
+    protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-dns
+  namespace: kube-system
+  labels:
+    k8s-app: kube-dns
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      k8s-app: kube-dns
+  template:
+    metadata:
+      labels:
+        k8s-app: kube-dns
+    spec:
+      dnsPolicy: Default
+      containers:
+      - name: dns
+        image: mini-k8s:local
+        imagePullPolicy: Never
+        command: ["/mini", "cluster-dns"]
+        env:
+        - name: MINI_TOKEN_FILE
+          value: /etc/mini-k8s/token
+        ports:
+        - name: dns
+          containerPort: 53
+          protocol: UDP
+        - name: dns-tcp
+          containerPort: 53
+          protocol: TCP
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 2
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+          failureThreshold: 5
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            memory: 128Mi
+        volumeMounts:
+        - name: credentials
+          mountPath: /etc/mini-k8s
+          readOnly: true
+      volumes:
+      - name: credentials
+        hostPath:
+          path: /etc/mini-k8s
+          type: Directory

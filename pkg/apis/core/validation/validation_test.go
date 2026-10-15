@@ -268,3 +268,78 @@ func TestValidateEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestHeadlessAndExternalNameServices(t *testing.T) {
+	ok := []*corev1.ServiceSpec{
+		service(func(s *corev1.ServiceSpec) { s.ClusterIP = corev1.ClusterIPNone; s.Ports = nil }),
+		service(func(s *corev1.ServiceSpec) {
+			s.Type, s.ExternalName, s.Ports, s.Selector = corev1.ServiceTypeExternalName, "db.example.com", nil, nil
+		}),
+	}
+	for _, spec := range ok {
+		if errs := ValidateServiceSpec(spec); len(errs) != 0 {
+			t.Fatalf("%+v: %v", spec, errs)
+		}
+	}
+	for want, mutate := range map[string]func(*corev1.ServiceSpec){
+		"spec.externalName: Required value": func(s *corev1.ServiceSpec) { s.Type = corev1.ServiceTypeExternalName },
+		`spec.clusterIP: Invalid value: "10.96.0.9": may not be set for ExternalName services`: func(s *corev1.ServiceSpec) {
+			s.Type, s.ExternalName, s.ClusterIP = corev1.ServiceTypeExternalName, "a.example.com", "10.96.0.9"
+		},
+		`spec.clusterIP: Invalid value: "None": may not be set to 'None' for NodePort services`: func(s *corev1.ServiceSpec) {
+			s.Type, s.ClusterIP = corev1.ServiceTypeNodePort, corev1.ClusterIPNone
+		},
+		"spec.externalName: Forbidden: may not be set when `type` is 'ClusterIP'": func(s *corev1.ServiceSpec) { s.ExternalName = "x.example.com" },
+		`spec.externalName: Invalid value: "Not A Name"`: func(s *corev1.ServiceSpec) {
+			s.Type, s.ExternalName = corev1.ServiceTypeExternalName, "Not A Name"
+		},
+	} {
+		if errs := ValidateServiceSpec(service(mutate)); !strings.Contains(strings.Join(errs, "\n"), want) {
+			t.Errorf("want %q in %v", want, errs)
+		}
+	}
+	// Becoming an ExternalName drops the cluster IP; nothing else may change it.
+	old := service(func(s *corev1.ServiceSpec) { s.ClusterIP = "10.96.0.20" })
+	external := service(func(s *corev1.ServiceSpec) { s.Type, s.ExternalName = corev1.ServiceTypeExternalName, "a.example.com" })
+	if errs := ValidateServiceUpdate(external, old); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	if errs := ValidateServiceUpdate(service(func(s *corev1.ServiceSpec) { s.ClusterIP = corev1.ClusterIPNone }), old); len(errs) != 1 {
+		t.Fatalf("a Service cannot become headless: %v", errs)
+	}
+}
+
+func TestPodDNSAndHostname(t *testing.T) {
+	spec := podSpec()
+	if spec.DNSPolicy != corev1.DNSClusterFirst || !*spec.EnableServiceLinks {
+		t.Fatalf("defaults: %q %v", spec.DNSPolicy, spec.EnableServiceLinks)
+	}
+	ndots := "2"
+	spec.Hostname, spec.Subdomain = "db-0", "db"
+	spec.DNSPolicy = corev1.DNSNone
+	spec.DNSConfig = &corev1.PodDNSConfig{Nameservers: []string{"1.1.1.1"}, Searches: []string{"example.com"},
+		Options: []corev1.PodDNSConfigOption{{Name: "ndots", Value: &ndots}}}
+	if errs := ValidatePodSpec("spec", spec); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	for name, tc := range map[string]struct {
+		mutate func(*corev1.PodSpec)
+		want   string
+	}{
+		"policy":        {func(s *corev1.PodSpec) { s.DNSPolicy = "Cluster" }, `spec.dnsPolicy: Unsupported value: "Cluster"`},
+		"none needs ns": {func(s *corev1.PodSpec) { s.DNSPolicy = corev1.DNSNone }, "spec.dnsConfig: Required value"},
+		"bad ns": {func(s *corev1.PodSpec) {
+			s.DNSConfig = &corev1.PodDNSConfig{Nameservers: []string{"dns"}}
+		}, `spec.dnsConfig.nameservers[0]: Invalid value: "dns"`},
+		"too many ns": {func(s *corev1.PodSpec) {
+			s.DNSConfig = &corev1.PodDNSConfig{Nameservers: []string{"1.1.1.1", "1.1.1.2", "1.1.1.3", "1.1.1.4"}}
+		}, "must not have more than 3 nameservers"},
+		"hostname": {func(s *corev1.PodSpec) { s.Hostname = "Db_0" }, `spec.hostname: Invalid value: "Db_0"`},
+	} {
+		s := podSpec()
+		tc.mutate(s)
+		if errs := ValidatePodSpec("spec", s); !strings.Contains(strings.Join(errs, "\n"), tc.want) {
+			t.Errorf("%s: want %q in %v", name, tc.want, errs)
+		}
+	}
+}

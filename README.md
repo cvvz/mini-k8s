@@ -47,7 +47,9 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **kubelet**: node registration and heartbeats; static Pods from a manifest directory
   with mirror Pods; one worker per Pod; restarts with backoff (CrashLoopBackOff);
   `imagePullPolicy` and image pull errors (ErrImagePull/ImagePullBackOff); sandbox
-  recreation after a node restart; logs with follow/tail/`--previous`; orphan cleanup.
+  recreation after a node restart; logs with follow/tail/`--previous`; orphan cleanup;
+  each Pod's resolv.conf from its `dnsPolicy`/`dnsConfig`, a managed `/etc/hosts`
+  (`hostname`, `subdomain`) and the Service environment variables (`WEB_SERVICE_HOST`, …).
 - **Pod network**: the node IPAM controller gives every node a `/24` from `10.244.0.0/16`;
   a home-grown CNI plugin (`mini-cni`: bridge, veth, IP allocation) wires each Pod; a
   host-gw route agent connects the nodes' Pod subnets, so Pods reach each other across
@@ -57,7 +59,12 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   ports, several ports); **kube-proxy** programs iptables like the real one's iptables mode
   (`KUBE-SERVICES` → `KUBE-SVC-*` → `KUBE-SEP-*`, random balancing, ClientIP session
   affinity, masquerading for NodePort and hairpin traffic, immediate rejection without
-  endpoints); NodePort Services answer on every node.
+  endpoints); NodePort Services answer on every node; headless and ExternalName Services;
+  the API server keeps the `kubernetes` Service, through which Pods reach the API.
+- **Cluster DNS**: a home-grown DNS server (`kube-dns` on `10.96.0.10`, the role CoreDNS
+  plays) answers `<svc>.<ns>.svc.cluster.local`, headless endpoints by hostname, SRV
+  records, ExternalName CNAMEs and Pod records, and forwards everything else to the node's
+  resolver.
 - **Ingress**: an Ingress controller on `127.0.0.1:18080` routes by host (exact or
   wildcard) and path (Exact or Prefix) to the ready endpoints of Services, with a default
   backend, 404/503 answers and the address published in the Ingress status.
@@ -105,7 +112,8 @@ How to read it:
   Docker network `mini-k8s`.
 - The control-plane node's kubelet runs etcd, the API server, the controller manager, the
   scheduler and the Ingress controller as static Pods; the node's taint keeps workloads on
-  the workers. Every node (the control-plane one too) also runs kube-proxy.
+  the workers. Every node (the control-plane one too) also runs kube-proxy; the cluster
+  DNS (`kube-dns`, `10.96.0.10`) runs as ordinary Pods on the workers.
 - Arrows between components are API traffic: every component lists and watches the API
   server and writes back; only the API server talks to etcd. The kubelet starts Pods through
   containerd (CRI).
@@ -143,7 +151,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | demo app | HTTP server for examples and tests; `mini fetch` is a tiny HTTP client for images without a shell | done |
 | `mini-cni` + host-gw route agent | Pod networking: bridge, veth, IP allocation, loopback, cross-node routes, egress masquerading | done |
 | `mini node-init`, pause image | Node container entrypoint (cgroup delegation, containerd configuration and start, then the kubelet); Pod sandbox process | done |
-| cluster DNS | Service discovery (`*.svc.cluster.local`) | M6b |
+| cluster DNS | `mini cluster-dns`: Service, headless, SRV, ExternalName and Pod records, forwarding of other names (its own DNS message codec); runs as the `kube-dns` add-on, the role CoreDNS plays | done |
 
 **Open-source components used as-is**:
 
@@ -173,7 +181,7 @@ cmd/mini/                    multi-call binary: mini kube-apiserver | kube-contr
                              as mini-cni/loopback the CNI plugin
 cmd/kk/                      CLI (kubectl plus cluster lifecycle)
 build/images/<name>/         Dockerfiles: mini (components, demo), node, pause, etcd, kube-proxy
-build/manifests/<node role>  static Pod manifests (like /etc/kubernetes/manifests)
+build/manifests/<node role>  static Pod manifests (like /etc/kubernetes/manifests); addons/: cluster DNS
 pkg/apis/<group>/v1          resource types (metav1, corev1, appsv1, networkingv1) and validation
 pkg/api/resource, util/intstr quantities ("500m", "64Mi") and int-or-string values
 pkg/labels, fields, watch    selectors and watch event types (as in apimachinery)
@@ -185,10 +193,12 @@ pkg/storage/etcd3            etcd storage
 pkg/client/...               client, informers, workqueue, record (as client-go)
 pkg/controller/<name>        deployment, replicaset, endpoint, garbagecollector, namespace, nodeipam controllers
 pkg/scheduler                scheduler
-pkg/kubelet                  node agent and static Pods; kuberuntime (CRI client), prober, dns (node-local forwarder)
+pkg/kubelet                  node agent and static Pods; kuberuntime (CRI client), prober, envvars,
+                             dns (Pod DNS configuration, node-local forwarder)
 pkg/network/{cni,hostgw}     CNI plugin and host-gw route agent
 pkg/proxy/iptables           kube-proxy (iptables mode)
 pkg/ingress                  Ingress controller
+pkg/dns                      cluster DNS server
 pkg/nodeinit                 node container entrypoint
 test/e2e, test/integration   end-to-end and integration tests
 ```
@@ -262,8 +272,9 @@ from `storage.googleapis.com` with host-side curl), builds five images from
 minute the first time), starts the three node containers, loads the images into each
 node's containerd (the control-plane node's kubelet then starts etcd, the API server, the
 controller manager, the scheduler and the Ingress controller as static Pods, and every
-node starts kube-proxy), and waits up to two minutes for a healthy API and fresh Ready
-heartbeats from every node.
+node starts kube-proxy), waits up to two minutes for a healthy API and fresh Ready
+heartbeats from every node, and finally applies the cluster DNS add-on
+([build/manifests/addons](build/manifests/addons)), as kubeadm installs CoreDNS.
 
 ```text
 API healthy
@@ -315,6 +326,9 @@ kk exec POD_NAME -- /mini cat /sys/fs/cgroup/memory.max          # the 64Mi limi
 kk get svc web                           # its CLUSTER-IP is reachable from every Pod and node:
 kk exec POD_NAME -- /mini fetch http://CLUSTER_IP/               # kube-proxy picks a ready Pod
 docker exec mini-k8s-worker-1-1 iptables -t nat -S KUBE-SERVICES # the rules behind it
+kk exec POD_NAME -- /mini lookup web     # the cluster DNS: web.default.svc.cluster.local
+kk exec POD_NAME -- /mini cat /etc/resolv.conf                   # search domains, ndots:5
+kk exec POD_NAME -- /mini fetch http://kubernetes.default.svc:443/healthz   # the API, from a Pod
 kk scale deployment web --replicas 3
 kk rollout restart deployment/web        # a rolling update: new ReplicaSet, Pods replaced one by one
 kk rollout status deployment/web         # wait for it to finish
@@ -374,10 +388,10 @@ into the nodes), also delete the volumes:
 | --- | --- | --- |
 | Namespace | `v1` | Create and delete (Terminating → contents removed → deleted). `default` and `kube-system` exist at startup. |
 | Node | `v1` | Registered and heartbeated by kubelets with `capacity`/`allocatable` (cpu, memory, pods) and role labels; `spec.podCIDR` assigned once by node IPAM; `spec.unschedulable` and `spec.taints` (NoSchedule, PreferNoSchedule, NoExecute) are honoured by the scheduler; the control-plane node is tainted `node-role.kubernetes.io/control-plane:NoSchedule`. |
-| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`); `hostNetwork`; `tolerations`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
+| Pod | `v1` | `containers` (one or more) and `initContainers`: `name`, `image`, `command`, `args`, `env`, `ports`, `resources` (cpu, memory), `livenessProbe`/`readinessProbe`/`startupProbe` (not for init containers), `volumeMounts`; `volumes` (`emptyDir` with `medium`/`sizeLimit`, `hostPath` with `type`); `hostNetwork`; `hostname`, `subdomain`; `dnsPolicy` (ClusterFirst, ClusterFirstWithHostNet, Default, None) and `dnsConfig`; `enableServiceLinks`; `tolerations`; `imagePullPolicy` (Always, IfNotPresent, Never; defaults as in Kubernetes); `restartPolicy` (Always, OnFailure, Never); `terminationGracePeriodSeconds`; `nodeName`. The spec is immutable. Static Pods appear as mirror Pods (read-only; deleting one makes the kubelet recreate it). Subresources `log` and `exec`. |
 | Deployment | `apps/v1` | `replicas` (default 1), `selector` (matchLabels/matchExpressions, immutable), `template` (`restartPolicy` must be Always), `strategy` (RollingUpdate with `maxSurge`/`maxUnavailable`, 25% each by default, or Recreate), `minReadySeconds`, `revisionHistoryLimit` (10), `paused`, `progressDeadlineSeconds` (600). Each template version runs as a ReplicaSet; annotations `deployment.kubernetes.io/revision` and `kubernetes.io/change-cause`. |
 | ReplicaSet | `apps/v1` | `replicas`, `selector` (immutable), `template`, `minReadySeconds`; usually owned by a Deployment. |
-| Service | `v1` | `type` ClusterIP (default) or NodePort; `selector` (optional: without one, write the Endpoints yourself); `ports` (`name`, `port`, `targetPort` number or container port name, `protocol` TCP/UDP, `nodePort` from 30000-32767); `clusterIP` (allocated from `10.96.0.0/12` unless given; immutable); `sessionAffinity` None/ClientIP with `sessionAffinityConfig.clientIP.timeoutSeconds`. |
+| Service | `v1` | `type` ClusterIP (default), NodePort or ExternalName (`externalName`); `selector` (optional: without one, write the Endpoints yourself); `ports` (`name`, `port`, `targetPort` number or container port name, `protocol` TCP/UDP, `nodePort` from 30000-32767); `clusterIP` (allocated from `10.96.0.0/12` unless given; `None` for a headless Service; immutable); `publishNotReadyAddresses`; `sessionAffinity` None/ClientIP with `sessionAffinityConfig.clientIP.timeoutSeconds`. `default/kubernetes` (`10.96.0.1`, `443/TCP`) is kept by the API server. |
 | Endpoints | `v1` | Maintained by the Endpoints controller for Services with a selector: `subsets` of `addresses` (ready) and `notReadyAddresses` with `nodeName`/`targetRef`, and `ports` named after the Service ports. |
 | Ingress | `networking.k8s.io/v1` | `rules` (`host`, exact or `*.domain`; `http.paths` with `path`, `pathType` Exact/Prefix/ImplementationSpecific, `backend.service` name and port number or name), `defaultBackend`, `ingressClassName` (none or `mini`); status reports `localhost`. No TLS. |
 | Event | `v1` | Recorded by components, queryable, expire after one hour. |
@@ -397,11 +411,11 @@ still not a cross-resource transaction.
 - Rollouts do not scale proportionally when `replicas` changes mid-rollout, and ReplicaSets
   do not adopt orphaned Pods. `kk apply` is a merge patch: switching a Deployment to
   `Recreate` needs `rollingUpdate: null` in the manifest.
-- No cluster DNS yet (M6b): Pods reach Services by cluster IP and resolve only the Docker
-  network's names (e.g. `control-plane`) through their node; no headless or ExternalName
-  Services, no LoadBalancer type, no EndpointSlices, `externalTrafficPolicy` or IPv6.
-  Node ports are reachable from the Linux host at the nodes' addresses (as in kind), not on
-  `127.0.0.1`. The Ingress controller speaks plain HTTP only.
+- No LoadBalancer type, EndpointSlices, `externalTrafficPolicy` or IPv6 (AAAA queries get
+  empty answers); the cluster DNS has no cache and no reverse (PTR) records. Node ports are
+  reachable from the Linux host at the nodes' addresses (as in kind), not on `127.0.0.1`.
+  The API, the `kubernetes` Service (port 443) and the Ingress controller speak plain HTTP;
+  there are no ServiceAccounts, so the DNS add-on reads the API token from its node.
 - One control-plane node and two workers, fixed in `compose.yaml`; nodes are containers
   sharing the host kernel.
 - Lost nodes are not marked NotReady and their Pods are not evicted (nor by NoExecute
@@ -452,6 +466,7 @@ Every new feature ships with e2e specs.
 | Node containers exit at start with a cgroup error | The host must use cgroup v2 and allow privileged containers. |
 | Pod shows `CrashLoopBackOff` | `kk logs NAME` shows the application output and `kk logs -p NAME` the previous run's; restarts back off from 1s up to 30s. |
 | `127.0.0.1:18080` returns `503` | The Service has no ready endpoints: `kk get endpoints NAME` (unready Pods are not listed under ENDPOINTS); check the selector and `targetPort`. `404 default backend` means no Ingress rule matches the host and path. |
+| A Service name does not resolve in a Pod | `kk get pods -n kube-system -l k8s-app=kube-dns` (two Running), `kk logs -n kube-system POD`, and `kk exec POD -- /mini cat /etc/resolv.conf` (nameserver `10.96.0.10` unless `dnsPolicy` says otherwise). `kk exec POD -- /mini lookup NAME` shows what the Pod's resolver gets. |
 | A cluster IP or node port does not answer | `kk get pods -n kube-system` (kube-proxy must run on every node), `kk logs -n kube-system kube-proxy-worker-1`, and `docker exec mini-k8s-worker-1-1 iptables -t nat -S` for the rules. `connection refused` means the Service has no ready endpoints. |
 | `Error from server (Invalid)` | Fix the field named in the message; unknown fields are rejected too. |
 | Port or project-name conflict | Free the ports or stop the conflicting project; `MINI_API` alone does not change Compose ports. |
@@ -486,7 +501,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M4 | Self-hosted control plane: control-plane node, static/mirror Pods, etcd and control-plane components in kube-system, taints and tolerations | ✅ |
 | M5 | ReplicaSets, rolling updates and rollbacks, `kk rollout` | ✅ |
 | M6a | ClusterIP and NodePort Services, Endpoints, iptables kube-proxy, Ingress | ✅ |
-| M6b | Cluster DNS, headless and ExternalName Services, the `kubernetes` Service | planned |
+| M6b | Cluster DNS, headless and ExternalName Services, the `kubernetes` Service, Pod DNS configuration and Service environment variables | ✅ |
 | M7 | Scheduling framework, node leases and eviction, taints, cordon/drain | planned |
 | M8 | ConfigMaps, Secrets, volumes, PVCs | planned |
 | M9 | DaemonSets, Jobs, CronJobs, StatefulSets | planned |
@@ -494,6 +509,7 @@ uses a temporary anonymous Docker configuration without modifying yours.
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M6b cluster DNS plan (Chinese)](docs/superpowers/plans/2026-10-15-m6b-cluster-dns.md)
 - [M6a Services, kube-proxy and Ingress plan (Chinese)](docs/superpowers/plans/2026-10-15-m6a-services-kube-proxy-ingress.md)
 - [M5 ReplicaSets and rollouts plan (Chinese)](docs/superpowers/plans/2026-10-15-m5-replicaset-rollout.md)
 - [M4 self-hosted control plane plan (Chinese)](docs/superpowers/plans/2026-10-15-m4-self-hosted-control-plane.md)

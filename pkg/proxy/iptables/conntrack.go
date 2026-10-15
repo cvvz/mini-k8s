@@ -23,7 +23,7 @@ func udpEndpoints(services []*corev1.Service, endpoints []*corev1.Endpoints) map
 	}
 	out := map[udpPort]map[string]bool{}
 	for _, svc := range services {
-		if svc.Spec.ClusterIP == "" {
+		if !corev1.IsServiceIPSet(svc) {
 			continue
 		}
 		for i := range svc.Spec.Ports {

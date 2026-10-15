@@ -249,7 +249,7 @@ kubelet 运行在节点容器内，经 Unix socket 以 CRI gRPC 调用同一节�
   `KUBE-SEP-*`（DNAT 到 Pod），与真实 kube-proxy 的 iptables 模式一致；支持多端口与
   `sessionAffinity: ClientIP`。DaemonSet 实现前以 static Pod 过渡。
 - **Headless**（`clusterIP: None`）：不分配 ClusterIP，DNS 直接返回就绪端点 IP。
-- **集群 DNS（M6）**：`mini dns` 以 Deployment 运行在 `kube-system`，Service 固定 ClusterIP
+- **集群 DNS（M6b）**：`mini cluster-dns` 以 Deployment `kube-dns` 运行在 `kube-system`，Service 固定 ClusterIP
   `10.96.0.10`；提供 `svc.ns.svc.cluster.local`、`hostname.svc.ns.svc.cluster.local`、
   ExternalName CNAME，其余查询转发上游。Pod 默认 `ndots:5`，搜索域
   `ns.svc.cluster.local svc.cluster.local cluster.local`。
@@ -289,7 +289,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M4 ✅ | 控制面自托管：control-plane 节点、static Pod 与 mirror Pod、etcd 与控制面组件进入 kube-system、control-plane 污点（最小污点/容忍）、网关迁入 kube-system（落地记录见 §12.3） |
 | M5 ✅ | ReplicaSet、Deployment 滚动更新与回滚、`kk rollout`（[计划](../plans/2026-10-15-m5-replicaset-rollout.md)） |
 | M6a ✅ | 网络：ClusterIP 与 NodePort（apiserver 分配）、Endpoints、iptables kube-proxy、Ingress 取代网关（落地记录见 §12.4） |
-| M6b | 集群 DNS、Headless、ExternalName、`kubernetes` Service |
+| M6b ✅ | 集群 DNS、Headless、ExternalName、`kubernetes` Service、Pod DNS 配置与 Service 环境变量（落地记录见 §12.5） |
 | M7 | 调度框架、节点租约与生命周期、污点驱逐、cordon/drain、worker 扩展 |
 | M8 | ConfigMap、Secret、卷、PVC/PV |
 | M9 | DaemonSet、Job、CronJob、StatefulSet |
@@ -389,6 +389,29 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
   直到 M7 的节点生命周期控制器把它们标为未就绪。
 - **Endpoints 而非 EndpointSlice**：kube-proxy 与 Ingress 控制器都消费 core/v1 Endpoints。
 
+### 12.5 M6b 落地记录
+
+按[实施计划](../plans/2026-10-15-m6b-cluster-dns.md)落地，相关 e2e（network、node、生命周期、apimachinery）全部通过。
+要点与 §9 设计的差异：
+
+- **DNS 服务器**：自写 DNS 报文编解码（读取支持压缩指针，写出不压缩），不引入 DNS 库。记录与 CoreDNS 的 kubernetes 插件一致
+  （AKS 实测）：Service A、headless 端点（hostname 或带横线的 IP）、SRV（headless 目标为各端点，权重 100/n）、
+  ExternalName CNAME（目标在集群内则本地解析，否则向上游解析后一并返回）、Pod 记录；集群域内不存在的名字为 NXDOMAIN，
+  存在但类型不符为 NODATA，均带 SOA；UDP 应答超过 512 字节（或 EDNS 声明的大小）时置 TC 位。收到 SIGTERM 后继续服务 5 秒
+  （同 CoreDNS 的 lameduck），等 kube-proxy 摘除该端点。
+- **部署**：Deployment + Service `kube-dns`（10.96.0.10），清单在 `build/manifests/addons/`，由 `kk cluster up` 在节点就绪后
+  apply（kubeadm 的 addon 阶段）。DNS Pod 经 `kubernetes` Service 访问 API（in-cluster：组件未设 `MINI_API` 时使用
+  `KUBERNETES_SERVICE_HOST/PORT`）；没有 ServiceAccount，token 经 hostPath 读取节点上的文件。
+- **kubernetes Service**：apiserver 每 10 秒确保 `default/kubernetes`（Service 网段第一个地址，443/TCP 名 https，指向 8080）
+  及其 Endpoints（`MINI_ADVERTISE_ADDRESS`，否则 eth0 地址）。443 端口上是明文 HTTP（mini 没有 TLS）。
+- **kubelet**：DNS 配置器与 kubelet 的规则相同（ClusterFirst 的 search 列表加节点搜索域、`ndots:5`；hostNetwork 的
+  ClusterFirst 按 Default；dnsConfig 合并，最多 3 个 nameserver、32 个搜索域）；非 hostNetwork Pod 挂载 kubelet 生成的
+  `/etc/hosts`；Service 环境变量与 kubelet 的 envvars 包相同（default/kubernetes 始终注入）。
+- **Service 类型切换**：ClusterIP → ExternalName 时清除并释放 ClusterIP，反向切换时重新分配；headless 不分配地址，
+  kube-proxy 忽略。
+- **升级**：Pod 的 spec 不可变检查先给旧对象补默认值，M6b 之前创建的 Pod 不会因新增的默认字段（`dnsPolicy`、
+  `enableServiceLinks`）而无法更新。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -481,7 +504,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 
 | 路径 | 内容 | 对应的 Kubernetes 位置 |
 | --- | --- | --- |
-| `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`node-init`（含 kubelet）、`kube-proxy`、`ingress-controller`、`demo` | `cmd/kube-*`（及早期的 `hyperkube`） |
+| `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`node-init`（含 kubelet）、`kube-proxy`、`ingress-controller`、`cluster-dns`、`demo`，以及 `fetch`/`lookup` 等测试工具 | `cmd/kube-*`（及早期的 `hyperkube`） |
 | `cmd/kk` | 命令行客户端与集群生命周期 | `kubectl`、`kind` |
 | `pkg/apis/{meta,core,apps,networking}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`networkingv1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
 | `pkg/apis/{core,apps,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
@@ -493,11 +516,12 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
 | `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器 | `pkg/controller` |
 | `pkg/scheduler` | 调度器 | `pkg/scheduler` |
-| `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns}` | 节点代理；CRI 客户端（沙箱、容器、日志）；节点本地 DNS 转发 | `pkg/kubelet`、`pkg/kubelet/kuberuntime`；node-local-dns |
+| `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars}`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |
 | `pkg/nodeinit` | 节点容器入口：cgroup 委派、containerd 配置与启动 | kind 的节点入口脚本 |
 | `pkg/proxy/iptables` | kube-proxy 的 iptables 模式 | `pkg/proxy/iptables` |
 | `pkg/ingress` | Ingress 控制器（取代 M6 之前的单 Service 网关） | 无直接对应（ingress-nginx 等外部项目） |
+| `pkg/dns` | 集群 DNS 服务器（报文编解码、kubernetes 记录、上游转发） | 无直接对应（CoreDNS 及其 kubernetes 插件） |
 | `pkg/util/{ptr,deepcopy,validation}` | 通用小工具 | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation` |
 | `test/e2e` | Ginkgo 端到端测试 | `test/e2e` |
 | `test/integration` | 真实 etcd + 进程内 API Server 的集成测试与框架 | `test/integration` |

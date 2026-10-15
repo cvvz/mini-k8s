@@ -96,3 +96,9 @@ func writeError(w http.ResponseWriter, err error) {
 	}
 	writeJSON(w, int(se.status.Code), se.status)
 }
+
+// isNotFound reports whether err is a NotFound status.
+func isNotFound(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.status.Reason == metav1.ReasonNotFound
+}

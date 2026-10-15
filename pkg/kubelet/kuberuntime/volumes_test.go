@@ -84,7 +84,7 @@ func TestVolumeMountsAndNamespacesInCRIConfig(t *testing.T) {
 	_, m, _ := newTestManager(t)
 	pod := testPod()
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/data", ReadOnly: true}}
-	cfg := containerConfig(pod, pod.Spec.Containers[0], 0, map[string]string{"data": "/var/lib/x"})
+	cfg := containerConfig(pod, pod.Spec.Containers[0], 0, map[string]string{"data": "/var/lib/x"}, containerExtras{})
 	if len(cfg.Mounts) != 1 || cfg.Mounts[0].HostPath != "/var/lib/x" || cfg.Mounts[0].ContainerPath != "/data" || !cfg.Mounts[0].Readonly {
 		t.Fatalf("mounts: %+v", cfg.Mounts)
 	}
@@ -92,7 +92,12 @@ func TestVolumeMountsAndNamespacesInCRIConfig(t *testing.T) {
 	if ns.Network != runtimeapi.NamespaceMode_POD || ns.Pid != runtimeapi.NamespaceMode_CONTAINER || ns.Ipc != runtimeapi.NamespaceMode_POD {
 		t.Fatalf("namespaces: %+v", ns)
 	}
-	m.DNS = &runtimeapi.DNSConfig{Servers: []string{"172.18.0.5"}}
+	m.DNS = func(p *corev1.Pod) *runtimeapi.DNSConfig {
+		if p.Spec.HostNetwork {
+			return nil // the node's resolver, as the DNS configurer decides
+		}
+		return &runtimeapi.DNSConfig{Servers: []string{"172.18.0.5"}}
+	}
 	if sb := m.sandboxConfig(pod, 0); sb.Hostname != "web" || sb.DnsConfig == nil {
 		t.Fatalf("pod network sandbox: %+v", sb)
 	}
@@ -101,7 +106,7 @@ func TestVolumeMountsAndNamespacesInCRIConfig(t *testing.T) {
 	if sb.Linux.SecurityContext.NamespaceOptions.Network != runtimeapi.NamespaceMode_NODE || sb.Hostname != "" || sb.DnsConfig != nil {
 		t.Fatalf("host network sandbox: %+v", sb)
 	}
-	if c := containerConfig(pod, pod.Spec.Containers[0], 0, nil); c.Linux.SecurityContext.NamespaceOptions.Network != runtimeapi.NamespaceMode_NODE {
+	if c := containerConfig(pod, pod.Spec.Containers[0], 0, nil, containerExtras{}); c.Linux.SecurityContext.NamespaceOptions.Network != runtimeapi.NamespaceMode_NODE {
 		t.Fatal("host network container")
 	}
 }
@@ -164,13 +169,13 @@ func TestVolumeErrorsBlockOnlyNewContainersAndPodDirsAreRemoved(t *testing.T) {
 func TestSecurityContextInCRIConfig(t *testing.T) {
 	_, m, _ := newTestManager(t)
 	pod := testPod()
-	if cfg := containerConfig(pod, pod.Spec.Containers[0], 0, nil); cfg.Linux.SecurityContext.Privileged || m.sandboxConfig(pod, 0).Linux.SecurityContext.Privileged {
+	if cfg := containerConfig(pod, pod.Spec.Containers[0], 0, nil, containerExtras{}); cfg.Linux.SecurityContext.Privileged || m.sandboxConfig(pod, 0).Linux.SecurityContext.Privileged {
 		t.Fatal("containers are unprivileged by default")
 	}
 	privileged := true
 	pod.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: &privileged,
 		Capabilities: &corev1.Capabilities{Add: []string{"NET_ADMIN"}, Drop: []string{"MKNOD"}}}
-	sc := containerConfig(pod, pod.Spec.Containers[0], 0, nil).Linux.SecurityContext
+	sc := containerConfig(pod, pod.Spec.Containers[0], 0, nil, containerExtras{}).Linux.SecurityContext
 	if !sc.Privileged || sc.Capabilities.AddCapabilities[0] != "NET_ADMIN" || sc.Capabilities.DropCapabilities[0] != "MKNOD" {
 		t.Fatalf("security context: %+v", sc)
 	}
