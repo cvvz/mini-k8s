@@ -409,6 +409,20 @@ func columnsFor(res scheme.ResourceInfo) []column {
 				return formatSelector(cj(o).Spec.JobTemplate.Spec.Selector)
 			}},
 		}
+	case scheme.StatefulSets.Resource:
+		sts := func(o metav1.Object) *appsv1.StatefulSet { return o.(*appsv1.StatefulSet) }
+		return []column{nameColumn(),
+			{header: "READY", value: func(o metav1.Object, _ time.Time) string {
+				return fmt.Sprintf("%d/%s", sts(o).Status.ReadyReplicas, int32Ptr(sts(o).Spec.Replicas))
+			}},
+			ageColumn(),
+			{header: "CONTAINERS", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return containerField(sts(o).Spec.Template.Spec.Containers, func(c corev1.Container) string { return c.Name })
+			}},
+			{header: "IMAGES", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return containerField(sts(o).Spec.Template.Spec.Containers, func(c corev1.Container) string { return c.Image })
+			}},
+		}
 	case scheme.ControllerRevisions.Resource:
 		return []column{nameColumn(),
 			{header: "CONTROLLER", value: func(o metav1.Object, _ time.Time) string {
@@ -734,6 +748,29 @@ func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj m
 		fmt.Fprintf(tw, "Number of Nodes Scheduled with Up-to-date Pods:\t%d\n", o.Status.UpdatedNumberScheduled)
 		fmt.Fprintf(tw, "Number of Nodes Scheduled with Available Pods:\t%d\n", o.Status.NumberAvailable)
 		fmt.Fprintf(tw, "Number of Nodes Misscheduled:\t%d\n", o.Status.NumberMisscheduled)
+	case *appsv1.StatefulSet:
+		fmt.Fprintf(tw, "Selector:\t%s\n", formatSelector(o.Spec.Selector))
+		fmt.Fprintf(tw, "Replicas:\t%s desired | %d total\n", int32Ptr(o.Spec.Replicas), o.Status.Replicas)
+		fmt.Fprintf(tw, "Update Strategy:\t%s\n", o.Spec.UpdateStrategy.Type)
+		if ru := o.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.Partition != nil {
+			fmt.Fprintf(tw, "  Partition:\t%d\n", *ru.Partition)
+		}
+		fmt.Fprintf(tw, "Pod Management Policy:\t%s\n", o.Spec.PodManagementPolicy)
+		fmt.Fprintf(tw, "Service Name:\t%s\n", orNone(o.Spec.ServiceName))
+		running, waiting, succeeded, failed, err := a.podPhases(ctx, o.Namespace, o.Spec.Selector)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(tw, "Pods Status:\t%d Running / %d Waiting / %d Succeeded / %d Failed\n", running, waiting, succeeded, failed)
+		var claims []string
+		for _, c := range o.Spec.VolumeClaimTemplates {
+			claims = append(claims, fmt.Sprintf("%s (%s, %s)", c.Name, corev1.AccessModesShort(c.Spec.AccessModes),
+				storageOf(c.Spec.Resources.Requests)))
+		}
+		fmt.Fprintf(tw, "Volume Claims:\t%s\n", orNone(strings.Join(claims, ", ")))
+		if p := o.Spec.PersistentVolumeClaimRetentionPolicy; p != nil {
+			fmt.Fprintf(tw, "PVC Retention Policy:\twhenDeleted: %s, whenScaled: %s\n", p.WhenDeleted, p.WhenScaled)
+		}
 	case *batchv1.Job:
 		fmt.Fprintf(tw, "Selector:\t%s\n", formatSelector(o.Spec.Selector))
 		fmt.Fprintf(tw, "Parallelism:\t%s\n", int32Ptr(o.Spec.Parallelism))
@@ -847,4 +884,30 @@ func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj m
 		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", e.Type, e.Reason, ageStr, e.Source.Component, e.Message)
 	}
 	return tw.Flush()
+}
+
+// podPhases counts the phases of the Pods a selector matches, for the
+// "Pods Status" line of describe.
+func (a *app) podPhases(ctx context.Context, ns string, ls *metav1.LabelSelector) (running, waiting, succeeded, failed int, err error) {
+	sel, err := ls.AsSelector()
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	pods, err := client.Pods(a.client, ns).List(ctx, client.ListOptions{LabelSelector: sel.String()})
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	for _, p := range pods.Items {
+		switch p.Status.Phase {
+		case corev1.PodRunning:
+			running++
+		case corev1.PodPending:
+			waiting++
+		case corev1.PodSucceeded:
+			succeeded++
+		case corev1.PodFailed:
+			failed++
+		}
+	}
+	return running, waiting, succeeded, failed, nil
 }

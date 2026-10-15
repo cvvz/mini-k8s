@@ -24,6 +24,8 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   `maxSurge`/`maxUnavailable` 滚动或 Recreate、修订历史、回滚、暂停/恢复、带进度期限的
   Available/Progressing 条件）；DaemonSet 控制器（在每个符合模板 nodeSelector、亲和与容忍的节点上运行一个 Pod；
   RollingUpdate 按 `maxUnavailable`/`maxSurge` 滚动或 OnDelete；修订历史存于 ControllerRevision，可回滚）；
+  StatefulSet 控制器（Pod 名为 `<set>-<序号>`，在 headless Service 下有稳定的主机名，每个卷模板对应一个 PVC；
+  按序或并行创建，从最大序号开始缩容，按 partition 滚动或 OnDelete，支持 `persistentVolumeClaimRetentionPolicy`）；
   Job 控制器（`completions` 与 `parallelism`、工作队列模式、带 `JOB_COMPLETION_INDEX` 的 Indexed Job、
   `backoffLimit` 与 10 秒起倍增的替换退避、OnFailure 的容器重启计入失败、`activeDeadlineSeconds`、暂停/恢复、
   与 Kubernetes 1.31+ 一致的 Complete/Failed 条件）；CronJob 控制器（带时区的 cron 调度、只补跑最近一次错过的调度、
@@ -141,7 +143,7 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 | 组件 | 职责 | 状态 |
 | --- | --- | --- |
 | kube-apiserver | K8s 风格 REST、Watch、准入与校验、删除语义、子资源、ClusterIP 与 NodePort 分配 | 已实现 |
-| controller-manager | Deployment、ReplicaSet、DaemonSet、Job、CronJob、TTL-after-finished、Endpoints、垃圾回收、Namespace、node IPAM、节点生命周期、污点驱逐、Pod 垃圾回收、PersistentVolume 与 PVC/PV 保护控制器 | 已实现，持续扩展 |
+| controller-manager | Deployment、ReplicaSet、DaemonSet、StatefulSet、Job、CronJob、TTL-after-finished、Endpoints、垃圾回收、Namespace、node IPAM、节点生命周期、污点驱逐、Pod 垃圾回收、PersistentVolume 与 PVC/PV 保护控制器 | 已实现，持续扩展 |
 | scheduler | 调度框架：PreFilter、Filter 与 Score 插件（污点、节点亲和、资源适配、Pod 亲和/反亲和、打散、卷绑定）、退避队列、binding 绑定（供给卷期间异步完成） | 已实现 |
 | kubelet | 节点注册与心跳、static Pod 与 mirror Pod、基于 CRI 的 Pod 生命周期（客户端一侧，`pkg/kubelet/kuberuntime`）、探针、状态上报、优雅终止、日志、CNI 配置、节点本地 DNS 转发 | 已实现 |
 | 客户端库 | 泛型 REST 客户端、Informer、WorkQueue、Event 记录器 | 已实现 |
@@ -334,6 +336,10 @@ kk apply -f examples/batch.yaml          # 一个 Indexed Job 和每分钟运行
 kk get jobs,cronjobs                     # squares：Complete 3/3；随后出现 ticker-<分钟数> 的 Job
 kk create job once --image mini-k8s:local -- /mini sleep 2s   # 一次性 Job
 kk create job ticker-now --from=cronjob/ticker               # 手动运行一次 CronJob
+kk apply -f examples/statefulset.yaml    # 先 kv-0 后 kv-1，各有自己的 PVC
+kk rollout status statefulset/kv
+kk exec kv-0 -- /mini lookup kv-1.kv     # headless Service 下稳定的 DNS 名
+kk scale statefulset kv --replicas 1     # kv-1 被删除，PVC data-kv-1 保留以便再次扩容时复用
 
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # 在另一个命名空间部署，用 NodePort Service 暴露
@@ -413,8 +419,8 @@ kk image load my-app:v1
 - 调度器没有抢占、优先级与 `topologySpreadConstraints`（副本默认打散）；没有 PodDisruptionBudget（驱逐总是成功）。心跳比 Kubernetes
   默认值快：每 2 秒续约 Lease，15 秒没有续约的节点即为 Unknown。
 - 一个 control-plane 节点（无高可用），最多 10 个 worker；节点是共享宿主机内核的容器。e2e 套件要求默认的两个 worker。
-- 还没有 StatefulSet（M9c）；没有 HPA、RBAC 和控制面高可用。Job 不支持 `podFailurePolicy`、`successPolicy`
-  与按索引退避，且不使用 job-tracking finalizer 跟踪 Pod。
+- 没有 HPA、RBAC 和控制面高可用。Job 不支持 `podFailurePolicy`、`successPolicy` 与按索引退避，且不使用
+  job-tracking finalizer 跟踪 Pod。StatefulSet 不支持 `maxUnavailable`（Kubernetes 中为 alpha）。
 
 ## 开发与测试
 
@@ -500,11 +506,12 @@ unset MINI_TOKEN
 | M8b | PersistentVolume、PVC 与 StorageClass、调度器卷绑定、local-path 动态供给 | ✅ |
 | M9a | DaemonSet 与 ControllerRevision、kube-proxy 改为 DaemonSet | ✅ |
 | M9b | Job 与 CronJob、完成后 TTL 清理、`kk create job` | ✅ |
-| M9c | StatefulSet | 计划中 |
+| M9c | StatefulSet（卷模板与保留策略）、共享的修订历史 | ✅ |
 
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M9c StatefulSet 计划](docs/superpowers/plans/2026-10-15-m9c-statefulset.md)
 - [M9b Job 与 CronJob 计划](docs/superpowers/plans/2026-10-15-m9b-job-cronjob.md)
 - [M9a DaemonSet 计划](docs/superpowers/plans/2026-10-15-m9a-daemonset.md)
 - [M8b 持久卷计划](docs/superpowers/plans/2026-10-15-m8b-persistent-volumes.md)

@@ -102,6 +102,8 @@ var (
 		Namespaced: true, ShortNames: []string{"rs"}, HasStatus: true, New: func() metav1.Object { return &appsv1.ReplicaSet{} }}
 	DaemonSets = ResourceInfo{Group: "apps", Version: "v1", Resource: "daemonsets", Singular: "daemonset", Kind: "DaemonSet",
 		Namespaced: true, ShortNames: []string{"ds"}, HasStatus: true, New: func() metav1.Object { return &appsv1.DaemonSet{} }}
+	StatefulSets = ResourceInfo{Group: "apps", Version: "v1", Resource: "statefulsets", Singular: "statefulset", Kind: "StatefulSet",
+		Namespaced: true, ShortNames: []string{"sts"}, HasStatus: true, New: func() metav1.Object { return &appsv1.StatefulSet{} }}
 	ControllerRevisions = ResourceInfo{Group: "apps", Version: "v1", Resource: "controllerrevisions", Singular: "controllerrevision",
 		Kind: "ControllerRevision", Namespaced: true, New: func() metav1.Object { return &appsv1.ControllerRevision{} }}
 	Jobs = ResourceInfo{Group: "batch", Version: "v1", Resource: "jobs", Singular: "job", Kind: "Job", Namespaced: true,
@@ -116,7 +118,7 @@ var (
 
 // All lists every registered resource in discovery order.
 var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, ConfigMaps, Secrets, PersistentVolumes,
-	PersistentVolumeClaims, Deployments, ReplicaSets, DaemonSets, ControllerRevisions, Jobs, CronJobs, Ingresses, Leases,
+	PersistentVolumeClaims, Deployments, ReplicaSets, DaemonSets, StatefulSets, ControllerRevisions, Jobs, CronJobs, Ingresses, Leases,
 	StorageClasses}
 
 // Lookup resolves a user-supplied name: plural, singular, short name, kind

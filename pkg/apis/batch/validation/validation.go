@@ -12,6 +12,7 @@ import (
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	corevalidation "mini-k8s/pkg/apis/core/validation"
 	"mini-k8s/pkg/util/cron"
+	"mini-k8s/pkg/util/equality"
 )
 
 // maxCronJobNameLength leaves room for the suffix of the Jobs it creates.
@@ -73,7 +74,7 @@ func ValidateJobUpdate(j, old *batchv1.Job) []string {
 	if !reflect.DeepEqual(j.Spec.Selector, old.Spec.Selector) {
 		errs = append(errs, "spec.selector: Invalid value: field is immutable")
 	}
-	if !reflect.DeepEqual(j.Spec.Template, old.Spec.Template) {
+	if !equality.Semantic(&j.Spec.Template, &old.Spec.Template) {
 		errs = append(errs, "spec.template: Invalid value: field is immutable")
 	}
 	if !reflect.DeepEqual(j.Spec.CompletionMode, old.Spec.CompletionMode) {

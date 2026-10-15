@@ -44,6 +44,22 @@ func (e *Expectations) Expect(key string, adds int, dels []string) {
 	e.m[key] = x
 }
 
+// Raise adds pending creations and deletions to those still expected, for
+// controllers that create and delete several objects concurrently.
+func (e *Expectations) Raise(key string, adds int, dels []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	x := e.m[key]
+	if x == nil || time.Since(x.at) > expectationTimeout {
+		x = &expectation{dels: map[string]bool{}}
+		e.m[key] = x
+	}
+	x.adds, x.at = max(x.adds, 0)+adds, time.Now()
+	for _, uid := range dels {
+		x.dels[uid] = true
+	}
+}
+
 // ObserveAdd records that one expected creation was observed.
 func (e *Expectations) ObserveAdd(key string) {
 	e.mu.Lock()

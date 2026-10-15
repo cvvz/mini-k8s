@@ -1,0 +1,56 @@
+# A StatefulSet of two Pods, kv-0 then kv-1, each with its own claim of
+# the default StorageClass and a DNS name under the headless Service kv.
+#   kk apply -f examples/statefulset.yaml
+#   kk rollout status statefulset/kv     # kv-0 is ready before kv-1 starts
+#   kk get statefulsets,pods,pvc         # claims data-kv-0 and data-kv-1
+#   kk exec kv-0 -- /mini lookup kv-1.kv # the Pod IP of kv-1
+#   kk exec kv-1 -- /mini write /data/note "kept by kv-1"
+#   kk delete pod kv-1                   # comes back as kv-1 with the same claim:
+#   kk exec kv-1 -- /mini cat /data/note
+apiVersion: v1
+kind: Service
+metadata:
+  name: kv
+spec:
+  clusterIP: None
+  selector:
+    app: kv
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kv
+spec:
+  serviceName: kv
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kv
+  template:
+    metadata:
+      labels:
+        app: kv
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: mini-k8s:local
+          imagePullPolicy: Never
+          command: ["/mini", "demo"]
+          readinessProbe:
+            httpGet: {path: /ready, port: 8080}
+            periodSeconds: 1
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 64Mi
