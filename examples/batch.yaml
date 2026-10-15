@@ -1,0 +1,43 @@
+# An Indexed Job whose three Pods each print their completion index, and
+# a CronJob that runs a short Job every minute.
+#   kk apply -f examples/batch.yaml
+#   kk get jobs                          # squares: Complete 3/3 after a few seconds
+#   kk get pods -l job-name=squares      # squares-0-xxxxx, squares-1-…, squares-2-…
+#   kk logs squares-1-xxxxx              # …, JOB_COMPLETION_INDEX=1, …
+#   kk get cronjobs,jobs                 # a ticker-<minutes> Job each minute, the latest 3 kept
+#   kk create job ticker-now --from=cronjob/ticker   # run it once by hand
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: squares
+spec:
+  completions: 3
+  parallelism: 3
+  completionMode: Indexed
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: work
+          image: mini-k8s:local
+          imagePullPolicy: Never
+          command: ["/mini", "env"]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ticker
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: tick
+              image: mini-k8s:local
+              imagePullPolicy: Never
+              command: ["/mini", "sleep", "5s"]

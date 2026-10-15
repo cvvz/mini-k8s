@@ -296,7 +296,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M8a ✅ | ConfigMap、Secret、env `valueFrom`/`envFrom`、downward API、configMap/secret/downwardAPI/projected 卷（落地记录见 §12.9） |
 | M8b ✅ | PV/PVC、StorageClass、调度器 VolumeBinding、local-path 式动态供给（落地记录见 §12.10） |
 | M9a ✅ | DaemonSet 与 ControllerRevision、kube-proxy 改为 DaemonSet 插件（落地记录见 §12.11） |
-| M9b | Job、CronJob |
+| M9b ✅ | Job、CronJob、TTL-after-finished（落地记录见 §12.12） |
 | M9c | StatefulSet（volumeClaimTemplates） |
 | M10+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
 
@@ -522,6 +522,31 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
 - **mini-cni**：容器网卡 up 前打开 `arp_notify`（发免费 ARP），并刷新宿主机网桥上该 IP 的邻居表项。IP 被新 Pod 复用时，旧 MAC
   缓存曾导致跨节点访问与探针在数十秒内超时（与 CNI bridge 插件发送免费 ARP 的做法一致）。
 
+### 12.12 M9b 落地记录
+
+按[实施计划](../plans/2026-10-15-m9b-job-cronjob.md)落地，语义以 AKS 实测为准，相关 e2e（`[sig-apps] Job`、`CronJob`）全部通过。要点：
+
+- **API**：batch/v1 Job 与 CronJob（短名 `cj`）。Job 的 Strategy 补默认值（completions/parallelism 都为空时 completions 1、
+  parallelism 1、backoffLimit 6、NonIndexed、suspend false），未设 `manualSelector` 时生成 `batch.kubernetes.io/controller-uid` 选择器，
+  并给模板与 Job 加上 controller-uid、job-name 两套标签；completions、selector、template、completionMode 不可变。CronJob 名称最长 52，
+  校验 cron 表达式（自研 `pkg/util/cron`，错误文案与 robfig/cron 相同）、时区（内嵌 tzdata）与 concurrencyPolicy。
+- **Job 控制器**：`pkg/controller/job`，直接按 Pod 计数（不使用 job-tracking finalizer）。失败先于完成判定：失败 Pod 数超过
+  backoffLimit，或 OnFailure 下容器重启次数达到 backoffLimit，即 BackoffLimitExceeded；超出 activeDeadlineSeconds 即 DeadlineExceeded；
+  结束时删除仍在运行的 Pod，并像 1.31+ 一样同时写 FailureTarget/SuccessCriteriaMet 与 Failed/Complete 条件。替换失败 Pod 前按最近一次
+  成功之后的失败次数退避（10s 起倍增，上限 6 分钟）。Indexed Job 的 Pod 名为 `<job>-<index>-xxxxx`，带索引标签/注解、
+  `JOB_COMPLETION_INDEX` 环境变量（fieldRef）与 hostname `<job>-<index>`，`completedIndexes` 写成 `0-2,5` 形式。
+  暂停时删除 Pod 并写 Suspended 条件，恢复时重置 startTime（截止时间只计连续活跃的时间）。
+- **CronJob 控制器**：`pkg/controller/cronjob`，按 ControllerV2 的做法只运行最近一次错过的调度（错过超过 100 次时报
+  TooManyMissedTimes），超出 startingDeadlineSeconds 报 MissSchedule；Job 名为 `<cronjob>-<调度时间的 Unix 分钟数>`，带
+  `batch.kubernetes.io/cronjob-scheduled-timestamp` 注解；Forbid 时跳过（JobAlreadyActive），Replace 时先删除活跃 Job；
+  按 startTime 删除超出 successful/failedJobsHistoryLimit 的旧 Job；在下一个调度时间 +100ms 重新入队。每轮同步直接 GET 最新的
+  CronJob（集成测试发现：刚创建的 Job 触发的下一轮同步若读到缓存中旧的 status，会重复调度并覆盖 status）。
+- **TTL 控制器**：`pkg/controller/ttlafterfinished`，在 Job 完成或失败 `ttlSecondsAfterFinished` 秒后以 Foreground 方式删除，
+  删除前向 API 确认最新的 TTL 与 resourceVersion。
+- **kk**：`get jobs|cronjobs` 的列与 kubectl 一致（STATUS 含 Suspended/FailureTarget 等，COMPLETIONS 含 `0/1 of 2` 形式）；
+  `describe job|cronjob`；`kk create job NAME --image IMG -- CMD...` 与 `kk create job NAME --from=cronjob/NAME`
+  （注解 `cronjob.kubernetes.io/instantiate: manual`，与 Kubernetes 一样会让 CronJob 报 UnexpectedJob 警告）。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -616,15 +641,15 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | --- | --- | --- |
 | `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`node-init`（含 kubelet）、`kube-proxy`、`ingress-controller`、`cluster-dns`、`demo`，以及 `fetch`/`lookup` 等测试工具 | `cmd/kube-*`（及早期的 `hyperkube`） |
 | `cmd/kk` | 命令行客户端与集群生命周期（含 worker 扩缩） | `kubectl`、`kind` |
-| `pkg/apis/{meta,core,apps,networking,coordination,storage}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`networkingv1`、`coordinationv1`、`storagev1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
-| `pkg/apis/{core,apps,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
+| `pkg/apis/{meta,core,apps,batch,networking,coordination,storage}/v1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`batchv1`、`networkingv1`、`coordinationv1`、`storagev1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1` |
+| `pkg/apis/{core,apps,batch,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
 | `pkg/labels`、`pkg/fields`、`pkg/watch` | 选择器与 watch 事件类型 | `apimachinery/pkg/{labels,fields,watch}` |
 | `pkg/scheme` | 资源注册表（REST 坐标、Kind、构造函数） | `runtime.Scheme`、`RESTMapper` |
 | `pkg/apiserver` | 通用 API 服务：路由、存储读写、删除语义、watch、子资源 | `k8s.io/apiserver` |
-| `pkg/registry/{core,apps,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
+| `pkg/registry/{core,apps,batch,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
 | `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
-| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
+| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `daemon`、`job`、`cronjob`、`ttlafterfinished`、`nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins}` | 调度队列；调度框架（NodeInfo 快照、Filter/Score 接口）与默认插件 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins/<name>}` |
 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars}`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |
@@ -634,7 +659,7 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/dns` | 集群 DNS 服务器（报文编解码、kubernetes 记录、上游转发） | 无直接对应（CoreDNS 及其 kubernetes 插件） |
 | `pkg/fieldpath` | downward API：Pod 字段路径与容器资源取值 | `pkg/fieldpath`、`pkg/api/v1/resource` |
 | `pkg/volume` | configMap/secret/downwardAPI/projected 卷的内容与原子写入器；`localpath` 为 local-path 动态供给器 | `pkg/volume/util`（AtomicWriter）与各卷插件；kind 使用的 rancher local-path-provisioner |
-| `pkg/util/{ptr,deepcopy,validation,expansion}` | 通用小工具（`expansion` 展开 `$(VAR)`） | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation`、`third_party/forked/golang/expansion` |
+| `pkg/util/{ptr,deepcopy,validation,expansion,cron}` | 通用小工具（`expansion` 展开 `$(VAR)`，`cron` 解析 cron 表达式） | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation`、`third_party/forked/golang/expansion`、`github.com/robfig/cron/v3` |
 | `test/e2e` | Ginkgo 端到端测试 | `test/e2e` |
 | `test/integration` | 真实 etcd + 进程内 API Server 的集成测试与框架 | `test/integration` |
 

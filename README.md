@@ -29,9 +29,14 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   history, rollback, pause/resume, Available/Progressing conditions with a progress
   deadline); DaemonSet controller (a Pod on every node that matches the template's node
   selector, affinity and tolerations; RollingUpdate with `maxUnavailable`/`maxSurge` or
-  OnDelete; history in ControllerRevisions, rollback); Endpoints controller; garbage
-  collector; namespace controller; Pod garbage collector (Pods bound to a deleted node are
-  failed and deleted).
+  OnDelete; history in ControllerRevisions, rollback); Job controller (`completions` and
+  `parallelism`, work queues, Indexed Jobs with `JOB_COMPLETION_INDEX`, `backoffLimit` with a
+  10 s doubling replacement backoff, OnFailure restarts counted, `activeDeadlineSeconds`,
+  suspend/resume, Complete/Failed conditions like Kubernetes 1.31+); CronJob controller (cron
+  schedules with time zones, the latest missed run only, `startingDeadlineSeconds`,
+  Allow/Forbid/Replace, history limits); TTL-after-finished controller; Endpoints controller;
+  garbage collector; namespace controller; Pod garbage collector (Pods bound to a deleted node
+  are failed and deleted).
 - **Scheduler**: a kube-scheduler-style framework. Filter plugins check cordoned nodes,
   taints, `nodeSelector` and node affinity, resource requests against allocatable, and pod
   affinity/anti-affinity. Score plugins (with kube-scheduler's weights) prefer the least
@@ -173,7 +178,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | Component | Responsibility | Status |
 | --- | --- | --- |
 | kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation | done |
-| controller-manager | Deployment, ReplicaSet, DaemonSet, Endpoints, garbage collector, namespace, node IPAM, node lifecycle, taint-eviction, Pod garbage collector, PersistentVolume and PVC/PV protection controllers | done, growing |
+| controller-manager | Deployment, ReplicaSet, DaemonSet, Job, CronJob, TTL-after-finished, Endpoints, garbage collector, namespace, node IPAM, node lifecycle, taint-eviction, Pod garbage collector, PersistentVolume and PVC/PV protection controllers | done, growing |
 | scheduler | Scheduling framework with pre-filter, filter and score plugins (taints, node affinity, resource fit, pod (anti-)affinity, spreading, volume binding), backoff queue, binding (asynchronous while volumes are provisioned) | done |
 | kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
@@ -372,6 +377,10 @@ kk delete pod notes && kk apply -f examples/storage.yaml   # the new Pod lands o
 kk exec notes -- /mini cat /data/note
 kk create secret generic db --from-literal=password=s3cr3t   # or --from-file=[KEY=]PATH
 kk describe secret db                    # shows sizes, never values
+kk apply -f examples/batch.yaml          # an Indexed Job and a CronJob running every minute
+kk get jobs,cronjobs                     # squares: Complete 3/3; ticker-<minutes> Jobs follow
+kk create job once --image mini-k8s:local -- /mini sleep 2s   # a one-off Job
+kk create job ticker-now --from=cronjob/ticker               # run the CronJob by hand
 
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # another namespace, exposed by a NodePort Service
@@ -462,7 +471,8 @@ still not a cross-resource transaction.
 - No scheduler preemption, priorities or `topologySpreadConstraints` (replicas spread by
   default); no PodDisruptionBudgets (evictions always succeed). Heartbeats are faster than Kubernetes' defaults: Leases are
   renewed every 2 s and a node is Unknown after 15 s without one.
-- No Jobs, CronJobs or StatefulSets yet (M9b, M9c); no HPA, RBAC or control-plane HA.
+- No StatefulSets yet (M9c); no HPA, RBAC or control-plane HA. Jobs have no `podFailurePolicy`,
+  `successPolicy` or per-index backoff, and are tracked without the job-tracking finalizer.
 
 ## Development
 
@@ -551,12 +561,13 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M8a | ConfigMaps, Secrets, `valueFrom`/`envFrom`, downward API, projected volumes | ✅ |
 | M8b | PersistentVolumes, claims and StorageClasses, volume binding in the scheduler, local-path provisioning | ✅ |
 | M9a | DaemonSets and ControllerRevisions, kube-proxy as a DaemonSet | ✅ |
-| M9b | Jobs and CronJobs | planned |
+| M9b | Jobs and CronJobs, TTL after finished, `kk create job` | ✅ |
 | M9c | StatefulSets | planned |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M9b Job and CronJob plan (Chinese)](docs/superpowers/plans/2026-10-15-m9b-job-cronjob.md)
 - [M9a DaemonSet plan (Chinese)](docs/superpowers/plans/2026-10-15-m9a-daemonset.md)
 - [M8b persistent volumes plan (Chinese)](docs/superpowers/plans/2026-10-15-m8b-persistent-volumes.md)
 - [M8a ConfigMaps and Secrets plan (Chinese)](docs/superpowers/plans/2026-10-15-m8a-configmap-secret.md)

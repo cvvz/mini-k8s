@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	batchv1 "mini-k8s/pkg/apis/batch/v1"
 	coordinationv1 "mini-k8s/pkg/apis/coordination/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
@@ -369,6 +370,45 @@ func columnsFor(res scheme.ResourceInfo) []column {
 				return sel.String()
 			}},
 		}
+	case scheme.Jobs.Resource:
+		job := func(o metav1.Object) *batchv1.Job { return o.(*batchv1.Job) }
+		return []column{nameColumn(),
+			{header: "STATUS", value: func(o metav1.Object, _ time.Time) string { return jobStatus(job(o)) }},
+			{header: "COMPLETIONS", value: func(o metav1.Object, _ time.Time) string { return jobCompletions(job(o)) }},
+			{header: "DURATION", value: func(o metav1.Object, now time.Time) string { return jobDuration(job(o), now) }},
+			ageColumn(),
+			{header: "CONTAINERS", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return containerField(job(o).Spec.Template.Spec.Containers, func(c corev1.Container) string { return c.Name })
+			}},
+			{header: "IMAGES", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return containerField(job(o).Spec.Template.Spec.Containers, func(c corev1.Container) string { return c.Image })
+			}},
+			{header: "SELECTOR", wide: true, value: func(o metav1.Object, _ time.Time) string { return formatSelector(job(o).Spec.Selector) }},
+		}
+	case scheme.CronJobs.Resource:
+		cj := func(o metav1.Object) *batchv1.CronJob { return o.(*batchv1.CronJob) }
+		return []column{nameColumn(),
+			{header: "SCHEDULE", value: func(o metav1.Object, _ time.Time) string { return cj(o).Spec.Schedule }},
+			{header: "TIMEZONE", value: func(o metav1.Object, _ time.Time) string { return orNone(derefString(cj(o).Spec.TimeZone)) }},
+			{header: "SUSPEND", value: func(o metav1.Object, _ time.Time) string { return boolPtr(cj(o).Spec.Suspend) }},
+			{header: "ACTIVE", value: func(o metav1.Object, _ time.Time) string { return fmt.Sprint(len(cj(o).Status.Active)) }},
+			{header: "LAST SCHEDULE", value: func(o metav1.Object, now time.Time) string {
+				if t := cj(o).Status.LastScheduleTime; t != nil {
+					return age(*t, now)
+				}
+				return "<none>"
+			}},
+			ageColumn(),
+			{header: "CONTAINERS", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return containerField(cj(o).Spec.JobTemplate.Spec.Template.Spec.Containers, func(c corev1.Container) string { return c.Name })
+			}},
+			{header: "IMAGES", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return containerField(cj(o).Spec.JobTemplate.Spec.Template.Spec.Containers, func(c corev1.Container) string { return c.Image })
+			}},
+			{header: "SELECTOR", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return formatSelector(cj(o).Spec.JobTemplate.Spec.Selector)
+			}},
+		}
 	case scheme.ControllerRevisions.Resource:
 		return []column{nameColumn(),
 			{header: "CONTROLLER", value: func(o metav1.Object, _ time.Time) string {
@@ -694,6 +734,58 @@ func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj m
 		fmt.Fprintf(tw, "Number of Nodes Scheduled with Up-to-date Pods:\t%d\n", o.Status.UpdatedNumberScheduled)
 		fmt.Fprintf(tw, "Number of Nodes Scheduled with Available Pods:\t%d\n", o.Status.NumberAvailable)
 		fmt.Fprintf(tw, "Number of Nodes Misscheduled:\t%d\n", o.Status.NumberMisscheduled)
+	case *batchv1.Job:
+		fmt.Fprintf(tw, "Selector:\t%s\n", formatSelector(o.Spec.Selector))
+		fmt.Fprintf(tw, "Parallelism:\t%s\n", int32Ptr(o.Spec.Parallelism))
+		fmt.Fprintf(tw, "Completions:\t%s\n", int32Ptr(o.Spec.Completions))
+		fmt.Fprintf(tw, "Completion Mode:\t%s\n", derefString(o.Spec.CompletionMode))
+		fmt.Fprintf(tw, "Suspend:\t%t\n", o.Spec.Suspend != nil && *o.Spec.Suspend)
+		fmt.Fprintf(tw, "Backoff Limit:\t%s\n", int32Ptr(o.Spec.BackoffLimit))
+		if d := o.Spec.ActiveDeadlineSeconds; d != nil {
+			fmt.Fprintf(tw, "Active Deadline Seconds:\t%ds\n", *d)
+		}
+		if t := o.Spec.TTLSecondsAfterFinished; t != nil {
+			fmt.Fprintf(tw, "TTL Seconds After Finished:\t%d\n", *t)
+		}
+		if t := o.Status.StartTime; t != nil {
+			fmt.Fprintf(tw, "Start Time:\t%s\n", t.Format(time.RFC1123Z))
+		}
+		if t := o.Status.CompletionTime; t != nil {
+			fmt.Fprintf(tw, "Completed At:\t%s\n", t.Format(time.RFC1123Z))
+		}
+		if d := jobDuration(o, now); d != "" {
+			fmt.Fprintf(tw, "Duration:\t%s\n", d)
+		}
+		ready := int32(0)
+		if o.Status.Ready != nil {
+			ready = *o.Status.Ready
+		}
+		fmt.Fprintf(tw, "Pods Statuses:\t%d Active (%d Ready) / %d Succeeded / %d Failed\n", o.Status.Active, ready, o.Status.Succeeded, o.Status.Failed)
+		if o.Status.CompletedIndexes != "" {
+			fmt.Fprintf(tw, "Completed Indexes:\t%s\n", o.Status.CompletedIndexes)
+		}
+	case *batchv1.CronJob:
+		fmt.Fprintf(tw, "Schedule:\t%s\n", o.Spec.Schedule)
+		fmt.Fprintf(tw, "Time Zone:\t%s\n", orNone(derefString(o.Spec.TimeZone)))
+		fmt.Fprintf(tw, "Concurrency Policy:\t%s\n", o.Spec.ConcurrencyPolicy)
+		fmt.Fprintf(tw, "Suspend:\t%s\n", boolPtr(o.Spec.Suspend))
+		fmt.Fprintf(tw, "Successful Job History Limit:\t%s\n", int32Ptr(o.Spec.SuccessfulJobsHistoryLimit))
+		fmt.Fprintf(tw, "Failed Job History Limit:\t%s\n", int32Ptr(o.Spec.FailedJobsHistoryLimit))
+		deadline := "<unset>"
+		if d := o.Spec.StartingDeadlineSeconds; d != nil {
+			deadline = fmt.Sprintf("%ds", *d)
+		}
+		fmt.Fprintf(tw, "Starting Deadline Seconds:\t%s\n", deadline)
+		last := "<unset>"
+		if t := o.Status.LastScheduleTime; t != nil {
+			last = t.Format(time.RFC1123Z)
+		}
+		fmt.Fprintf(tw, "Last Schedule Time:\t%s\n", last)
+		var active []string
+		for _, r := range o.Status.Active {
+			active = append(active, r.Name)
+		}
+		fmt.Fprintf(tw, "Active Jobs:\t%s\n", orNone(strings.Join(active, ", ")))
 	case *corev1.PersistentVolumeClaim:
 		fmt.Fprintf(tw, "StorageClass:\t%s\n", corev1.ClaimClass(o))
 		fmt.Fprintf(tw, "Status:\t%s\n", terminatingOr(o, o.Status.Phase))
