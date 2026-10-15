@@ -299,7 +299,7 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M9b ✅ | Job、CronJob、TTL-after-finished（落地记录见 §12.12） |
 | M9c ✅ | StatefulSet（volumeClaimTemplates、PVC 保留策略），修订历史抽成共享包（落地记录见 §12.13） |
 | M10a ✅ | 资源指标：kubelet `/metrics/resource`、metrics-server 插件、metrics.k8s.io 聚合代理、`kk top`（落地记录见 §12.14） |
-| M10b | HPA（autoscaling/v2）、scale 子资源、`kk autoscale` |
+| M10b ✅ | HPA（autoscaling/v2）、scale 子资源、`kk autoscale`（落地记录见 §12.15） |
 | M10c | Leader Election（controller-manager、scheduler） |
 | M10d | RBAC 简化版 |
 | 之后 | 补充复杂场景 e2e、提速 e2e 框架、full e2e 集中修复 |
@@ -605,6 +605,31 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
 - **API 小改**：`resource.Quantity` 支持 `n`、`u` 后缀，新增 `NewNanoQuantity`、`NewBinaryQuantity`；新增 `metav1.Duration`。
 - **工具**：`mini spin [DURATION]` 占满一个 CPU，供 e2e 与后续 HPA 使用。
 
+### 12.15 M10b 落地记录
+
+按[实施计划](../plans/2026-10-15-m10b-hpa.md)落地，语义以 AKS 实测为准，`[sig-autoscaling] HorizontalPodAutoscaler` 与 Deployment、StatefulSet 相关 e2e 全部通过。要点：
+
+- **scale 子资源**（`pkg/apiserver/scale.go`）：
+  - Deployment、ReplicaSet、StatefulSet 支持 GET/PUT/PATCH `.../scale`，返回 autoscaling/v1 Scale。
+  - 写入只改 `spec.replicas`，走对象原有的更新流程（Strategy、校验、generation）；Scale 的 resourceVersion 作为前置条件。
+  - `kk scale` 改为 PATCH scale 子资源。
+- **API**（`pkg/apis/autoscaling/v2`，短名 `hpa`）：
+  - 默认 minReplicas 1、CPU 80%，behavior 中的规则按 Kubernetes 补全。
+  - 只支持 Resource 与 ContainerResource 指标（cpu/memory）。
+- **控制器**（`pkg/controller/podautoscaler`）：
+  - 按周期同步（默认 15s，`MINI_HPA_SYNC_PERIOD`），只在 spec 变化时立即同步。
+  - 以下逻辑均按 Kubernetes 实现：
+    - 副本计算。
+    - 未就绪与缺指标 Pod 的保守处理。
+    - legacy 规则：5 分钟缩容稳定窗口，扩容上限 `max(2×当前, 4)`。
+    - behavior：双向稳定窗口、Pods/Percent 策略、Max/Min/Disabled。
+  - conditions 与事件的文案与 AKS 一致。
+  - 指标经 API Server 的 metrics.k8s.io 读取。
+- **kk**：
+  - `get hpa`：TARGETS 与 kubectl 的 formatHPAMetrics 相同。
+  - `describe hpa`。
+  - `autoscale`：`--cpu-percent` 或 `--cpu N%|QUANTITY`。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -699,15 +724,15 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | --- | --- | --- |
 | `cmd/mini` | 多合一二进制，参数为组件名：`kube-apiserver`、`kube-controller-manager`、`kube-scheduler`、`node-init`（含 kubelet）、`kube-proxy`、`ingress-controller`、`cluster-dns`、`demo`，以及 `fetch`/`lookup` 等测试工具 | `cmd/kube-*`（及早期的 `hyperkube`） |
 | `cmd/kk` | 命令行客户端与集群生命周期（含 worker 扩缩） | `kubectl`、`kind` |
-| `pkg/apis/{meta,core,apps,batch,networking,coordination,storage}/v1`、`pkg/apis/metrics/v1beta1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`batchv1`、`networkingv1`、`coordinationv1`、`storagev1`、`metricsv1beta1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1`、`k8s.io/metrics` |
-| `pkg/apis/{core,apps,batch,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
+| `pkg/apis/{meta,core,apps,batch,networking,coordination,storage}/v1`、`pkg/apis/autoscaling/v2`、`pkg/apis/metrics/v1beta1` | 资源类型，导入别名 `metav1`、`corev1`、`appsv1`、`batchv1`、`networkingv1`、`coordinationv1`、`storagev1`、`autoscalingv2`、`metricsv1beta1` | `k8s.io/api`、`apimachinery/pkg/apis/meta/v1`、`k8s.io/metrics` |
+| `pkg/apis/{core,apps,autoscaling,batch,networking}/validation` | 资源校验 | `pkg/apis/*/validation` |
 | `pkg/labels`、`pkg/fields`、`pkg/watch` | 选择器与 watch 事件类型 | `apimachinery/pkg/{labels,fields,watch}` |
 | `pkg/scheme` | 资源注册表（REST 坐标、Kind、构造函数） | `runtime.Scheme`、`RESTMapper` |
 | `pkg/apiserver` | 通用 API 服务：路由、存储读写、删除语义、watch、子资源 | `k8s.io/apiserver` |
-| `pkg/registry/{core,apps,batch,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
+| `pkg/registry/{core,apps,autoscaling,batch,networking}/<resource>` | 各资源的 Strategy（默认值、校验、可变性、字段选择器）；`core/service/allocator` 为 ClusterIP 与 NodePort 分配器，`core/service` 含 repair 循环 | `pkg/registry/<group>/<resource>`、`pkg/registry/core/service/{ipallocator,portallocator}` |
 | `pkg/storage/etcd3` | etcd 存储；`testing` 子包启动临时 etcd | `apiserver/pkg/storage/etcd3` |
 | `pkg/client`、`pkg/client/{informers,workqueue,record}` | REST 与泛型客户端、Informer、WorkQueue、Event 记录器 | `k8s.io/client-go` |
-| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `daemon`、`statefulset`、`history`（ControllerRevision 管理）、`job`、`cronjob`、`ttlafterfinished`、`nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
+| `pkg/controller` 与 `pkg/controller/<name>` | 共享工具（expectations）与各控制器（含 `daemon`、`statefulset`、`podautoscaler`、`history`（ControllerRevision 管理）、`job`、`cronjob`、`ttlafterfinished`、`nodelifecycle`、`tainteviction`、`podgc`、`volume/{persistentvolume,pvcprotection,pvprotection}`） | `pkg/controller` |
 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins}` | 调度队列；调度框架（NodeInfo 快照、Filter/Score 接口）与默认插件 | `pkg/scheduler`、`pkg/scheduler/framework{,/plugins/<name>}` |
 | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,dns,envvars,metrics}` | 节点代理；CRI 客户端（沙箱、容器、日志、`/etc/hosts`、容器统计）；Pod DNS 配置与节点本地 DNS 转发；Service 环境变量；`/metrics/resource` | `pkg/kubelet`、`pkg/kubelet/{kuberuntime,network/dns,envvars,metrics/collectors}`；node-local-dns |
 | `pkg/network/{cni,hostgw}` | CNI 插件 `mini-cni`（含 loopback）与 host-gw 路由代理 | CNI 插件（bridge/host-local/loopback）与 flannel host-gw |

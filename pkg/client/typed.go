@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	autoscalingv2 "mini-k8s/pkg/apis/autoscaling/v2"
 	batchv1 "mini-k8s/pkg/apis/batch/v1"
 	coordinationv1 "mini-k8s/pkg/apis/coordination/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
@@ -85,6 +86,11 @@ func StatefulSets(c *Client, ns string) Resource[appsv1.StatefulSet, *appsv1.Sta
 // ControllerRevisions returns a ControllerRevision client.
 func ControllerRevisions(c *Client, ns string) Resource[appsv1.ControllerRevision, *appsv1.ControllerRevision] {
 	return For[appsv1.ControllerRevision](c, scheme.ControllerRevisions, ns)
+}
+
+// HorizontalPodAutoscalers returns a HorizontalPodAutoscaler client.
+func HorizontalPodAutoscalers(c *Client, ns string) Resource[autoscalingv2.HorizontalPodAutoscaler, *autoscalingv2.HorizontalPodAutoscaler] {
+	return For[autoscalingv2.HorizontalPodAutoscaler](c, scheme.HorizontalPodAutoscalers, ns)
 }
 
 // Jobs returns a Job client.

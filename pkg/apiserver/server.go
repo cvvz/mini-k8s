@@ -209,6 +209,14 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, info requestIn
 	dryRun := q.Get("dryRun") == "All"
 	sub := info.subresource
 	action := sub == "binding" || sub == "log" || sub == "exec" || sub == "eviction" // Pod subresources that are not the object
+	if sub == "scale" && scalable[info.res.Resource] {
+		if r.Method != http.MethodGet && r.Method != http.MethodPut && r.Method != http.MethodPatch {
+			writeError(w, newStatus(http.StatusMethodNotAllowed, metav1.ReasonMethodNotAllowed, "%s is not supported on this path", r.Method))
+			return
+		}
+		s.handleScale(w, r, info, dryRun)
+		return
+	}
 	if sub != "" && sub != "status" && !(info.res.Resource == scheme.Pods.Resource && action) {
 		writeError(w, newStatus(http.StatusNotFound, metav1.ReasonNotFound, "%s has no subresource %q", info.res.Resource, sub))
 		return
@@ -313,6 +321,10 @@ func resourceList(group, version string) (map[string]any, bool) {
 		})
 		if r.HasStatus {
 			resources = append(resources, map[string]any{"name": r.Resource + "/status", "namespaced": r.Namespaced, "kind": r.Kind, "verbs": []string{"get", "patch", "update"}})
+		}
+		if scalable[r.Resource] {
+			resources = append(resources, map[string]any{"name": r.Resource + "/scale", "namespaced": r.Namespaced, "group": "autoscaling",
+				"version": "v1", "kind": "Scale", "verbs": []string{"get", "patch", "update"}})
 		}
 		if r.Resource == scheme.Pods.Resource {
 			resources = append(resources,
