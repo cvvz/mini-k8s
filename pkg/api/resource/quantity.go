@@ -23,6 +23,8 @@ type Quantity struct {
 // IEC; "m" is one thousandth.
 var suffixes = map[string]*big.Rat{
 	"":   big.NewRat(1, 1),
+	"n":  big.NewRat(1, 1e9),
+	"u":  big.NewRat(1, 1e6),
 	"m":  big.NewRat(1, 1000),
 	"k":  big.NewRat(1e3, 1),
 	"M":  big.NewRat(1e6, 1),
@@ -46,7 +48,7 @@ func ParseQuantity(s string) (Quantity, error) {
 	}
 	mult, ok := suffixes[suffix]
 	if number == "" || strings.Count(number, ".") > 1 || number == "." || !ok {
-		return Quantity{}, fmt.Errorf("quantities must match the regular expression '^([0-9.]+)([kMGTP]i?|m)?$': %q", s)
+		return Quantity{}, fmt.Errorf("quantities must match the regular expression '^([0-9.]+)([kMGTP]i?|[num])?$': %q", s)
 	}
 	value, ok := new(big.Rat).SetString(number)
 	if !ok {
@@ -79,6 +81,24 @@ func NewMilliQuantity(milli int64) Quantity {
 		return Quantity{milli: milli, s: fmt.Sprint(milli / 1000)}
 	}
 	return Quantity{milli: milli, s: fmt.Sprintf("%dm", milli)}
+}
+
+// NewNanoQuantity returns a quantity of nano units, formatted like
+// "117586291n" (how the metrics API reports CPU in cores).
+func NewNanoQuantity(nano int64) Quantity {
+	return Quantity{milli: (nano + 999_999) / 1_000_000, s: fmt.Sprintf("%dn", nano)}
+}
+
+// NewBinaryQuantity returns a byte count with the largest binary suffix
+// that keeps it whole, like "2987404Ki" or "64Mi".
+func NewBinaryQuantity(bytes int64) Quantity {
+	for _, suffix := range []string{"Pi", "Ti", "Gi", "Mi", "Ki"} {
+		unit := suffixes[suffix].Num().Int64()
+		if bytes != 0 && bytes%unit == 0 {
+			return Quantity{milli: bytes * 1000, s: fmt.Sprintf("%d%s", bytes/unit, suffix)}
+		}
+	}
+	return NewQuantity(bytes)
 }
 
 // NewQuantity returns a whole quantity, such as a byte count.

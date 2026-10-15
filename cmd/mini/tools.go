@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"syscall"
+	"time"
 
 	"mini-k8s/pkg/api/resource"
 )
@@ -132,6 +133,35 @@ func runWrite(args []string) int {
 	if err := os.WriteFile(args[0], []byte(args[1]+"\n"), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
+	}
+	return 0
+}
+
+// runSpin keeps one CPU busy, forever or for DURATION, to exercise CPU
+// limits and autoscaling: `mini spin` or `mini spin 30s`.
+func runSpin(args []string) int {
+	var until time.Time
+	switch len(args) {
+	case 0:
+	case 1:
+		d, err := time.ParseDuration(args[0])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		until = time.Now().Add(d)
+	default:
+		fmt.Fprintln(os.Stderr, "usage: mini spin [DURATION]")
+		return 2
+	}
+	x := uint64(1)
+	for until.IsZero() || time.Now().Before(until) {
+		for i := 0; i < 1_000_000; i++ {
+			x = x*6364136223846793005 + 1442695040888963407
+		}
+	}
+	if x == 0 {
+		fmt.Println(x) // keeps the loop from being optimized away
 	}
 	return 0
 }

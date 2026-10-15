@@ -29,6 +29,7 @@ import (
 	"mini-k8s/pkg/client/record"
 	"mini-k8s/pkg/kubelet/envvars"
 	"mini-k8s/pkg/kubelet/kuberuntime"
+	"mini-k8s/pkg/kubelet/metrics"
 	"mini-k8s/pkg/kubelet/prober"
 	"mini-k8s/pkg/network/hostgw"
 	"mini-k8s/pkg/util/deepcopy"
@@ -49,6 +50,7 @@ type Runtime interface {
 	StopContainer(ctx context.Context, pod *corev1.Pod, containerID string, grace int64) error
 	Version(ctx context.Context) (string, error)
 	Status(ctx context.Context, sandboxImage string) kuberuntime.Readiness
+	ContainerStats(ctx context.Context) ([]kuberuntime.ContainerStats, error)
 }
 
 // Config describes the node a kubelet runs on.
@@ -70,6 +72,9 @@ type Config struct {
 	// node-role.kubernetes.io/<role> label when the node registers; a
 	// control-plane node also gets the control-plane NoSchedule taint.
 	Role string
+	// CgroupDir is the node's cgroup (v2) directory, read for node usage
+	// (/sys/fs/cgroup by default).
+	CgroupDir string
 }
 
 // Kubelet manages the Pods of one node.
@@ -464,6 +469,7 @@ func NodeCapacity(meminfo string) corev1.ResourceList {
 //	GET  /healthz
 //	GET  /containerLogs/{namespace}/{pod}/{container}?follow=&tailLines=&previous=
 //	POST /exec/{namespace}/{pod}/{container}?command=...&timeout=SECONDS
+//	GET  /metrics/resource
 func (k *Kubelet) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
@@ -472,6 +478,10 @@ func (k *Kubelet) Handler() http.Handler {
 		}
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+k.cfg.Token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == "/metrics/resource" && r.Method == http.MethodGet {
+			k.serveResourceMetrics(w, r)
 			return
 		}
 		route, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
@@ -502,6 +512,27 @@ func (k *Kubelet) Handler() http.Handler {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		}
 	})
+}
+
+// serveResourceMetrics writes the node's and its containers' usage for
+// metrics-server.
+func (k *Kubelet) serveResourceMetrics(w http.ResponseWriter, r *http.Request) {
+	dir := k.cfg.CgroupDir
+	if dir == "" {
+		dir = "/sys/fs/cgroup"
+	}
+	var node *metrics.NodeStats
+	if st, err := metrics.ReadNodeStats(dir, time.Now()); err == nil {
+		node = &st
+	} else {
+		log.Printf("kubelet: node stats: %v", err)
+	}
+	containers, err := k.runtime.ContainerStats(r.Context())
+	if err != nil {
+		log.Printf("kubelet: container stats: %v", err)
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	_ = metrics.Write(w, node, containers, err)
 }
 
 func (k *Kubelet) serveExec(w http.ResponseWriter, r *http.Request, pod *corev1.Pod, container string, q url.Values) {

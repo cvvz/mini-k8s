@@ -133,7 +133,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, apiGroupList())
 		return
 	}
+	if a, ok := aggregatedFor(path); ok {
+		s.proxyAggregated(w, r, a)
+		return
+	}
 	segs := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segs) >= 5 && segs[0] == "api" && segs[1] == "v1" && segs[2] == "nodes" && segs[4] == "proxy" {
+		s.proxyNode(w, r, segs[3], "/"+strings.Join(segs[5:], "/"))
+		return
+	}
 	var group, version string
 	var rest []string
 	switch {
@@ -282,6 +290,10 @@ func apiGroupList() map[string]any {
 		groups[r.Group] = true
 		gv := map[string]string{"groupVersion": r.GroupVersion(), "version": r.Version}
 		list = append(list, map[string]any{"name": r.Group, "versions": []any{gv}, "preferredVersion": gv})
+	}
+	for _, a := range aggregatedAPIs {
+		gv := map[string]string{"groupVersion": a.groupVersion(), "version": a.version}
+		list = append(list, map[string]any{"name": a.group, "versions": []any{gv}, "preferredVersion": gv})
 	}
 	return map[string]any{"kind": "APIGroupList", "apiVersion": "v1", "groups": list}
 }

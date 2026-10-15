@@ -39,10 +39,11 @@ var components = map[string]component{
 	"ingress-controller":      runIngressController,
 	"cluster-dns":             runClusterDNS,
 	"local-path-provisioner":  runLocalPathProvisioner,
+	"metrics-server":          runMetricsServer,
 }
 
 func usage() string {
-	names := []string{"demo", "pause", "fetch URL", "lookup [-t TYPE] NAME", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE", "env", "ls DIR", "rm PATH..."}
+	names := []string{"demo", "pause", "fetch URL", "lookup [-t TYPE] NAME", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE", "spin [DURATION]", "env", "ls DIR", "rm PATH..."}
 	for name := range components {
 		names = append(names, name)
 	}
@@ -81,6 +82,8 @@ func main() {
 		os.Exit(runCat(os.Args[2:]))
 	case "write":
 		os.Exit(runWrite(os.Args[2:]))
+	case "spin":
+		os.Exit(runSpin(os.Args[2:]))
 	case "alloc":
 		os.Exit(runAlloc(os.Args[2:]))
 	case "env":
