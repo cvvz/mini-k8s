@@ -22,8 +22,9 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   删除 Namespace 时级联清空其中的资源。
 - **控制面**：Informer + WorkQueue 事件驱动；Deployment 与 ReplicaSet 控制器（RollingUpdate 按
   `maxSurge`/`maxUnavailable` 滚动或 Recreate、修订历史、回滚、暂停/恢复、带进度期限的
-  Available/Progressing 条件）；Endpoints 控制器；GC 控制器；Namespace 控制器；Pod 垃圾回收
-  （绑定在已删除节点上的 Pod 被标为失败并删除）。
+  Available/Progressing 条件）；DaemonSet 控制器（在每个符合模板 nodeSelector、亲和与容忍的节点上运行一个 Pod；
+  RollingUpdate 按 `maxUnavailable`/`maxSurge` 滚动或 OnDelete；修订历史存于 ControllerRevision，可回滚）；
+  Endpoints 控制器；GC 控制器；Namespace 控制器；Pod 垃圾回收（绑定在已删除节点上的 Pod 被标为失败并删除）。
 - **调度器**：kube-scheduler 式框架。Filter 插件检查节点是否被 cordon、污点、`nodeSelector` 与节点亲和、
   资源请求是否超出 allocatable、Pod 亲和/反亲和；Score 插件（权重同 kube-scheduler）偏好分配最少的节点、
   打散同一 controller 的副本、遵循偏好亲和与 PreferNoSchedule 污点。不可调度的 Pod 带 kube-scheduler 的信息
@@ -33,9 +34,8 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   `tolerationSeconds` 用尽后驱逐 Pod（每个 Pod 都带默认容忍，默认 300 秒）；不被容忍的 NoExecute 污点立即驱逐；
   `pods/eviction` 子资源与 `kk cordon/uncordon/drain/taint` 用于维护节点。
 - **像 kubeadm 一样自托管**：etcd、kube-apiserver、kube-controller-manager、kube-scheduler 与
-  Ingress 控制器都是 `control-plane` 节点上的 **static Pod**，kube-proxy 是每个节点上的 static Pod，
-  它们都以 mirror Pod 的形式出现在 `kube-system` 中；control-plane 节点带污点，业务 Pod 只调度到
-  worker；组件崩溃后由 kubelet 重启。
+  Ingress 控制器都是 `control-plane` 节点上的 **static Pod**，以 mirror Pod 的形式出现在 `kube-system` 中；
+  kube-proxy 是 DaemonSet 插件；control-plane 节点带污点，业务 Pod 只调度到 worker；组件崩溃后由 kubelet 重启。
 - **kind 式节点**：每个节点是一个运行自己 containerd 的特权容器；kubelet 通过 **CRI**
   管理 Pod（每个 Pod 先建沙箱，再建容器）；只有运行时、Pod 网络和沙箱镜像都就绪时节点才 Ready。
   `kk cluster up --workers N` 运行 1 到 10 个 worker；被移除的 worker 先 drain。
@@ -114,7 +114,7 @@ flowchart TB
 - 每个方框是一个扮演“机器”的特权 Docker 容器，它们共享 Docker 网络 `mini-k8s`。默认两个 worker；
   `kk cluster up --workers N` 会增加 worker-3 及以后的节点（或只保留 worker-1）。
 - control-plane 节点的 kubelet 以 static Pod 运行 etcd、API Server、Controller Manager、调度器和
-  Ingress 控制器；该节点的污点让业务 Pod 只调度到 worker。每个节点（包括 control-plane）都运行 kube-proxy；
+  Ingress 控制器；该节点的污点让业务 Pod 只调度到 worker。每个节点（包括 control-plane）都运行 kube-proxy（DaemonSet）；
   集群 DNS（`kube-dns`，`10.96.0.10`）与 local-path 供给器以普通 Pod 运行在 worker 上。
 - 组件之间的箭头是 API 流量：各组件 list/watch API Server 并写回状态，只有 API Server 访问 etcd；
   kubelet 经 containerd（CRI）启动 Pod。
@@ -123,10 +123,9 @@ flowchart TB
   NodePort 在每个节点的地址上应答。
 
 所有组件都是同一个二进制 `mini` 的不同角色。Docker Compose 只启动节点容器（与
-[kind](https://kind.sigs.k8s.io) 的节点相同）；与 kubeadm 一样，每个 kubelet 在 API 还不存在时就从清单目录拉起
-自己的 static Pod（[build/manifests/control-plane](build/manifests/control-plane)，worker 上是
-[build/manifests/node](build/manifests/node)）。Pod 运行在节点内的 containerd 中，因此宿主机的
-`docker ps` 只能看到这些节点。
+[kind](https://kind.sigs.k8s.io) 的节点相同）；与 kubeadm 一样，control-plane 节点的 kubelet 在 API 还不存在时就从清单目录
+（[build/manifests/control-plane](build/manifests/control-plane)）以 static Pod 拉起控制面。Pod 运行在节点内的
+containerd 中，因此宿主机的 `docker ps` 只能看到这些节点。
 
 ## 自研与复用的组件
 
@@ -138,13 +137,13 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 | 组件 | 职责 | 状态 |
 | --- | --- | --- |
 | kube-apiserver | K8s 风格 REST、Watch、准入与校验、删除语义、子资源、ClusterIP 与 NodePort 分配 | 已实现 |
-| controller-manager | Deployment、ReplicaSet、Endpoints、垃圾回收、Namespace、node IPAM、节点生命周期、污点驱逐、Pod 垃圾回收、PersistentVolume 与 PVC/PV 保护控制器 | 已实现，持续扩展 |
+| controller-manager | Deployment、ReplicaSet、DaemonSet、Endpoints、垃圾回收、Namespace、node IPAM、节点生命周期、污点驱逐、Pod 垃圾回收、PersistentVolume 与 PVC/PV 保护控制器 | 已实现，持续扩展 |
 | scheduler | 调度框架：PreFilter、Filter 与 Score 插件（污点、节点亲和、资源适配、Pod 亲和/反亲和、打散、卷绑定）、退避队列、binding 绑定（供给卷期间异步完成） | 已实现 |
 | kubelet | 节点注册与心跳、static Pod 与 mirror Pod、基于 CRI 的 Pod 生命周期（客户端一侧，`pkg/kubelet/kuberuntime`）、探针、状态上报、优雅终止、日志、CNI 配置、节点本地 DNS 转发 | 已实现 |
 | 客户端库 | 泛型 REST 客户端、Informer、WorkQueue、Event 记录器 | 已实现 |
-| kube-proxy | iptables 模式：ClusterIP、NodePort、会话亲和、地址伪装；作为每个节点的 static Pod 运行（使用其 Ubuntu 镜像中的 iptables 工具） | 已实现 |
+| kube-proxy | iptables 模式：ClusterIP、NodePort、会话亲和、地址伪装；作为 DaemonSet 插件运行在每个节点上（使用其 Ubuntu 镜像中的 iptables 工具） | 已实现 |
 | Ingress 控制器 | networking.k8s.io/v1 Ingress：在 `127.0.0.1:18080` 按 host 与 path 转发到 Service 的端点（相当于 kind 中 ingress-nginx 的角色）；作为 control-plane 节点的 static Pod 运行 | 已实现 |
-| static Pod 清单 | `build/manifests/control-plane` 与 `build/manifests/node`（与 kubeadm 相同） | 已实现 |
+| static Pod 清单与插件 | `build/manifests/control-plane` 与 `build/manifests/addons`（与 kubeadm 相同） | 已实现 |
 | `kk` | 命令行客户端、集群生命周期管理、镜像导入 | 已实现 |
 | demo 应用 | 示例与测试用的 HTTP 服务；`mini fetch` 是给没有 shell 的镜像用的极简 HTTP 客户端 | 已实现 |
 | `mini-cni` + host-gw 路由代理 | Pod 网络：网桥、veth、IP 分配、loopback、跨节点路由、出网地址伪装 | 已实现 |
@@ -230,9 +229,9 @@ make build
 `cluster up` 会构建组件、准备 etcd（首次运行时用宿主机 curl 从 `storage.googleapis.com`
 下载 v3.5.17）、从 `build/images/` 构建五个镜像（组件、节点、pause、etcd、kube-proxy；节点镜像
 首次构建约需一分钟）、启动节点容器（默认三个）、把镜像导入每个节点的 containerd（随后 control-plane 节点的
-kubelet 以 static Pod 启动 etcd、API Server、Controller Manager、调度器和 Ingress 控制器，每个节点
-启动 kube-proxy），之后最多等待两分钟，直到 API 健康、所有节点都有新鲜的 Ready 心跳，最后像 kubeadm
-安装 CoreDNS、kind 安装存储供给器一样 apply 集群 DNS 与 local-path 存储插件（[build/manifests/addons](build/manifests/addons)）。
+kubelet 以 static Pod 启动 etcd、API Server、Controller Manager、调度器和 Ingress 控制器），之后最多等待两分钟，
+直到 API 健康、所有节点都有新鲜的 Ready 心跳，最后 apply 插件（[build/manifests/addons](build/manifests/addons)）：
+像 kubeadm 一样安装 DaemonSet 形式的 kube-proxy 与集群 DNS，像 kind 一样安装 local-path 存储供给器。
 
 ```text
 API healthy
@@ -307,7 +306,7 @@ kk rollout undo deployment/web           # 回到上一个版本
 kk delete pod POD_NAME                   # 优雅终止，Deployment 会补建新 Pod
 kk delete pod POD_NAME --force           # 立即从 API 删除
 kk get leases -n kube-node-lease         # 每个 kubelet 每 2 秒续约一次 Lease
-kk drain worker-2                        # cordon worker-2，并把其上的 Pod 迁到 worker-1
+kk drain worker-2 --ignore-daemonsets    # cordon worker-2，并把其上的 Pod 迁到 worker-1
 kk get pods -o wide                      # web 的 Pod 现在都在 worker-1 上
 kk uncordon worker-2
 kk taint nodes worker-2 dedicated=demo:NoExecute   # 驱逐不容忍该污点的 Pod
@@ -406,7 +405,7 @@ kk image load my-app:v1
 - 调度器没有抢占、优先级与 `topologySpreadConstraints`（副本默认打散）；没有 PodDisruptionBudget（驱逐总是成功）。心跳比 Kubernetes
   默认值快：每 2 秒续约 Lease，15 秒没有续约的节点即为 Unknown。
 - 一个 control-plane 节点（无高可用），最多 10 个 worker；节点是共享宿主机内核的容器。e2e 套件要求默认的两个 worker。
-- 没有 DaemonSet、Job、CronJob、StatefulSet、HPA、RBAC 和控制面高可用。
+- 还没有 Job、CronJob 与 StatefulSet（M9b、M9c）；没有 HPA、RBAC 和控制面高可用。
 
 ## 开发与测试
 
@@ -451,7 +450,7 @@ kube-proxy 的规则，执行 `cluster down/up`，并把 worker 扩到三个、�
 | Pod 显示 `CrashLoopBackOff` | `kk logs NAME` 查看应用日志，`kk logs -p NAME` 查看上一次运行的日志；kubelet 以 1s 起、最长 30s 的退避重启。 |
 | `127.0.0.1:18080` 返回 `503` | Service 没有就绪端点：`kk get endpoints NAME`（未就绪的 Pod 不显示在 ENDPOINTS 列中）；检查 selector 与 `targetPort`。`404 default backend` 表示没有与 host 和 path 匹配的 Ingress 规则。 |
 | Pod 内解析不到 Service 名字 | `kk get pods -n kube-system -l k8s-app=kube-dns`（应有两个 Running）、`kk logs -n kube-system POD`，以及 `kk exec POD -- /mini cat /etc/resolv.conf`（除非 `dnsPolicy` 另有设置，nameserver 应为 `10.96.0.10`）。`kk exec POD -- /mini lookup NAME` 显示 Pod 的解析结果。 |
-| ClusterIP 或 NodePort 无响应 | `kk get pods -n kube-system`（每个节点都要有 kube-proxy）、`kk logs -n kube-system kube-proxy-worker-1`，以及 `docker exec mini-k8s-worker-1-1 iptables -t nat -S` 查看规则。`connection refused` 表示 Service 没有就绪端点。 |
+| ClusterIP 或 NodePort 无响应 | `kk get pods -n kube-system`（每个节点都要有 kube-proxy）、`kk get pods -n kube-system -l k8s-app=kube-proxy -o wide` 与 `kk logs -n kube-system POD` 查看对应节点的 kube-proxy，以及 `docker exec mini-k8s-worker-1-1 iptables -t nat -S` 查看规则。`connection refused` 表示 Service 没有就绪端点。 |
 | `Error from server (Invalid)` | 按报错中的字段路径修改清单；未知字段同样会被拒绝。 |
 | 端口或项目名冲突 | 释放端口或停止冲突项目；只修改 `MINI_API` 不会改变 Compose 端口映射。 |
 | 新 clone 的集群里有旧资源 | 同一个 Docker Engine 上只有一套集群和一组节点磁盘（etcd 位于 control-plane 节点的磁盘上）；按第 5 步用 `kk cluster down --volumes` 重置。 |
@@ -490,11 +489,14 @@ unset MINI_TOKEN
 | M7c | 更多 worker（`kk cluster up --workers N`）、Pod 垃圾回收 | ✅ |
 | M8a | ConfigMap、Secret、`valueFrom`/`envFrom`、downward API、投射卷 | ✅ |
 | M8b | PersistentVolume、PVC 与 StorageClass、调度器卷绑定、local-path 动态供给 | ✅ |
-| M9 | DaemonSet、Job、CronJob、StatefulSet | 计划中 |
+| M9a | DaemonSet 与 ControllerRevision、kube-proxy 改为 DaemonSet | ✅ |
+| M9b | Job 与 CronJob | 计划中 |
+| M9c | StatefulSet | 计划中 |
 
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M9a DaemonSet 计划](docs/superpowers/plans/2026-10-15-m9a-daemonset.md)
 - [M8b 持久卷计划](docs/superpowers/plans/2026-10-15-m8b-persistent-volumes.md)
 - [M8a ConfigMap 与 Secret 计划](docs/superpowers/plans/2026-10-15-m8a-configmap-secret.md)
 - [M7c worker 扩缩计划](docs/superpowers/plans/2026-10-15-m7c-worker-scaling.md)

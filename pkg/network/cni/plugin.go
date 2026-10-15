@@ -196,11 +196,18 @@ func (p Plugin) add(conf NetConf, a Args) (*Result, error) {
 		// the DNATed packet leaves through the port it arrived on.
 		{"link", "set", host, "type", "bridge_slave", "hairpin", "on"},
 		{"-n", ns, "addr", "add", addr, "dev", a.IfName},
+		// Announce the address when the interface comes up (a gratuitous
+		// ARP, as the CNI bridge plugin sends): a recently deleted Pod may
+		// have had the same address, and neighbours still caching its MAC
+		// would send traffic nowhere for a while.
+		{"netns", "exec", ns, "sysctl", "-q", "-w", "net.ipv4.conf." + a.IfName + ".arp_notify=1"},
 		{"-n", ns, "link", "set", a.IfName, "up"},
 		{"-n", ns, "link", "set", "lo", "up"},
 		{"-n", ns, "route", "add", "default", "via", gw.String()},
 	}
 	_, _ = p.Run("ip", "link", "del", host) // a leftover from an interrupted ADD
+	// The node's own cache of the address goes as well.
+	_, _ = p.Run("ip", "neigh", "flush", "to", ip.String(), "dev", conf.Bridge)
 	for _, step := range steps {
 		if _, err := p.Run("ip", step...); err != nil {
 			_, _ = p.Run("ip", "link", "del", host)

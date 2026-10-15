@@ -98,6 +98,8 @@ func TestAddWiresVethAndReturnsResult(t *testing.T) {
 		"ip link set veth0123456789a master cni0 up",
 		"ip link set veth0123456789a type bridge_slave hairpin on",
 		"ip -n cni-1 addr add 10.244.1.2/24 dev eth0",
+		"ip neigh flush to 10.244.1.2 dev cni0",
+		"ip netns exec cni-1 sysctl -q -w net.ipv4.conf.eth0.arp_notify=1",
 		"ip -n cni-1 link set lo up",
 		"ip -n cni-1 route add default via 10.244.1.1",
 	} {

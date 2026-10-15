@@ -343,6 +343,49 @@ func columnsFor(res scheme.ResourceInfo) []column {
 			{header: "DATA", value: func(o metav1.Object, _ time.Time) string { return fmt.Sprint(len(o.(*corev1.Secret).Data)) }},
 			ageColumn(),
 		}
+	case scheme.DaemonSets.Resource:
+		ds := func(o metav1.Object) *appsv1.DaemonSet { return o.(*appsv1.DaemonSet) }
+		count := func(f func(appsv1.DaemonSetStatus) int32) func(metav1.Object, time.Time) string {
+			return func(o metav1.Object, _ time.Time) string { return fmt.Sprint(f(ds(o).Status)) }
+		}
+		return []column{nameColumn(),
+			{header: "DESIRED", value: count(func(s appsv1.DaemonSetStatus) int32 { return s.DesiredNumberScheduled })},
+			{header: "CURRENT", value: count(func(s appsv1.DaemonSetStatus) int32 { return s.CurrentNumberScheduled })},
+			{header: "READY", value: count(func(s appsv1.DaemonSetStatus) int32 { return s.NumberReady })},
+			{header: "UP-TO-DATE", value: count(func(s appsv1.DaemonSetStatus) int32 { return s.UpdatedNumberScheduled })},
+			{header: "AVAILABLE", value: count(func(s appsv1.DaemonSetStatus) int32 { return s.NumberAvailable })},
+			{header: "NODE SELECTOR", value: func(o metav1.Object, _ time.Time) string {
+				return orNone(labelsString(ds(o).Spec.Template.Spec.NodeSelector))
+			}},
+			ageColumn(),
+			{header: "CONTAINERS", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return containerField(ds(o).Spec.Template.Spec.Containers, func(c corev1.Container) string { return c.Name })
+			}},
+			{header: "IMAGES", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				return containerField(ds(o).Spec.Template.Spec.Containers, func(c corev1.Container) string { return c.Image })
+			}},
+			{header: "SELECTOR", wide: true, value: func(o metav1.Object, _ time.Time) string {
+				sel, _ := ds(o).Spec.Selector.AsSelector()
+				return sel.String()
+			}},
+		}
+	case scheme.ControllerRevisions.Resource:
+		return []column{nameColumn(),
+			{header: "CONTROLLER", value: func(o metav1.Object, _ time.Time) string {
+				if ref := metav1.ControllerOf(o.GetObjectMeta()); ref != nil {
+					group := ""
+					if g, _, ok := strings.Cut(ref.APIVersion, "/"); ok {
+						group = "." + g
+					}
+					return strings.ToLower(ref.Kind) + group + "/" + ref.Name
+				}
+				return "<none>"
+			}},
+			{header: "REVISION", value: func(o metav1.Object, _ time.Time) string {
+				return fmt.Sprint(o.(*appsv1.ControllerRevision).Revision)
+			}},
+			ageColumn(),
+		}
 	case scheme.PersistentVolumeClaims.Resource:
 		pvc := func(o metav1.Object) *corev1.PersistentVolumeClaim { return o.(*corev1.PersistentVolumeClaim) }
 		return []column{nameColumn(),
@@ -642,6 +685,15 @@ func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj m
 	case *corev1.Node:
 		fmt.Fprintf(tw, "Status:\t%s\n", nodeStatus(o, now))
 		fmt.Fprintf(tw, "InternalIP:\t%s\n", orNone(o.InternalIP()))
+	case *appsv1.DaemonSet:
+		sel, _ := o.Spec.Selector.AsSelector()
+		fmt.Fprintf(tw, "Selector:\t%s\n", sel.String())
+		fmt.Fprintf(tw, "Node-Selector:\t%s\n", orNone(labelsString(o.Spec.Template.Spec.NodeSelector)))
+		fmt.Fprintf(tw, "Desired Number of Nodes Scheduled:\t%d\n", o.Status.DesiredNumberScheduled)
+		fmt.Fprintf(tw, "Current Number of Nodes Scheduled:\t%d\n", o.Status.CurrentNumberScheduled)
+		fmt.Fprintf(tw, "Number of Nodes Scheduled with Up-to-date Pods:\t%d\n", o.Status.UpdatedNumberScheduled)
+		fmt.Fprintf(tw, "Number of Nodes Scheduled with Available Pods:\t%d\n", o.Status.NumberAvailable)
+		fmt.Fprintf(tw, "Number of Nodes Misscheduled:\t%d\n", o.Status.NumberMisscheduled)
 	case *corev1.PersistentVolumeClaim:
 		fmt.Fprintf(tw, "StorageClass:\t%s\n", corev1.ClaimClass(o))
 		fmt.Fprintf(tw, "Status:\t%s\n", terminatingOr(o, o.Status.Phase))

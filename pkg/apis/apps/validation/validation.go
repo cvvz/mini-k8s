@@ -59,22 +59,31 @@ func validateStrategy(s appsv1.DeploymentStrategy) []string {
 	if ru == nil {
 		return nil
 	}
+	return validateRollingUpdate("spec.strategy.rollingUpdate", ru.MaxUnavailable, ru.MaxSurge)
+}
+
+// validateRollingUpdate checks maxUnavailable and maxSurge: non-negative
+// numbers or percentages, not both zero.
+func validateRollingUpdate(path string, maxUnavailable, maxSurge *intstr.IntOrString) []string {
 	var errs []string
 	values := map[string]int{}
-	for name, v := range map[string]*intstr.IntOrString{"maxUnavailable": ru.MaxUnavailable, "maxSurge": ru.MaxSurge} {
-		n, err := intstr.GetScaledValue(v, 100, true)
+	for _, f := range []struct {
+		name string
+		v    *intstr.IntOrString
+	}{{"maxUnavailable", maxUnavailable}, {"maxSurge", maxSurge}} {
+		n, err := intstr.GetScaledValue(f.v, 100, true)
 		switch {
 		case err != nil:
-			errs = append(errs, fmt.Sprintf("spec.strategy.rollingUpdate.%s: Invalid value: %v", name, err))
+			errs = append(errs, fmt.Sprintf("%s.%s: Invalid value: %v", path, f.name, err))
 		case n < 0:
-			errs = append(errs, fmt.Sprintf("spec.strategy.rollingUpdate.%s: Invalid value: must be greater than or equal to 0", name))
-		case name == "maxUnavailable" && v.IsString && n > 100:
-			errs = append(errs, "spec.strategy.rollingUpdate.maxUnavailable: Invalid value: must not be greater than 100%")
+			errs = append(errs, fmt.Sprintf("%s.%s: Invalid value: must be greater than or equal to 0", path, f.name))
+		case f.name == "maxUnavailable" && f.v != nil && f.v.IsString && n > 100:
+			errs = append(errs, path+".maxUnavailable: Invalid value: must not be greater than 100%")
 		}
-		values[name] = n
+		values[f.name] = n
 	}
 	if len(errs) == 0 && values["maxUnavailable"] == 0 && values["maxSurge"] == 0 {
-		errs = append(errs, "spec.strategy.rollingUpdate.maxUnavailable: Invalid value: may not be 0 when `maxSurge` is 0")
+		errs = append(errs, path+".maxUnavailable: Invalid value: may not be 0 when `maxSurge` is 0")
 	}
 	return errs
 }
@@ -123,6 +132,54 @@ func ValidateSelectorMatchesTemplate(path string, ls *metav1.LabelSelector, tpl 
 	}
 	if !sel.Matches(tpl.Labels) {
 		return []string{path + ".template.metadata.labels: Invalid value: selector does not match template labels"}
+	}
+	return nil
+}
+
+// ValidateDaemonSet validates a complete DaemonSet.
+func ValidateDaemonSet(ds *appsv1.DaemonSet) []string {
+	errs := ValidateSelectorMatchesTemplate("spec", ds.Spec.Selector, &ds.Spec.Template)
+	errs = append(errs, validatePodTemplate(&ds.Spec.Template)...)
+	if ds.Spec.MinReadySeconds < 0 {
+		errs = append(errs, "spec.minReadySeconds: Invalid value: must be greater than or equal to 0")
+	}
+	if l := ds.Spec.RevisionHistoryLimit; l != nil && *l < 0 {
+		errs = append(errs, "spec.revisionHistoryLimit: Invalid value: must be greater than or equal to 0")
+	}
+	s := ds.Spec.UpdateStrategy
+	switch s.Type {
+	case appsv1.OnDeleteDaemonSetStrategyType:
+	case appsv1.RollingUpdateDaemonSetStrategyType:
+		if ru := s.RollingUpdate; ru != nil {
+			errs = append(errs, validateRollingUpdate("spec.updateStrategy.rollingUpdate", ru.MaxUnavailable, ru.MaxSurge)...)
+		}
+	default:
+		errs = append(errs, fmt.Sprintf(`spec.updateStrategy.type: Unsupported value: %q: supported values: "RollingUpdate", "OnDelete"`, s.Type))
+	}
+	return errs
+}
+
+// ValidateDaemonSetUpdate rejects changes to the selector.
+func ValidateDaemonSetUpdate(ds, old *appsv1.DaemonSet) []string {
+	if !reflect.DeepEqual(ds.Spec.Selector, old.Spec.Selector) {
+		return []string{"spec.selector: Invalid value: field is immutable"}
+	}
+	return nil
+}
+
+// ValidateControllerRevision requires a non-negative revision; the data of
+// a revision never changes.
+func ValidateControllerRevision(cr *appsv1.ControllerRevision) []string {
+	if cr.Revision < 0 {
+		return []string{fmt.Sprintf("revision: Invalid value: %d: must be greater than or equal to 0", cr.Revision)}
+	}
+	return nil
+}
+
+// ValidateControllerRevisionUpdate keeps the data.
+func ValidateControllerRevisionUpdate(cr, old *appsv1.ControllerRevision) []string {
+	if string(cr.Data) != string(old.Data) {
+		return []string{"data: Invalid value: field is immutable"}
 	}
 	return nil
 }

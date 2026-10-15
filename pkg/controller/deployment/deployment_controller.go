@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"reflect"
 	"slices"
 	"sort"
@@ -23,6 +22,7 @@ import (
 	"mini-k8s/pkg/client/informers"
 	"mini-k8s/pkg/client/record"
 	"mini-k8s/pkg/client/workqueue"
+	"mini-k8s/pkg/controller"
 	"mini-k8s/pkg/util/deepcopy"
 )
 
@@ -76,12 +76,7 @@ func (dc *DeploymentController) Run(ctx context.Context, workers int) {
 
 // TemplateHash identifies a Pod template; it names the template's
 // ReplicaSet and is stored in the pod-template-hash label of its Pods.
-func TemplateHash(tpl *corev1.PodTemplateSpec) string {
-	data, _ := json.Marshal(tpl)
-	h := fnv.New32a()
-	_, _ = h.Write(data)
-	return safeEncode(fmt.Sprint(h.Sum32()))
-}
+func TemplateHash(tpl *corev1.PodTemplateSpec) string { return controller.ComputeHash(tpl) }
 
 // EqualIgnoreHash reports whether two Pod templates match apart from the
 // pod-template-hash label once both carry today's defaults, like
@@ -95,16 +90,6 @@ func EqualIgnoreHash(a, b *corev1.PodTemplateSpec) bool {
 		return data
 	}
 	return bytes.Equal(canonical(a), canonical(b))
-}
-
-// safeEncode maps digits onto consonants and digits that cannot spell words.
-func safeEncode(s string) string {
-	const alphabet = "bcdfghjklmnpqrstvwxz2456789"
-	out := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		out[i] = alphabet[int(s[i])%len(alphabet)]
-	}
-	return string(out)
 }
 
 func (dc *DeploymentController) sync(ctx context.Context, key string) error {

@@ -4,6 +4,8 @@ package registry
 
 import (
 	"mini-k8s/pkg/apiserver"
+	"mini-k8s/pkg/registry/apps/controllerrevision"
+	"mini-k8s/pkg/registry/apps/daemonset"
 	"mini-k8s/pkg/registry/apps/deployment"
 	"mini-k8s/pkg/registry/apps/replicaset"
 	"mini-k8s/pkg/registry/coordination/lease"
@@ -56,6 +58,8 @@ func New(store *etcd3.Store, prefix string) *Registry {
 			scheme.StorageClasses.Resource:         storageclass.Strategy,
 			scheme.Deployments.Resource:            deployment.Strategy,
 			scheme.ReplicaSets.Resource:            replicaset.Strategy,
+			scheme.DaemonSets.Resource:             daemonset.Strategy,
+			scheme.ControllerRevisions.Resource:    controllerrevision.Strategy,
 			scheme.Ingresses.Resource:              ingress.Strategy,
 			scheme.Leases.Resource:                 lease.Strategy,
 		},

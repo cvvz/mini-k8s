@@ -4,8 +4,8 @@ name: mini-k8s
 # and the kubelet. The control plane (etcd, kube-apiserver,
 # kube-controller-manager, kube-scheduler) and the Ingress controller are
 # static Pods the control-plane node's kubelet runs from
-# build/manifests/control-plane; the workers run the static Pods of
-# build/manifests/node. Every node runs kube-proxy that way.
+# build/manifests/control-plane; kube-proxy and the other add-ons are
+# applied by `kk cluster up` from build/manifests/addons.
 #
 # /var is a volume because containerd's overlay snapshots cannot live on the
 # container's own overlay filesystem, and it keeps etcd data and emptyDir
@@ -49,7 +49,6 @@ services:
       MINI_NODE_ROLE: worker
     volumes:
       - worker-1-var:/var
-      - ./build/manifests/node:/etc/kubernetes/manifests:ro
       - ./.mini-k8s/token:/etc/mini-k8s/token:ro
     depends_on: [control-plane]
   worker-2:
@@ -61,7 +60,6 @@ services:
       MINI_NODE_ROLE: worker
     volumes:
       - worker-2-var:/var
-      - ./build/manifests/node:/etc/kubernetes/manifests:ro
       - ./.mini-k8s/token:/etc/mini-k8s/token:ro
     depends_on: [control-plane]
 networks:

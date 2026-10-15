@@ -71,6 +71,16 @@ func ConfigMaps(c *Client, ns string) Resource[corev1.ConfigMap, *corev1.ConfigM
 	return For[corev1.ConfigMap](c, scheme.ConfigMaps, ns)
 }
 
+// DaemonSets returns a DaemonSet client.
+func DaemonSets(c *Client, ns string) Resource[appsv1.DaemonSet, *appsv1.DaemonSet] {
+	return For[appsv1.DaemonSet](c, scheme.DaemonSets, ns)
+}
+
+// ControllerRevisions returns a ControllerRevision client.
+func ControllerRevisions(c *Client, ns string) Resource[appsv1.ControllerRevision, *appsv1.ControllerRevision] {
+	return For[appsv1.ControllerRevision](c, scheme.ControllerRevisions, ns)
+}
+
 // PersistentVolumes returns a PersistentVolume client.
 func PersistentVolumes(c *Client) Resource[corev1.PersistentVolume, *corev1.PersistentVolume] {
 	return For[corev1.PersistentVolume](c, scheme.PersistentVolumes, "")

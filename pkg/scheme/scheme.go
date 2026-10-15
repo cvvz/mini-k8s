@@ -99,6 +99,10 @@ var (
 		Namespaced: true, ShortNames: []string{"deploy"}, HasStatus: true, New: func() metav1.Object { return &appsv1.Deployment{} }}
 	ReplicaSets = ResourceInfo{Group: "apps", Version: "v1", Resource: "replicasets", Singular: "replicaset", Kind: "ReplicaSet",
 		Namespaced: true, ShortNames: []string{"rs"}, HasStatus: true, New: func() metav1.Object { return &appsv1.ReplicaSet{} }}
+	DaemonSets = ResourceInfo{Group: "apps", Version: "v1", Resource: "daemonsets", Singular: "daemonset", Kind: "DaemonSet",
+		Namespaced: true, ShortNames: []string{"ds"}, HasStatus: true, New: func() metav1.Object { return &appsv1.DaemonSet{} }}
+	ControllerRevisions = ResourceInfo{Group: "apps", Version: "v1", Resource: "controllerrevisions", Singular: "controllerrevision",
+		Kind: "ControllerRevision", Namespaced: true, New: func() metav1.Object { return &appsv1.ControllerRevision{} }}
 	Leases = ResourceInfo{Group: "coordination.k8s.io", Version: "v1", Resource: "leases", Singular: "lease", Kind: "Lease",
 		Namespaced: true, New: func() metav1.Object { return &coordinationv1.Lease{} }}
 	Ingresses = ResourceInfo{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses", Singular: "ingress", Kind: "Ingress",
@@ -107,7 +111,7 @@ var (
 
 // All lists every registered resource in discovery order.
 var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, ConfigMaps, Secrets, PersistentVolumes,
-	PersistentVolumeClaims, Deployments, ReplicaSets, Ingresses, Leases, StorageClasses}
+	PersistentVolumeClaims, Deployments, ReplicaSets, DaemonSets, ControllerRevisions, Ingresses, Leases, StorageClasses}
 
 // Lookup resolves a user-supplied name: plural, singular, short name, kind
 // (case-insensitive) or "plural.group".
