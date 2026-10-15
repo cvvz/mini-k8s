@@ -20,6 +20,7 @@ import (
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	networkingv1 "mini-k8s/pkg/apis/networking/v1"
+	storagev1 "mini-k8s/pkg/apis/storage/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/scheme"
 )
@@ -342,6 +343,54 @@ func columnsFor(res scheme.ResourceInfo) []column {
 			{header: "DATA", value: func(o metav1.Object, _ time.Time) string { return fmt.Sprint(len(o.(*corev1.Secret).Data)) }},
 			ageColumn(),
 		}
+	case scheme.PersistentVolumeClaims.Resource:
+		pvc := func(o metav1.Object) *corev1.PersistentVolumeClaim { return o.(*corev1.PersistentVolumeClaim) }
+		return []column{nameColumn(),
+			{header: "STATUS", value: func(o metav1.Object, _ time.Time) string { return terminatingOr(o, pvc(o).Status.Phase) }},
+			{header: "VOLUME", value: func(o metav1.Object, _ time.Time) string { return pvc(o).Spec.VolumeName }},
+			{header: "CAPACITY", value: func(o metav1.Object, _ time.Time) string { return storageOf(pvc(o).Status.Capacity) }},
+			{header: "ACCESS MODES", value: func(o metav1.Object, _ time.Time) string { return corev1.AccessModesShort(pvc(o).Status.AccessModes) }},
+			{header: "STORAGECLASS", value: func(o metav1.Object, _ time.Time) string { return corev1.ClaimClass(pvc(o)) }},
+			{header: "VOLUMEATTRIBUTESCLASS", value: func(metav1.Object, time.Time) string { return "<unset>" }},
+			ageColumn(),
+			{header: "VOLUMEMODE", wide: true, value: func(o metav1.Object, _ time.Time) string { return derefString(pvc(o).Spec.VolumeMode) }},
+		}
+	case scheme.PersistentVolumes.Resource:
+		pv := func(o metav1.Object) *corev1.PersistentVolume { return o.(*corev1.PersistentVolume) }
+		return []column{nameColumn(),
+			{header: "CAPACITY", value: func(o metav1.Object, _ time.Time) string { return storageOf(pv(o).Spec.Capacity) }},
+			{header: "ACCESS MODES", value: func(o metav1.Object, _ time.Time) string { return corev1.AccessModesShort(pv(o).Spec.AccessModes) }},
+			{header: "RECLAIM POLICY", value: func(o metav1.Object, _ time.Time) string { return pv(o).Spec.PersistentVolumeReclaimPolicy }},
+			{header: "STATUS", value: func(o metav1.Object, _ time.Time) string { return terminatingOr(o, pv(o).Status.Phase) }},
+			{header: "CLAIM", value: func(o metav1.Object, _ time.Time) string {
+				if ref := pv(o).Spec.ClaimRef; ref != nil {
+					return ref.Namespace + "/" + ref.Name
+				}
+				return ""
+			}},
+			{header: "STORAGECLASS", value: func(o metav1.Object, _ time.Time) string { return pv(o).Spec.StorageClassName }},
+			{header: "VOLUMEATTRIBUTESCLASS", value: func(metav1.Object, time.Time) string { return "<unset>" }},
+			{header: "REASON", value: func(o metav1.Object, _ time.Time) string { return pv(o).Status.Reason }},
+			ageColumn(),
+			{header: "VOLUMEMODE", wide: true, value: func(o metav1.Object, _ time.Time) string { return derefString(pv(o).Spec.VolumeMode) }},
+		}
+	case scheme.StorageClasses.Resource:
+		sc := func(o metav1.Object) *storagev1.StorageClass { return o.(*storagev1.StorageClass) }
+		return []column{
+			{header: "NAME", value: func(o metav1.Object, _ time.Time) string {
+				if storagev1.IsDefault(sc(o)) {
+					return sc(o).Name + " (default)"
+				}
+				return sc(o).Name
+			}},
+			{header: "PROVISIONER", value: func(o metav1.Object, _ time.Time) string { return sc(o).Provisioner }},
+			{header: "RECLAIMPOLICY", value: func(o metav1.Object, _ time.Time) string { return derefString(sc(o).ReclaimPolicy) }},
+			{header: "VOLUMEBINDINGMODE", value: func(o metav1.Object, _ time.Time) string { return derefString(sc(o).VolumeBindingMode) }},
+			{header: "ALLOWVOLUMEEXPANSION", value: func(o metav1.Object, _ time.Time) string {
+				return fmt.Sprint(sc(o).AllowVolumeExpansion != nil && *sc(o).AllowVolumeExpansion)
+			}},
+			ageColumn(),
+		}
 	case scheme.Leases.Resource:
 		return []column{nameColumn(),
 			{header: "HOLDER", value: func(o metav1.Object, _ time.Time) string {
@@ -500,6 +549,28 @@ func indentYAML(v any, prefix string) string {
 	return b.String()
 }
 
+// terminatingOr is the phase, or Terminating once deletion started.
+func terminatingOr(o metav1.Object, phase string) string {
+	if o.GetObjectMeta().DeletionTimestamp != nil {
+		return "Terminating"
+	}
+	return phase
+}
+
+func storageOf(list corev1.ResourceList) string {
+	if q, ok := list[corev1.ResourceStorage]; ok {
+		return q.String()
+	}
+	return ""
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // describeData shows a ConfigMap's data like kubectl describe, and only the
 // sizes of a Secret's values.
 func describeData(w io.Writer, obj metav1.Object) error {
@@ -571,6 +642,25 @@ func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj m
 	case *corev1.Node:
 		fmt.Fprintf(tw, "Status:\t%s\n", nodeStatus(o, now))
 		fmt.Fprintf(tw, "InternalIP:\t%s\n", orNone(o.InternalIP()))
+	case *corev1.PersistentVolumeClaim:
+		fmt.Fprintf(tw, "StorageClass:\t%s\n", corev1.ClaimClass(o))
+		fmt.Fprintf(tw, "Status:\t%s\n", terminatingOr(o, o.Status.Phase))
+		fmt.Fprintf(tw, "Volume:\t%s\n", o.Spec.VolumeName)
+		fmt.Fprintf(tw, "Capacity:\t%s\n", storageOf(o.Status.Capacity))
+		fmt.Fprintf(tw, "Access Modes:\t%s\n", corev1.AccessModesShort(o.Status.AccessModes))
+		users, err := a.podsUsingClaim(ctx, o)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(tw, "Used By:\t%s\n", orNone(strings.Join(users, ", ")))
+	case *corev1.PersistentVolume:
+		fmt.Fprintf(tw, "StorageClass:\t%s\n", o.Spec.StorageClassName)
+		fmt.Fprintf(tw, "Status:\t%s\n", terminatingOr(o, o.Status.Phase))
+		if ref := o.Spec.ClaimRef; ref != nil {
+			fmt.Fprintf(tw, "Claim:\t%s/%s\n", ref.Namespace, ref.Name)
+		}
+		fmt.Fprintf(tw, "Reclaim Policy:\t%s\n", o.Spec.PersistentVolumeReclaimPolicy)
+		fmt.Fprintf(tw, "Capacity:\t%s\n", storageOf(o.Spec.Capacity))
 	}
 	if err := tw.Flush(); err != nil {
 		return err

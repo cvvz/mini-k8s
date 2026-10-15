@@ -35,6 +35,15 @@ type Scheduler struct {
 	assumed map[string]*corev1.Pod
 	// attempts counts failed attempts per Pod UID for the backoff.
 	attempts map[string]int
+	// binding holds the Pods whose volumes are being bound (see
+	// bindVolumesAndPod); they are not scheduled again meanwhile.
+	binding map[string]bool
+	// volumeBinding is set by WithVolumes; claimAssumptions holds where the
+	// claims of Pods being bound go (by namespace/name).
+	volumeBinding    *plugins.VolumeBinding
+	claimAssumptions map[string]plugins.ClaimAssumption
+	// BindTimeout bounds waiting for a Pod's claims to be bound.
+	BindTimeout time.Duration
 }
 
 // Backoff of unschedulable Pods, as kube-scheduler's defaults: 1s doubling
@@ -47,25 +56,28 @@ const (
 // New wires the scheduler onto shared Pod and Node informers.
 func New(c *client.Client, pods *informers.Informer[corev1.Pod, *corev1.Pod], nodes *informers.Informer[corev1.Node, *corev1.Node], recorder *record.Recorder) *Scheduler {
 	s := &Scheduler{client: c, pods: pods, nodes: nodes, recorder: recorder, queue: workqueue.New(),
-		framework: plugins.Default(), assumed: map[string]*corev1.Pod{}, attempts: map[string]int{}}
-	retryPending := func() {
-		for _, p := range pods.List("", nil) {
-			if pending(p) {
-				s.queue.Add(informers.Key(p))
-			}
-		}
-	}
+		framework: plugins.Default(), assumed: map[string]*corev1.Pod{}, attempts: map[string]int{}, binding: map[string]bool{},
+		claimAssumptions: map[string]plugins.ClaimAssumption{}, BindTimeout: 2 * time.Minute}
 	pods.AddHandler(informers.Handler[*corev1.Pod]{
 		OnAdd:    s.onPod,
 		OnUpdate: func(_, p *corev1.Pod) { s.onPod(p) },
 		// A Pod going away frees resources and affinity constraints.
-		OnDelete: func(p *corev1.Pod) { s.forget(p.UID); retryPending() },
+		OnDelete: func(p *corev1.Pod) { s.forget(p.UID); s.retryPending() },
 	})
 	nodes.AddHandler(informers.Handler[*corev1.Node]{
-		OnAdd:    func(*corev1.Node) { retryPending() },
-		OnUpdate: func(_, _ *corev1.Node) { retryPending() },
+		OnAdd:    func(*corev1.Node) { s.retryPending() },
+		OnUpdate: func(_, _ *corev1.Node) { s.retryPending() },
 	})
 	return s
+}
+
+// retryPending requeues every pending Pod after a cluster event.
+func (s *Scheduler) retryPending() {
+	for _, p := range s.pods.List("", nil) {
+		if pending(p) {
+			s.queue.Add(informers.Key(p))
+		}
+	}
 }
 
 // Backoff is the wait after the given number of failed attempts: 1s
@@ -123,29 +135,77 @@ func (s *Scheduler) schedule(ctx context.Context, key string) error {
 	if !ok || !pending(pod) {
 		return nil
 	}
+	s.mu.Lock()
+	inFlight := s.binding[pod.UID]
+	s.mu.Unlock()
+	if inFlight {
+		return nil
+	}
 	node, reason := s.framework.Schedule(pod, s.snapshot())
 	if node == "" {
 		s.markUnschedulable(ctx, pod, reason)
 		s.mu.Lock()
+		delete(s.assumed, pod.UID)
 		s.attempts[pod.UID]++
 		delay := Backoff(s.attempts[pod.UID])
 		s.mu.Unlock()
 		s.queue.AddAfter(key, delay)
 		return nil
 	}
-	if err := s.client.BindPod(ctx, ns, name, node); err != nil {
+	// Assume the Pod on the node, so Pods scheduled meanwhile see it.
+	assumed := deepcopy.Copy(pod)
+	assumed.Spec.NodeName = node
+	s.mu.Lock()
+	s.assumed[pod.UID] = assumed
+	s.mu.Unlock()
+	if bindings, wait := s.volumeBindings(pod, node); wait {
+		s.mu.Lock()
+		s.binding[pod.UID] = true
+		s.mu.Unlock()
+		s.assumeClaims(node, bindings)
+		go s.bindVolumesAndPod(ctx, pod, node, bindings)
+		return nil
+	}
+	if err := s.bind(ctx, pod, node); err != nil {
+		s.mu.Lock()
+		delete(s.assumed, pod.UID)
+		s.mu.Unlock()
 		if client.IsConflict(err) || client.IsNotFound(err) {
 			return nil
 		}
 		return err
 	}
-	assumed := deepcopy.Copy(pod)
-	assumed.Spec.NodeName = node
+	return nil
+}
+
+// volumeBindings returns what the Pod's claims need on the node, and
+// whether binding must wait for them (some are not bound yet).
+func (s *Scheduler) volumeBindings(pod *corev1.Pod, node string) ([]plugins.ClaimBinding, bool) {
+	if s.volumeBinding == nil {
+		return nil, false
+	}
+	n, ok := s.nodes.Get("", node)
+	if !ok {
+		return nil, false
+	}
+	bindings, _ := s.volumeBinding.Bindings(pod, n)
+	claims, _ := s.volumeBinding.Claims(pod)
+	wait := len(bindings) > 0
+	for _, pvc := range claims {
+		wait = wait || pvc.Status.Phase != corev1.ClaimBound
+	}
+	return bindings, wait
+}
+
+// bind binds the Pod to the node through its binding subresource.
+func (s *Scheduler) bind(ctx context.Context, pod *corev1.Pod, node string) error {
+	if err := s.client.BindPod(ctx, pod.Namespace, pod.Name, node); err != nil {
+		return err
+	}
 	s.mu.Lock()
-	s.assumed[pod.UID] = assumed
 	delete(s.attempts, pod.UID)
 	s.mu.Unlock()
-	s.recorder.Eventf(pod, corev1.EventTypeNormal, "Scheduled", "Successfully assigned %s/%s to %s", ns, name, node)
+	s.recorder.Eventf(pod, corev1.EventTypeNormal, "Scheduled", "Successfully assigned %s/%s to %s", pod.Namespace, pod.Name, node)
 	return nil
 }
 

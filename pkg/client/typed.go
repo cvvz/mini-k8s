@@ -12,6 +12,7 @@ import (
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	networkingv1 "mini-k8s/pkg/apis/networking/v1"
+	storagev1 "mini-k8s/pkg/apis/storage/v1"
 	"mini-k8s/pkg/scheme"
 	"mini-k8s/pkg/watch"
 )
@@ -68,6 +69,21 @@ func Events(c *Client, ns string) Resource[corev1.Event, *corev1.Event] {
 // ConfigMaps returns a ConfigMap client.
 func ConfigMaps(c *Client, ns string) Resource[corev1.ConfigMap, *corev1.ConfigMap] {
 	return For[corev1.ConfigMap](c, scheme.ConfigMaps, ns)
+}
+
+// PersistentVolumes returns a PersistentVolume client.
+func PersistentVolumes(c *Client) Resource[corev1.PersistentVolume, *corev1.PersistentVolume] {
+	return For[corev1.PersistentVolume](c, scheme.PersistentVolumes, "")
+}
+
+// PersistentVolumeClaims returns a PersistentVolumeClaim client.
+func PersistentVolumeClaims(c *Client, ns string) Resource[corev1.PersistentVolumeClaim, *corev1.PersistentVolumeClaim] {
+	return For[corev1.PersistentVolumeClaim](c, scheme.PersistentVolumeClaims, ns)
+}
+
+// StorageClasses returns a StorageClass client.
+func StorageClasses(c *Client) Resource[storagev1.StorageClass, *storagev1.StorageClass] {
+	return For[storagev1.StorageClass](c, scheme.StorageClasses, "")
 }
 
 // Secrets returns a Secret client.

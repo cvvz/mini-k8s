@@ -65,6 +65,8 @@ type Manager struct {
 	NodeIP string
 	// Allocatable stands in for unset limits in resourceFieldRef values.
 	Allocatable corev1.ResourceList
+	// Claims provides the PersistentVolumeClaims of volumes and their volumes.
+	Claims ClaimSource
 	// Recorder receives the FailedMount events.
 	Recorder Recorder
 	// ClusterDomain names Pods in the kubelet-managed /etc/hosts.

@@ -1,0 +1,34 @@
+# A claim of the default "standard" StorageClass and a Pod that mounts it.
+# The volume is provisioned on the node the Pod is scheduled to, and the
+# next Pod that uses the claim lands there again.
+#   kk apply -f examples/storage.yaml
+#   kk exec notes -- /mini write /data/note "kept across Pods"
+#   kk delete pod notes && kk apply -f examples/storage.yaml
+#   kk exec notes -- /mini cat /data/note
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: notes
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 128Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: notes
+  labels:
+    app: notes
+spec:
+  containers:
+    - name: app
+      image: mini-k8s:local
+      imagePullPolicy: Never
+      command: ["/mini", "sleep", "1h"]
+      volumeMounts:
+        - {name: data, mountPath: /data}
+  volumes:
+    - name: data
+      persistentVolumeClaim: {claimName: notes}

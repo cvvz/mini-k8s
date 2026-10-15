@@ -71,7 +71,7 @@ func runKubelet(ctx context.Context, c *client.Client, token string) {
 	})
 	rt.Probes = k.Probes()
 	rt.Env = k.ServiceEnv
-	rt.Objects, rt.NodeIP, rt.Allocatable, rt.Recorder = k, address, kubelet.NodeCapacity("/proc/meminfo"), rec
+	rt.Objects, rt.Claims, rt.NodeIP, rt.Allocatable, rt.Recorder = k, k, address, kubelet.NodeCapacity("/proc/meminfo"), rec
 	go rec.Run(ctx)
 	go k.Run(ctx)
 	serve(ctx, ":10250", k.Handler())

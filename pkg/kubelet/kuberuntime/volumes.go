@@ -73,6 +73,13 @@ func (m *Manager) setupVolumes(pod *corev1.Pod) (mountedVolumes, error) {
 				return failed(v.Name, err)
 			}
 			vols.paths[v.Name] = v.HostPath.Path
+		case v.PersistentVolumeClaim != nil:
+			path, err := m.claimPath(pod.Namespace, v.PersistentVolumeClaim.ClaimName)
+			if err != nil {
+				return failed(v.Name, err)
+			}
+			vols.paths[v.Name] = path
+			vols.readOnly[v.Name] = v.PersistentVolumeClaim.ReadOnly
 		default:
 			src := volume.Source{Pod: pod, Objects: m.Objects, Allocatable: m.Allocatable}
 			if m.Objects == nil {
@@ -103,6 +110,45 @@ func (m *Manager) setupVolumes(pod *corev1.Pod) (mountedVolumes, error) {
 		}
 	}
 	return vols, nil
+}
+
+// ClaimSource looks up claims and the volumes bound to them (the kubelet's
+// informer caches).
+type ClaimSource interface {
+	Claim(namespace, name string) (*corev1.PersistentVolumeClaim, bool)
+	Volume(name string) (*corev1.PersistentVolume, bool)
+}
+
+// claimPath resolves a claim to the node directory of its bound volume (a
+// hostPath, created if its type says so, or a local volume).
+func (m *Manager) claimPath(namespace, name string) (string, error) {
+	if m.Claims == nil {
+		return "", fmt.Errorf("persistentvolumeclaim %q not found", name)
+	}
+	pvc, ok := m.Claims.Claim(namespace, name)
+	if !ok {
+		return "", fmt.Errorf("persistentvolumeclaim %q not found", name)
+	}
+	if pvc.Spec.VolumeName == "" || pvc.Status.Phase != corev1.ClaimBound {
+		return "", fmt.Errorf("error processing PVC %s/%s: PVC is not bound", namespace, name)
+	}
+	pv, ok := m.Claims.Volume(pvc.Spec.VolumeName)
+	if !ok {
+		return "", fmt.Errorf("persistentvolume %q not found", pvc.Spec.VolumeName)
+	}
+	switch {
+	case pv.Spec.HostPath != nil:
+		if err := checkHostPath(pv.Spec.HostPath); err != nil {
+			return "", err
+		}
+		return pv.Spec.HostPath.Path, nil
+	case pv.Spec.Local != nil:
+		if info, err := os.Stat(pv.Spec.Local.Path); err != nil || !info.IsDir() {
+			return "", fmt.Errorf("path %q of local volume %q is not a directory", pv.Spec.Local.Path, pv.Name)
+		}
+		return pv.Spec.Local.Path, nil
+	}
+	return "", fmt.Errorf("persistentvolume %q has no supported source", pv.Name)
 }
 
 // noObjects finds nothing (a runtime without an API, as in tests).

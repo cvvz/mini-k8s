@@ -38,10 +38,11 @@ var components = map[string]component{
 	"kube-proxy":              runKubeProxy,
 	"ingress-controller":      runIngressController,
 	"cluster-dns":             runClusterDNS,
+	"local-path-provisioner":  runLocalPathProvisioner,
 }
 
 func usage() string {
-	names := []string{"demo", "pause", "fetch URL", "lookup [-t TYPE] NAME", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE", "env", "ls DIR"}
+	names := []string{"demo", "pause", "fetch URL", "lookup [-t TYPE] NAME", "sleep DURATION", "cat FILE...", "write FILE TEXT", "alloc SIZE", "env", "ls DIR", "rm PATH..."}
 	for name := range components {
 		names = append(names, name)
 	}
@@ -86,6 +87,8 @@ func main() {
 		os.Exit(runEnv())
 	case "ls":
 		os.Exit(runLs(os.Args[2:]))
+	case "rm":
+		os.Exit(runRm(os.Args[2:]))
 	}
 	run, ok := components[os.Args[1]]
 	if !ok || len(os.Args) != 2 {

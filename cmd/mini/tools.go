@@ -99,6 +99,29 @@ func runLs(args []string) int {
 	return 0
 }
 
+// runRm removes files and directories recursively, like `rm -rf`, for the
+// local-path provisioner's helper Pods: `mini rm /data/pvc-1_ns_data`. It
+// refuses "/" and relative paths.
+func runRm(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: mini rm PATH...")
+		return 2
+	}
+	status := 0
+	for _, path := range args {
+		if !filepath.IsAbs(path) || filepath.Clean(path) == "/" {
+			fmt.Fprintf(os.Stderr, "refusing to remove %q\n", path)
+			status = 1
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			status = 1
+		}
+	}
+	return status
+}
+
 // runWrite writes TEXT and a newline to FILE, like `echo TEXT > FILE`:
 // `mini write /data/greeting hello`.
 func runWrite(args []string) int {
