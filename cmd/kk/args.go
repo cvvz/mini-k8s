@@ -34,7 +34,7 @@ var commandFlags = map[string][]flagSpec{
 	"apply":    {{long: "filename", short: "f", takesValue: true}},
 	"create": {{long: "filename", short: "f", takesValue: true}, {long: "from-literal", takesValue: true},
 		{long: "from-file", takesValue: true}, {long: "type", takesValue: true}, {long: "cert", takesValue: true},
-		{long: "key", takesValue: true}},
+		{long: "key", takesValue: true}, {long: "image", takesValue: true}, {long: "from", takesValue: true}},
 	"delete": {{long: "filename", short: "f", takesValue: true}, {long: "selector", short: "l", takesValue: true},
 		{long: "grace-period", takesValue: true}, {long: "force"}, {long: "cascade", takesValue: true}, {long: "wait"},
 		{long: "ignore-not-found"}, {long: "all"}},

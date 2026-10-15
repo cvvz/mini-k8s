@@ -10,16 +10,19 @@ import (
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/client/informers"
 	"mini-k8s/pkg/client/record"
+	"mini-k8s/pkg/controller/cronjob"
 	"mini-k8s/pkg/controller/daemon"
 	"mini-k8s/pkg/controller/deployment"
 	"mini-k8s/pkg/controller/endpoint"
 	"mini-k8s/pkg/controller/garbagecollector"
+	"mini-k8s/pkg/controller/job"
 	"mini-k8s/pkg/controller/namespace"
 	"mini-k8s/pkg/controller/nodeipam"
 	"mini-k8s/pkg/controller/nodelifecycle"
 	"mini-k8s/pkg/controller/podgc"
 	"mini-k8s/pkg/controller/replicaset"
 	"mini-k8s/pkg/controller/tainteviction"
+	"mini-k8s/pkg/controller/ttlafterfinished"
 	"mini-k8s/pkg/controller/volume/persistentvolume"
 	"mini-k8s/pkg/controller/volume/pvcprotection"
 	"mini-k8s/pkg/controller/volume/pvprotection"
@@ -34,6 +37,8 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	rsets := informers.New(client.ReplicaSets(c, ""), client.ListOptions{}, 30*time.Second)
 	dsets := informers.New(client.DaemonSets(c, ""), client.ListOptions{}, 30*time.Second)
 	revisions := informers.New(client.ControllerRevisions(c, ""), client.ListOptions{}, 30*time.Second)
+	jobs := informers.New(client.Jobs(c, ""), client.ListOptions{}, 30*time.Second)
+	cronJobs := informers.New(client.CronJobs(c, ""), client.ListOptions{}, 30*time.Second)
 	namespaces := informers.New(client.Namespaces(c), client.ListOptions{}, 30*time.Second)
 	nodes := informers.New(client.Nodes(c), client.ListOptions{}, 30*time.Second)
 	services := informers.New(client.Services(c, ""), client.ListOptions{}, 30*time.Second)
@@ -49,6 +54,9 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	dc := deployment.NewDeploymentController(c, deployments, rsets, pods, rec)
 	rc := replicaset.NewController(c, rsets, pods, rec)
 	dsc := daemon.NewController(c, dsets, pods, nodes, revisions, rec)
+	jc := job.NewController(c, jobs, pods, rec)
+	cjc := cronjob.NewController(c, cronJobs, jobs, rec)
+	ttl := ttlafterfinished.NewController(c, jobs)
 	ec := endpoint.NewController(c, services, pods, endpoints)
 	nc := namespace.NewNamespaceController(c, namespaces)
 	ipam := nodeipam.NewController(c, nodes, allocator, rec)
@@ -61,14 +69,17 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	pvProtection := pvprotection.NewController(c, volumes)
 	go rec.Run(ctx)
 	for _, run := range []func(context.Context){pods.Run, deployments.Run, rsets.Run, namespaces.Run, nodes.Run, services.Run,
-		endpoints.Run, leases.Run, volumes.Run, claims.Run, classes.Run, dsets.Run, revisions.Run} {
+		endpoints.Run, leases.Run, volumes.Run, claims.Run, classes.Run, dsets.Run, revisions.Run, jobs.Run, cronJobs.Run} {
 		go run(ctx)
 	}
 	informers.WaitForSync(ctx, pods.HasSynced, deployments.HasSynced, rsets.HasSynced, namespaces.HasSynced, nodes.HasSynced,
 		services.HasSynced, endpoints.HasSynced, leases.HasSynced, volumes.HasSynced, claims.HasSynced, classes.HasSynced,
-		dsets.HasSynced, revisions.HasSynced)
+		dsets.HasSynced, revisions.HasSynced, jobs.HasSynced, cronJobs.HasSynced)
 	go rc.Run(ctx, 4)
 	go dsc.Run(ctx, 2)
+	go jc.Run(ctx, 4)
+	go cjc.Run(ctx, 2)
+	go ttl.Run(ctx, 2)
 	go ec.Run(ctx, 4)
 	go nc.Run(ctx, 2)
 	go ipam.Run(ctx)

@@ -8,6 +8,8 @@ import (
 	"mini-k8s/pkg/registry/apps/daemonset"
 	"mini-k8s/pkg/registry/apps/deployment"
 	"mini-k8s/pkg/registry/apps/replicaset"
+	"mini-k8s/pkg/registry/batch/cronjob"
+	"mini-k8s/pkg/registry/batch/job"
 	"mini-k8s/pkg/registry/coordination/lease"
 	"mini-k8s/pkg/registry/core/configmap"
 	"mini-k8s/pkg/registry/core/endpoints"
@@ -60,6 +62,8 @@ func New(store *etcd3.Store, prefix string) *Registry {
 			scheme.ReplicaSets.Resource:            replicaset.Strategy,
 			scheme.DaemonSets.Resource:             daemonset.Strategy,
 			scheme.ControllerRevisions.Resource:    controllerrevision.Strategy,
+			scheme.Jobs.Resource:                   job.Strategy,
+			scheme.CronJobs.Resource:               cronjob.Strategy,
 			scheme.Ingresses.Resource:              ingress.Strategy,
 			scheme.Leases.Resource:                 lease.Strategy,
 		},

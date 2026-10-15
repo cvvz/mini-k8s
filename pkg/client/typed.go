@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	batchv1 "mini-k8s/pkg/apis/batch/v1"
 	coordinationv1 "mini-k8s/pkg/apis/coordination/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
@@ -79,6 +80,16 @@ func DaemonSets(c *Client, ns string) Resource[appsv1.DaemonSet, *appsv1.DaemonS
 // ControllerRevisions returns a ControllerRevision client.
 func ControllerRevisions(c *Client, ns string) Resource[appsv1.ControllerRevision, *appsv1.ControllerRevision] {
 	return For[appsv1.ControllerRevision](c, scheme.ControllerRevisions, ns)
+}
+
+// Jobs returns a Job client.
+func Jobs(c *Client, ns string) Resource[batchv1.Job, *batchv1.Job] {
+	return For[batchv1.Job](c, scheme.Jobs, ns)
+}
+
+// CronJobs returns a CronJob client.
+func CronJobs(c *Client, ns string) Resource[batchv1.CronJob, *batchv1.CronJob] {
+	return For[batchv1.CronJob](c, scheme.CronJobs, ns)
 }
 
 // PersistentVolumes returns a PersistentVolume client.

@@ -58,6 +58,9 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 		if len(p.positional) >= 1 && (p.positional[0] == "configmap" || p.positional[0] == "cm" || p.positional[0] == "secret") {
 			return a.createConfig(ctx, p)
 		}
+		if len(p.positional) >= 1 && p.positional[0] == "job" {
+			return a.createJob(ctx, p)
+		}
 		return a.applyFiles(ctx, p, true)
 	case "delete":
 		return a.delete(ctx, p)

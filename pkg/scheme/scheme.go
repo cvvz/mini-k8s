@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	batchv1 "mini-k8s/pkg/apis/batch/v1"
 	coordinationv1 "mini-k8s/pkg/apis/coordination/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
@@ -103,6 +104,10 @@ var (
 		Namespaced: true, ShortNames: []string{"ds"}, HasStatus: true, New: func() metav1.Object { return &appsv1.DaemonSet{} }}
 	ControllerRevisions = ResourceInfo{Group: "apps", Version: "v1", Resource: "controllerrevisions", Singular: "controllerrevision",
 		Kind: "ControllerRevision", Namespaced: true, New: func() metav1.Object { return &appsv1.ControllerRevision{} }}
+	Jobs = ResourceInfo{Group: "batch", Version: "v1", Resource: "jobs", Singular: "job", Kind: "Job", Namespaced: true,
+		HasStatus: true, New: func() metav1.Object { return &batchv1.Job{} }}
+	CronJobs = ResourceInfo{Group: "batch", Version: "v1", Resource: "cronjobs", Singular: "cronjob", Kind: "CronJob",
+		Namespaced: true, ShortNames: []string{"cj"}, HasStatus: true, New: func() metav1.Object { return &batchv1.CronJob{} }}
 	Leases = ResourceInfo{Group: "coordination.k8s.io", Version: "v1", Resource: "leases", Singular: "lease", Kind: "Lease",
 		Namespaced: true, New: func() metav1.Object { return &coordinationv1.Lease{} }}
 	Ingresses = ResourceInfo{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses", Singular: "ingress", Kind: "Ingress",
@@ -111,7 +116,8 @@ var (
 
 // All lists every registered resource in discovery order.
 var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, ConfigMaps, Secrets, PersistentVolumes,
-	PersistentVolumeClaims, Deployments, ReplicaSets, DaemonSets, ControllerRevisions, Ingresses, Leases, StorageClasses}
+	PersistentVolumeClaims, Deployments, ReplicaSets, DaemonSets, ControllerRevisions, Jobs, CronJobs, Ingresses, Leases,
+	StorageClasses}
 
 // Lookup resolves a user-supplied name: plural, singular, short name, kind
 // (case-insensitive) or "plural.group".

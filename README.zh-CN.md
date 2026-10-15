@@ -24,6 +24,10 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   `maxSurge`/`maxUnavailable` 滚动或 Recreate、修订历史、回滚、暂停/恢复、带进度期限的
   Available/Progressing 条件）；DaemonSet 控制器（在每个符合模板 nodeSelector、亲和与容忍的节点上运行一个 Pod；
   RollingUpdate 按 `maxUnavailable`/`maxSurge` 滚动或 OnDelete；修订历史存于 ControllerRevision，可回滚）；
+  Job 控制器（`completions` 与 `parallelism`、工作队列模式、带 `JOB_COMPLETION_INDEX` 的 Indexed Job、
+  `backoffLimit` 与 10 秒起倍增的替换退避、OnFailure 的容器重启计入失败、`activeDeadlineSeconds`、暂停/恢复、
+  与 Kubernetes 1.31+ 一致的 Complete/Failed 条件）；CronJob 控制器（带时区的 cron 调度、只补跑最近一次错过的调度、
+  `startingDeadlineSeconds`、Allow/Forbid/Replace、历史保留上限）；TTL-after-finished 控制器；
   Endpoints 控制器；GC 控制器；Namespace 控制器；Pod 垃圾回收（绑定在已删除节点上的 Pod 被标为失败并删除）。
 - **调度器**：kube-scheduler 式框架。Filter 插件检查节点是否被 cordon、污点、`nodeSelector` 与节点亲和、
   资源请求是否超出 allocatable、Pod 亲和/反亲和；Score 插件（权重同 kube-scheduler）偏好分配最少的节点、
@@ -137,7 +141,7 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 | 组件 | 职责 | 状态 |
 | --- | --- | --- |
 | kube-apiserver | K8s 风格 REST、Watch、准入与校验、删除语义、子资源、ClusterIP 与 NodePort 分配 | 已实现 |
-| controller-manager | Deployment、ReplicaSet、DaemonSet、Endpoints、垃圾回收、Namespace、node IPAM、节点生命周期、污点驱逐、Pod 垃圾回收、PersistentVolume 与 PVC/PV 保护控制器 | 已实现，持续扩展 |
+| controller-manager | Deployment、ReplicaSet、DaemonSet、Job、CronJob、TTL-after-finished、Endpoints、垃圾回收、Namespace、node IPAM、节点生命周期、污点驱逐、Pod 垃圾回收、PersistentVolume 与 PVC/PV 保护控制器 | 已实现，持续扩展 |
 | scheduler | 调度框架：PreFilter、Filter 与 Score 插件（污点、节点亲和、资源适配、Pod 亲和/反亲和、打散、卷绑定）、退避队列、binding 绑定（供给卷期间异步完成） | 已实现 |
 | kubelet | 节点注册与心跳、static Pod 与 mirror Pod、基于 CRI 的 Pod 生命周期（客户端一侧，`pkg/kubelet/kuberuntime`）、探针、状态上报、优雅终止、日志、CNI 配置、节点本地 DNS 转发 | 已实现 |
 | 客户端库 | 泛型 REST 客户端、Informer、WorkQueue、Event 记录器 | 已实现 |
@@ -326,6 +330,10 @@ kk delete pod notes && kk apply -f examples/storage.yaml   # 新 Pod 调度回�
 kk exec notes -- /mini cat /data/note
 kk create secret generic db --from-literal=password=s3cr3t   # 也可用 --from-file=[KEY=]PATH
 kk describe secret db                    # 只显示大小，不显示值
+kk apply -f examples/batch.yaml          # 一个 Indexed Job 和每分钟运行一次的 CronJob
+kk get jobs,cronjobs                     # squares：Complete 3/3；随后出现 ticker-<分钟数> 的 Job
+kk create job once --image mini-k8s:local -- /mini sleep 2s   # 一次性 Job
+kk create job ticker-now --from=cronjob/ticker               # 手动运行一次 CronJob
 
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # 在另一个命名空间部署，用 NodePort Service 暴露
@@ -405,7 +413,8 @@ kk image load my-app:v1
 - 调度器没有抢占、优先级与 `topologySpreadConstraints`（副本默认打散）；没有 PodDisruptionBudget（驱逐总是成功）。心跳比 Kubernetes
   默认值快：每 2 秒续约 Lease，15 秒没有续约的节点即为 Unknown。
 - 一个 control-plane 节点（无高可用），最多 10 个 worker；节点是共享宿主机内核的容器。e2e 套件要求默认的两个 worker。
-- 还没有 Job、CronJob 与 StatefulSet（M9b、M9c）；没有 HPA、RBAC 和控制面高可用。
+- 还没有 StatefulSet（M9c）；没有 HPA、RBAC 和控制面高可用。Job 不支持 `podFailurePolicy`、`successPolicy`
+  与按索引退避，且不使用 job-tracking finalizer 跟踪 Pod。
 
 ## 开发与测试
 
@@ -490,12 +499,13 @@ unset MINI_TOKEN
 | M8a | ConfigMap、Secret、`valueFrom`/`envFrom`、downward API、投射卷 | ✅ |
 | M8b | PersistentVolume、PVC 与 StorageClass、调度器卷绑定、local-path 动态供给 | ✅ |
 | M9a | DaemonSet 与 ControllerRevision、kube-proxy 改为 DaemonSet | ✅ |
-| M9b | Job 与 CronJob | 计划中 |
+| M9b | Job 与 CronJob、完成后 TTL 清理、`kk create job` | ✅ |
 | M9c | StatefulSet | 计划中 |
 
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M9b Job 与 CronJob 计划](docs/superpowers/plans/2026-10-15-m9b-job-cronjob.md)
 - [M9a DaemonSet 计划](docs/superpowers/plans/2026-10-15-m9a-daemonset.md)
 - [M8b 持久卷计划](docs/superpowers/plans/2026-10-15-m8b-persistent-volumes.md)
 - [M8a ConfigMap 与 Secret 计划](docs/superpowers/plans/2026-10-15-m8a-configmap-secret.md)
