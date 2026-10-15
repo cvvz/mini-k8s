@@ -42,7 +42,7 @@ var _ = framework.SIGDescribe("instrumentation", "Metrics", func() {
 		return ""
 	}
 
-	It("should report node and Pod usage through kk top and the metrics API", func(ctx SpecContext) {
+	It("should report node and Pod usage through kk top and the metrics API", framework.WithSlow(), func(ctx SpecContext) {
 		By("listing every node")
 		Eventually(ctx, func() string { out, _ := framework.RunKK(ctx, "top", "nodes"); return out }).WithTimeout(time.Minute).
 			Should(MatchRegexp(`(?s)NAME\s+CPU\(cores\)\s+CPU\(%\)\s+MEMORY\(bytes\)\s+MEMORY\(%\).*worker-1\s+\d+m\s+\d+%\s+\d+Mi\s+\d+%`))
@@ -108,7 +108,7 @@ var _ = framework.SIGDescribe("instrumentation", "Metrics", func() {
 		}
 	})
 
-	It("should answer ServiceUnavailable while metrics-server is down", framework.WithDisruptive(), func(ctx SpecContext) {
+	It("should answer ServiceUnavailable while metrics-server is down", framework.WithDisruptive(), Serial, func(ctx SpecContext) {
 		DeferCleanup(func(ctx SpecContext) {
 			framework.KK(ctx, "scale", "deployment", "metrics-server", "-n", "kube-system", "--replicas", "1")
 			Eventually(ctx, func() string { out, _ := framework.RunKK(ctx, "top", "nodes"); return out }).

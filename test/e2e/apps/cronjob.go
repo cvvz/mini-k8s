@@ -35,7 +35,7 @@ var _ = framework.SIGDescribe("apps", "CronJob", func() {
 		return out
 	}
 
-	It("should run a Job at each scheduled minute and track it", func(ctx SpecContext) {
+	It("should run a Job at each scheduled minute and track it", framework.WithSlow(), func(ctx SpecContext) {
 		f.Apply(ctx, newCronJob("ticker", "*/1 * * * *", map[string]any{"concurrencyPolicy": "Forbid"},
 			framework.MiniContainer("work", "sleep", "1s")))
 		Expect(f.KK(ctx, "get", "cronjobs")).To(MatchRegexp(`(?m)^ticker\s+\*/1 \* \* \* \*\s+<none>\s+False\s+`))

@@ -11,26 +11,6 @@ import (
 	"mini-k8s/test/e2e/framework"
 )
 
-// ingressPath is one path rule of an Ingress manifest.
-func ingressPath(path, pathType, service string, port int) map[string]any {
-	return map[string]any{"path": path, "pathType": pathType,
-		"backend": map[string]any{"service": map[string]any{"name": service, "port": map[string]any{"number": port}}}}
-}
-
-// newIngress builds an Ingress with one rule for host.
-func newIngress(name, host string, paths ...map[string]any) framework.Object {
-	list := make([]any, len(paths))
-	for i, p := range paths {
-		list[i] = p
-	}
-	rule := map[string]any{"http": map[string]any{"paths": list}}
-	if host != "" {
-		rule["host"] = host
-	}
-	return framework.Object{"apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
-		"metadata": map[string]any{"name": name}, "spec": map[string]any{"rules": []any{rule}}}
-}
-
 var _ = framework.SIGDescribe("network", "Ingress", func() {
 	f := framework.NewDefaultFramework("ingress")
 	// Every spec routes its own host, so specs running in parallel and the
@@ -46,10 +26,10 @@ var _ = framework.SIGDescribe("network", "Ingress", func() {
 
 	It("should route by host and path to different Services and report its address", func(ctx SpecContext) {
 		f.Apply(ctx, append(backend("app", map[string]string{"app": "app"}), backend("api", map[string]string{"app": "api"})...)...)
-		f.Apply(ctx, newIngress("routes", host,
-			ingressPath("/", "Prefix", "app", 80),
-			ingressPath("/api", "Prefix", "api", 80),
-			ingressPath("/exact", "Exact", "api", 80)))
+		f.Apply(ctx, framework.NewIngress("routes", host,
+			framework.IngressPath("/", "Prefix", "app", 80),
+			framework.IngressPath("/api", "Prefix", "api", 80),
+			framework.IngressPath("/exact", "Exact", "api", 80)))
 		app := f.WaitForRunningPods(ctx, map[string]string{"app": "app"}, 1)[0]
 		api := f.WaitForRunningPods(ctx, map[string]string{"app": "api"}, 1)[0]
 
@@ -74,7 +54,7 @@ var _ = framework.SIGDescribe("network", "Ingress", func() {
 	It("should keep the request path and query", func(ctx SpecContext) {
 		labels := map[string]string{"app": "path"}
 		f.Apply(ctx, backend("path", labels)...)
-		f.Apply(ctx, newIngress("path", host, ingressPath("/", "Prefix", "path", 80)))
+		f.Apply(ctx, framework.NewIngress("path", host, framework.IngressPath("/", "Prefix", "path", 80)))
 		pod := f.WaitForRunningPods(ctx, labels, 1)[0]
 		Eventually(ctx, func() (int, error) {
 			code, _, err := get(ctx, "/e2e/path?probe=1")
@@ -87,7 +67,7 @@ var _ = framework.SIGDescribe("network", "Ingress", func() {
 
 	It("should answer 503 while the Service has no ready endpoints", func(ctx SpecContext) {
 		f.Apply(ctx, framework.NewService("empty", map[string]string{"app": "empty"}, 8080),
-			newIngress("empty", host, ingressPath("/", "Prefix", "empty", 80)))
+			framework.NewIngress("empty", host, framework.IngressPath("/", "Prefix", "empty", 80)))
 		Eventually(ctx, func() (string, error) {
 			code, body, err := get(ctx, "/")
 			if code != 503 {
@@ -109,7 +89,7 @@ var _ = framework.SIGDescribe("network", "Ingress", func() {
 			d.Spec()["strategy"] = map[string]any{"type": "RollingUpdate", "rollingUpdate": map[string]any{"maxSurge": 1, "maxUnavailable": 0}}
 			return d
 		}
-		f.Apply(ctx, version("1"), framework.NewService("nonstop", labels, 8080), newIngress("nonstop", host, ingressPath("/", "Prefix", "nonstop", 80)))
+		f.Apply(ctx, version("1"), framework.NewService("nonstop", labels, 8080), framework.NewIngress("nonstop", host, framework.IngressPath("/", "Prefix", "nonstop", 80)))
 		framework.KK(ctx, "rollout", "-n", f.Namespace, "status", "deployment/nonstop", "--timeout", "90s")
 		Eventually(ctx, func() (int, error) {
 			code, _, err := get(ctx, "/")
@@ -143,7 +123,7 @@ var _ = framework.SIGDescribe("network", "Ingress", func() {
 		c.Fields = map[string]any{"readinessProbe": map[string]any{
 			"httpGet": map[string]any{"path": "/ready", "port": 8080}, "periodSeconds": 1, "failureThreshold": 1}}
 		f.Apply(ctx, framework.NewDeployment("gated", 1, labels, c), framework.NewService("gated", labels, 8080),
-			newIngress("gated", host, ingressPath("/", "Prefix", "gated", 80)))
+			framework.NewIngress("gated", host, framework.IngressPath("/", "Prefix", "gated", 80)))
 		pod := f.WaitForRunningPods(ctx, labels, 1)[0]
 		status := func() (int, error) {
 			code, _, err := get(ctx, "/")
@@ -174,7 +154,7 @@ var _ = framework.SIGDescribe("network", "Ingress", func() {
 		labels := map[string]string{"app": "fallback"}
 		f.Apply(ctx, backend("fallback", labels)...)
 		pod := f.WaitForRunningPods(ctx, labels, 1)[0]
-		ing := newIngress("fallback", host, ingressPath("/only", "Exact", "fallback", 80))
+		ing := framework.NewIngress("fallback", host, framework.IngressPath("/only", "Exact", "fallback", 80))
 		ing.Spec()["defaultBackend"] = map[string]any{"service": map[string]any{"name": "fallback", "port": map[string]any{"number": 80}}}
 		f.Apply(ctx, ing)
 		Eventually(ctx, func() (string, error) {
@@ -206,7 +186,7 @@ var _ = framework.SIGDescribe("network", "Ingress", func() {
 	})
 
 	It("should reject invalid Ingresses with Kubernetes' messages", func(ctx SpecContext) {
-		bad := newIngress("bad", "Foo_bar", map[string]any{"path": "api",
+		bad := framework.NewIngress("bad", "Foo_bar", map[string]any{"path": "api",
 			"backend": map[string]any{"service": map[string]any{"name": "web", "port": map[string]any{"number": 80}}}})
 		Expect(f.ApplyExpectError(ctx, bad)).To(And(
 			ContainSubstring(`spec.rules[0].host: Invalid value: "Foo_bar": a lowercase RFC 1123 subdomain`),

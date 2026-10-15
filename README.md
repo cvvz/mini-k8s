@@ -522,12 +522,15 @@ run the real API server in-process against a temporary etcd started from `bin/et
 
 End-to-end tests are a Ginkgo v2 suite modelled after Kubernetes' `test/e2e` (see
 [test/e2e/README.md](test/e2e/README.md)). Each spec runs in its own namespace, which is
-deleted afterwards:
+deleted afterwards. Four Ginkgo processes run the specs in parallel, and specs marked
+Serial run alone at the end; the full suite takes about 13 minutes. Besides the per-area
+specs, `[sig-scenarios]` specs combine many features the way an application uses them.
 
 ```sh
 make e2e                          # every spec, including Disruptive ones
 make e2e-quick                    # skip specs labelled Disruptive
 make e2e E2E_FOCUS='sig-apps'     # run a subset by name
+make e2e E2E_PROCS=1              # one spec at a time
 ```
 
 **Run them only against a disposable project cluster** with the default two workers.

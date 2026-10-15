@@ -40,7 +40,7 @@ var _ = framework.SIGDescribe("autoscaling", "HorizontalPodAutoscaler", func() {
 		return *d.Spec.Replicas
 	}
 
-	It("should scale a Deployment up under CPU load and back down once it is idle", func(ctx SpecContext) {
+	It("should scale a Deployment up under CPU load and back down once it is idle", framework.WithSlow(), func(ctx SpecContext) {
 		labels := map[string]string{"app": "busy"}
 		f.Apply(ctx, framework.NewDeployment("busy", 1, labels, worker("spin")), hpa("busy"))
 
@@ -73,7 +73,7 @@ var _ = framework.SIGDescribe("autoscaling", "HorizontalPodAutoscaler", func() {
 			Should(MatchRegexp(`(?m)^busy\s+Deployment/busy\s+cpu: \d%/50%\s+1\s+3\s+1\s+`))
 	})
 
-	It("should create autoscalers with kk autoscale and report targets it cannot scale", func(ctx SpecContext) {
+	It("should create autoscalers with kk autoscale and report targets it cannot scale", framework.WithSlow(), func(ctx SpecContext) {
 		f.Apply(ctx, framework.NewDeployment("web", 2, map[string]string{"app": "web"}, worker("sleep", "1h")))
 		Expect(f.KK(ctx, "autoscale", "deployment", "web", "--min", "2", "--max", "4", "--cpu-percent", "70")).
 			To(Equal("horizontalpodautoscaler.autoscaling/web autoscaled\n"))

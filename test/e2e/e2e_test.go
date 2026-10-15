@@ -1,6 +1,7 @@
 // Package e2e is the mini-k8s end-to-end suite. Specs live in per-area
-// packages (apps, node, network, storage, apimachinery, lifecycle) and register
-// themselves through blank imports, like Kubernetes' test/e2e.
+// packages (apps, node, network, storage, apimachinery, lifecycle, ...) and in
+// the cross-feature scenarios package, and register themselves through blank
+// imports, like Kubernetes' test/e2e.
 //
 // The suite mutates the running project cluster and therefore only runs with
 // MINI_E2E=1; see `make e2e`.
@@ -24,6 +25,7 @@ import (
 	_ "mini-k8s/test/e2e/lifecycle"
 	_ "mini-k8s/test/e2e/network"
 	_ "mini-k8s/test/e2e/node"
+	_ "mini-k8s/test/e2e/scenarios"
 	_ "mini-k8s/test/e2e/scheduling"
 	_ "mini-k8s/test/e2e/storage"
 )

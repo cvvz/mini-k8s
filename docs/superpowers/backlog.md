@@ -14,7 +14,4 @@
 | 想法 | 现状 | 做法 | 收益 |
 | --- | --- | --- | --- |
 | API 改用明文 HTTP/2（h2c） | API Server 与 kk、各组件之间是明文 HTTP/1.1，每个 informer 的 watch 是一条 chunked JSON 长连接，各占一条 TCP 连接 | 服务端用 Go 1.24+ 的 `http.Server.Protocols.SetUnencryptedHTTP2`，客户端 Transport 同样启用；watch 的 JSON 行流格式不变 | 一个进程的所有 watch 复用一条连接，更接近 Kubernetes 客户端经 TLS 默认使用 HTTP/2 的行为 |
-
-## 高负载下偶发失败的 e2e（2026-10-15，M8b 发现）
-
-- `[sig-node] Probes should hold off liveness checks until the startup probe passes`：长时间运行时，kubelet 的 TCP 启动探针连接 Pod IP 出现 `i/o timeout`，容器被重启；单独运行可通过（3/3）。M9a 查明同类现象（跨节点 Pod 访问超时）源于 IP 复用时邻居表仍缓存旧 Pod 的 MAC，已在 mini-cni 中加入 `arp_notify`（免费 ARP）与宿主机邻居表刷新；提速 e2e 框架时再确认该用例是否已稳定。
+| `kk describe deployment` 对齐 kubectl | 走通用 describe：Spec/Status 以 YAML 输出 | 按 kubectl 的 DeploymentDescriber 输出 StrategyType、Pod Template、Conditions 表格以及 OldReplicaSets/NewReplicaSet | 排查发布卡住时一眼看到 Progressing/Available 状态 |
