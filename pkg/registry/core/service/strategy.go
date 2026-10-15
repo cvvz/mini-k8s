@@ -7,6 +7,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"net"
 
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	"mini-k8s/pkg/apis/core/validation"
@@ -21,6 +22,15 @@ const (
 	DefaultNodePortFirst = 30000
 	DefaultNodePortLast  = 32767
 )
+
+// KubernetesServiceIP is the first address of the Service CIDR, which the
+// default/kubernetes Service gets (10.96.0.1).
+func KubernetesServiceIP() string {
+	_, network, _ := net.ParseCIDR(DefaultServiceCIDR)
+	ip := network.IP.To4()
+	ip[3]++
+	return ip.String()
+}
 
 // Allocators hands out cluster IPs and node ports.
 type Allocators struct {
@@ -69,7 +79,14 @@ func NewStrategy(a *Allocators) apiserver.Strategy {
 // port of every port that still exists. Switching to type ClusterIP drops
 // node ports the update did not change.
 func PrepareForUpdate(spec, old *corev1.ServiceSpec) {
-	if spec.ClusterIP == "" {
+	toExternal := spec.Type == corev1.ServiceTypeExternalName && old.Type != corev1.ServiceTypeExternalName
+	fromExternal := spec.Type != corev1.ServiceTypeExternalName && old.Type == corev1.ServiceTypeExternalName
+	switch {
+	case toExternal && spec.ClusterIP == old.ClusterIP:
+		spec.ClusterIP = "" // an ExternalName Service has no cluster IP
+	case fromExternal && spec.ExternalName == old.ExternalName:
+		spec.ExternalName = ""
+	case spec.ClusterIP == "" && !toExternal:
 		spec.ClusterIP = old.ClusterIP
 	}
 	switch {
@@ -121,6 +138,12 @@ func nodePorts(spec *corev1.ServiceSpec) []int32 {
 	return out
 }
 
+// needsClusterIP reports whether a Service gets an address: not headless
+// and not an ExternalName.
+func needsClusterIP(spec *corev1.ServiceSpec) bool {
+	return spec.Type != corev1.ServiceTypeExternalName && spec.ClusterIP != corev1.ClusterIPNone
+}
+
 // allocate reserves the cluster IP and node ports spec needs beyond what
 // old (nil on create) already holds. The returned function releases the new
 // reservations if the write fails, and the ones spec gave up if it succeeds.
@@ -138,14 +161,16 @@ func (a *Allocators) allocate(ctx context.Context, spec, old *corev1.ServiceSpec
 		undo(ctx)
 		return nil, err
 	}
-	if spec.ClusterIP == "" && !dryRun {
+	switch {
+	case !needsClusterIP(spec):
+	case spec.ClusterIP == "" && !dryRun:
 		ip, err := a.IPs.AllocateNext(ctx)
 		if err != nil {
 			return fail(err)
 		}
 		spec.ClusterIP = ip
 		ips = append(ips, ip)
-	} else if spec.ClusterIP != "" && spec.ClusterIP != old.ClusterIP {
+	case spec.ClusterIP != "" && spec.ClusterIP != old.ClusterIP:
 		reserve := a.IPs.Allocate
 		if dryRun {
 			reserve = a.IPs.Check
@@ -209,5 +234,8 @@ func (a *Allocators) allocate(ctx context.Context, spec, old *corev1.ServiceSpec
 			}
 		}
 		_ = a.Ports.Release(ctx, released...)
+		if old.ClusterIP != spec.ClusterIP {
+			_ = a.IPs.Release(ctx, old.ClusterIP) // it became an ExternalName
+		}
 	}, nil
 }

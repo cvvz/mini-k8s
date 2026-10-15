@@ -111,11 +111,14 @@ func (ec *Controller) sync(ctx context.Context, key string) error {
 // ComputeSubsets lists the Pods that back svc, grouped by their resolved
 // ports as RepackSubsets does: Pods without an IP, finished Pods and
 // terminating Pods are left out; a named targetPort a Pod does not declare
-// leaves that Pod out of that port. Addresses are sorted by IP.
+// leaves that Pod out of that port. With publishNotReadyAddresses every
+// Pod, even a terminating one, is listed as ready. A Pod whose subdomain is
+// the Service's name carries its hostname (for DNS). Addresses are sorted by IP.
 func ComputeSubsets(svc *corev1.Service, pods []*corev1.Pod) []corev1.EndpointSubset {
+	publishAll := svc.Spec.PublishNotReadyAddresses
 	groups := map[string]*corev1.EndpointSubset{}
 	for _, p := range pods {
-		if p.Status.PodIP == "" || p.DeletionTimestamp != nil || corev1.IsPodTerminal(p) {
+		if p.Status.PodIP == "" || corev1.IsPodTerminal(p) || (p.DeletionTimestamp != nil && !publishAll) {
 			continue
 		}
 		var ports []corev1.EndpointPort
@@ -125,8 +128,8 @@ func ComputeSubsets(svc *corev1.Service, pods []*corev1.Pod) []corev1.EndpointSu
 				ports = append(ports, corev1.EndpointPort{Name: sp.Name, Port: n, Protocol: sp.Protocol})
 			}
 		}
-		if len(ports) == 0 {
-			continue
+		if len(ports) == 0 && len(svc.Spec.Ports) > 0 {
+			continue // a headless Service may have no ports at all
 		}
 		sort.Slice(ports, func(i, j int) bool { return ports[i].Name < ports[j].Name })
 		key := portsKey(ports)
@@ -138,7 +141,10 @@ func ComputeSubsets(svc *corev1.Service, pods []*corev1.Pod) []corev1.EndpointSu
 		node := p.Spec.NodeName
 		addr := corev1.EndpointAddress{IP: p.Status.PodIP, NodeName: &node,
 			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: p.Namespace, Name: p.Name, UID: p.UID}}
-		if corev1.IsPodReady(p) {
+		if p.Spec.Hostname != "" && p.Spec.Subdomain == svc.Name {
+			addr.Hostname = p.Spec.Hostname
+		}
+		if corev1.IsPodReady(p) || publishAll {
 			ss.Addresses = append(ss.Addresses, addr)
 		} else {
 			ss.NotReadyAddresses = append(ss.NotReadyAddresses, addr)

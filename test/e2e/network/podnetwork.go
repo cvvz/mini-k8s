@@ -68,11 +68,11 @@ var _ = framework.SIGDescribe("network", "Pod network", func() {
 		}).Should(ContainSubstring("GET /cross-node from " + src.Status.PodIP + ":"))
 	})
 
-	It("should resolve names through the node and reach destinations outside the cluster", func(ctx SpecContext) {
+	It("should resolve the nodes' names upstream and reach destinations outside the cluster", func(ctx SpecContext) {
 		f.Apply(ctx, framework.NewPod("egress", map[string]string{"app": "egress"}, framework.DemoContainer()))
 		pod := f.WaitForRunningPods(ctx, map[string]string{"app": "egress"}, 1)[0]
 
-		By("resolving the control-plane node's name and calling the API without credentials")
+		By("resolving the control-plane node's name (forwarded by the cluster DNS) and calling the API without credentials")
 		Eventually(ctx, func() (string, error) {
 			out, err := framework.ExecInPod(ctx, pod, "/mini", "fetch", "http://control-plane:8080/api")
 			return strings.SplitN(out, "\n", 2)[0], err

@@ -5,11 +5,13 @@
 package deployment
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -81,6 +83,20 @@ func TemplateHash(tpl *corev1.PodTemplateSpec) string {
 	return safeEncode(fmt.Sprint(h.Sum32()))
 }
 
+// EqualIgnoreHash reports whether two Pod templates match apart from the
+// pod-template-hash label once both carry today's defaults, like
+// EqualIgnoreHash in Kubernetes' deployment utilities.
+func EqualIgnoreHash(a, b *corev1.PodTemplateSpec) bool {
+	canonical := func(t *corev1.PodTemplateSpec) []byte {
+		t = deepcopy.Copy(t)
+		delete(t.Labels, appsv1.DefaultDeploymentUniqueLabelKey)
+		corev1.SetDefaultsPodSpec(&t.Spec)
+		data, _ := json.Marshal(t) // nil and empty maps encode alike
+		return data
+	}
+	return bytes.Equal(canonical(a), canonical(b))
+}
+
 // safeEncode maps digits onto consonants and digits that cannot spell words.
 func safeEncode(s string) string {
 	const alphabet = "bcdfghjklmnpqrstvwxz2456789"
@@ -121,13 +137,23 @@ func (dc *DeploymentController) sync(ctx context.Context, key string) error {
 		if ref == nil || ref.UID != d.UID {
 			continue
 		}
-		if rs.Labels[appsv1.DefaultDeploymentUniqueLabelKey] == hash {
-			newRS = rs
-		} else {
-			old = append(old, rs)
-		}
+		old = append(old, rs)
 	}
 	byCreation(old)
+	// The new ReplicaSet is the one whose template is the Deployment's: by
+	// hash, or else by content, since a template stored by an older version
+	// lacks newer defaults and hashes differently (FindNewReplicaSet).
+	for _, rs := range old {
+		if rs.Labels[appsv1.DefaultDeploymentUniqueLabelKey] == hash {
+			newRS = rs
+		} else if newRS == nil && EqualIgnoreHash(&rs.Spec.Template, &d.Spec.Template) {
+			newRS = rs
+		}
+	}
+	if newRS != nil {
+		hash = newRS.Labels[appsv1.DefaultDeploymentUniqueLabelKey]
+		old = slices.DeleteFunc(old, func(rs *appsv1.ReplicaSet) bool { return rs == newRS })
+	}
 	s := &rollout{dc: dc, ctx: ctx, d: d, hash: hash, newRS: newRS, old: old}
 	switch {
 	case d.Spec.Paused:

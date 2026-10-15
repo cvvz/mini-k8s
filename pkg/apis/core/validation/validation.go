@@ -38,6 +38,53 @@ func ValidatePodSpec(path string, spec *corev1.PodSpec) []string {
 	for i, t := range spec.Tolerations {
 		errs = append(errs, validateToleration(fmt.Sprintf("%s.tolerations[%d]", path, i), t)...)
 	}
+	for _, f := range [][2]string{{"hostname", spec.Hostname}, {"subdomain", spec.Subdomain}} {
+		if f[1] != "" && !validation.IsDNS1123Label(f[1]) {
+			errs = append(errs, fmt.Sprintf("%s.%s: Invalid value: %q: must be a DNS label", path, f[0], f[1]))
+		}
+	}
+	errs = append(errs, validateDNS(path, spec)...)
+	return errs
+}
+
+// validateDNS checks dnsPolicy and dnsConfig like Kubernetes (up to three
+// nameservers and 32 search domains).
+func validateDNS(path string, spec *corev1.PodSpec) []string {
+	var errs []string
+	switch spec.DNSPolicy {
+	case corev1.DNSClusterFirst, corev1.DNSClusterFirstWithHostNet, corev1.DNSDefault:
+	case corev1.DNSNone:
+		if spec.DNSConfig == nil || len(spec.DNSConfig.Nameservers) == 0 {
+			errs = append(errs, path+".dnsConfig: Required value: must provide at least one DNS nameserver when `dnsPolicy` is None")
+		}
+	default:
+		errs = append(errs, fmt.Sprintf(`%s.dnsPolicy: Unsupported value: %q: supported values: "ClusterFirstWithHostNet", "ClusterFirst", "Default", "None"`, path, spec.DNSPolicy))
+	}
+	c := spec.DNSConfig
+	if c == nil {
+		return errs
+	}
+	if len(c.Nameservers) > 3 {
+		errs = append(errs, fmt.Sprintf("%s.dnsConfig.nameservers: Invalid value: must not have more than 3 nameservers", path))
+	}
+	for i, ns := range c.Nameservers {
+		if net.ParseIP(ns) == nil {
+			errs = append(errs, fmt.Sprintf("%s.dnsConfig.nameservers[%d]: Invalid value: %q: must be a valid IP address", path, i, ns))
+		}
+	}
+	if len(c.Searches) > 32 {
+		errs = append(errs, fmt.Sprintf("%s.dnsConfig.searches: Invalid value: must not have more than 32 search paths", path))
+	}
+	for i, s := range c.Searches {
+		if !validation.IsDNS1123Subdomain(strings.TrimSuffix(s, ".")) {
+			errs = append(errs, fmt.Sprintf("%s.dnsConfig.searches[%d]: Invalid value: %q: must be a DNS subdomain", path, i, s))
+		}
+	}
+	for i, o := range c.Options {
+		if o.Name == "" {
+			errs = append(errs, fmt.Sprintf("%s.dnsConfig.options[%d].name: Required value", path, i))
+		}
+	}
 	return errs
 }
 
@@ -273,11 +320,28 @@ func ValidateServiceSpec(spec *corev1.ServiceSpec) []string {
 	}
 	switch spec.Type {
 	case corev1.ServiceTypeClusterIP, corev1.ServiceTypeNodePort:
+		if spec.ExternalName != "" {
+			errs = append(errs, fmt.Sprintf("spec.externalName: Forbidden: may not be set when `type` is '%s'", spec.Type))
+		}
+	case corev1.ServiceTypeExternalName:
+		if spec.ClusterIP != "" {
+			errs = append(errs, fmt.Sprintf("spec.clusterIP: Invalid value: %q: may not be set for ExternalName services", spec.ClusterIP))
+		}
+		if spec.ExternalName == "" {
+			errs = append(errs, "spec.externalName: Required value")
+		} else if !validation.IsDNS1123Subdomain(strings.TrimSuffix(spec.ExternalName, ".")) {
+			errs = append(errs, fmt.Sprintf("spec.externalName: Invalid value: %q: must be a DNS subdomain", spec.ExternalName))
+		}
 	default:
-		errs = append(errs, fmt.Sprintf(`spec.type: Unsupported value: %q: supported values: "ClusterIP", "NodePort"`, spec.Type))
+		errs = append(errs, fmt.Sprintf(`spec.type: Unsupported value: %q: supported values: "ClusterIP", "ExternalName", "NodePort"`, spec.Type))
 	}
-	if spec.ClusterIP != "" && net.ParseIP(spec.ClusterIP).To4() == nil {
-		errs = append(errs, fmt.Sprintf("spec.clusterIP: Invalid value: %q: must be a valid IPv4 address", spec.ClusterIP))
+	switch {
+	case spec.ClusterIP == corev1.ClusterIPNone:
+		if spec.Type != corev1.ServiceTypeClusterIP {
+			errs = append(errs, fmt.Sprintf("spec.clusterIP: Invalid value: \"None\": may not be set to 'None' for %s services", spec.Type))
+		}
+	case spec.ClusterIP != "" && net.ParseIP(spec.ClusterIP).To4() == nil:
+		errs = append(errs, fmt.Sprintf("spec.clusterIP: Invalid value: %q: must be a valid IPv4 address or None", spec.ClusterIP))
 	}
 	switch spec.SessionAffinity {
 	case corev1.ServiceAffinityNone:
@@ -291,7 +355,7 @@ func ValidateServiceSpec(spec *corev1.ServiceSpec) []string {
 	default:
 		errs = append(errs, fmt.Sprintf(`spec.sessionAffinity: Unsupported value: %q: supported values: "ClientIP", "None"`, spec.SessionAffinity))
 	}
-	if len(spec.Ports) == 0 {
+	if len(spec.Ports) == 0 && spec.Type != corev1.ServiceTypeExternalName && spec.ClusterIP != corev1.ClusterIPNone {
 		errs = append(errs, "spec.ports: Required value")
 	}
 	names, ports, nodePorts := map[string]bool{}, map[string]bool{}, map[string]bool{}
@@ -329,9 +393,11 @@ func ValidateServiceSpec(spec *corev1.ServiceSpec) []string {
 	return errs
 }
 
-// ValidateServiceUpdate rejects changes to the cluster IP.
+// ValidateServiceUpdate rejects changes to the cluster IP, except when the
+// Service becomes or stops being an ExternalName.
 func ValidateServiceUpdate(spec, old *corev1.ServiceSpec) []string {
-	if old.ClusterIP != "" && spec.ClusterIP != old.ClusterIP {
+	external := spec.Type == corev1.ServiceTypeExternalName || old.Type == corev1.ServiceTypeExternalName
+	if old.ClusterIP != "" && spec.ClusterIP != old.ClusterIP && !external {
 		return []string{fmt.Sprintf("spec.clusterIP: Invalid value: %q: may not change once set", spec.ClusterIP)}
 	}
 	return nil
@@ -366,9 +432,6 @@ func ValidateEndpoints(e *corev1.Endpoints) []string {
 					errs = append(errs, fmt.Sprintf("%s.hostname: Invalid value: %q: must be a DNS label", ap, a.Hostname))
 				}
 			}
-		}
-		if len(ss.Ports) == 0 {
-			errs = append(errs, path+".ports: Required value")
 		}
 		for j, p := range ss.Ports {
 			pp := fmt.Sprintf("%s.ports[%d]", path, j)

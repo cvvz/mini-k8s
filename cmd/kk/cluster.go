@@ -54,6 +54,9 @@ type cluster struct {
 	client  *client.Client
 	out     io.Writer
 	cleanup func() error
+	// addons is the directory of add-on manifests applied once the nodes
+	// are Ready (build/manifests/addons); empty skips the phase.
+	addons string
 }
 
 func projectRoot() (string, error) {
@@ -279,7 +282,8 @@ func newCluster(ctx context.Context, root, token string, out io.Writer) (cluster
 		}
 		return cluster{}, err
 	}
-	return cluster{run: run, pipe: commandPipe(root, env), client: client.New(apiURL(), token), out: out, cleanup: cleanup}, nil
+	return cluster{run: run, pipe: commandPipe(root, env), client: client.New(apiURL(), token), out: out, cleanup: cleanup,
+		addons: filepath.Join(root, "build", "manifests", "addons")}, nil
 }
 
 func (c cluster) up(ctx context.Context) error {
@@ -302,14 +306,14 @@ func (c cluster) up(ctx context.Context) error {
 	if err := c.loadImages(ctx, append(append([]string{}, nodeImages...), etcdImage), controlPlane); err != nil {
 		return err
 	}
-	if err := c.restartStaleStaticPods(ctx, controlPlane); err != nil {
+	if err := c.restartStaleSystemPods(ctx, controlPlane); err != nil {
 		return err
 	}
 	if err := c.loadImages(ctx, nodeImages, workerNames...); err != nil {
 		return err
 	}
 	for _, node := range workerNames {
-		if err := c.restartStaleStaticPods(ctx, node); err != nil {
+		if err := c.restartStaleSystemPods(ctx, node); err != nil {
 			return err
 		}
 	}
@@ -318,8 +322,24 @@ func (c cluster) up(ctx context.Context) error {
 	if err := c.waitReady(waitCtx, since); err != nil {
 		return err
 	}
+	if err := c.applyAddons(ctx); err != nil {
+		return err
+	}
 	_, err := fmt.Fprintf(c.out, "mini-k8s ready: API http://127.0.0.1:18000; nodes %s Ready\n", strings.Join(nodeNames, ", "))
 	return err
+}
+
+// applyAddons applies the add-on manifests through the API, like kubeadm's
+// addon phase installs CoreDNS: the cluster DNS runs as ordinary workloads.
+func (c cluster) applyAddons(ctx context.Context) error {
+	if c.addons == "" {
+		return nil
+	}
+	if _, err := fmt.Fprintf(c.out, "Applying add-ons from %s\n", c.addons); err != nil {
+		return err
+	}
+	a := newApp(c.client, c.out, nil, args{})
+	return a.applyFiles(ctx, args{values: map[string][]string{"filename": {c.addons}}, bools: map[string]bool{}}, false)
 }
 
 func (c cluster) step(ctx context.Context, command []string) error {
@@ -363,10 +383,11 @@ func (c cluster) loadImages(ctx context.Context, refs []string, nodes ...string)
 	return nil
 }
 
-// restartStaleStaticPods stops a node's kube-system containers (the static
-// Pods) whose image name now refers to another image than the one they
-// run; the kubelet restarts them from the freshly loaded image.
-func (c cluster) restartStaleStaticPods(ctx context.Context, name string) error {
+// restartStaleSystemPods stops a node's kube-system containers (the static
+// Pods and add-ons such as the cluster DNS) whose image name now refers to
+// another image than the one they run; the kubelet restarts them from the
+// freshly loaded image.
+func (c cluster) restartStaleSystemPods(ctx context.Context, name string) error {
 	node := nodeContainer(name)
 	out, err := c.run(ctx, "docker", "exec", node, "crictl", "ps", "-o", "json", "--label", "io.kubernetes.pod.namespace=kube-system")
 	if err != nil {

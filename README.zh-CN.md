@@ -38,14 +38,19 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
 - **kubelet**：节点注册与心跳；从清单目录运行 static Pod 并维护 mirror Pod；每个 Pod 一个
   worker；带退避的重启（CrashLoopBackOff）；`imagePullPolicy` 与镜像拉取失败上报
   （ErrImagePull/ImagePullBackOff）；节点重启后重建沙箱；
-  日志（支持 follow/tail/`--previous`）；清理孤儿沙箱。
+  日志（支持 follow/tail/`--previous`）；清理孤儿沙箱；按 `dnsPolicy`/`dnsConfig` 生成 Pod 的
+  resolv.conf，管理 `/etc/hosts`（`hostname`、`subdomain`），并注入 Service 环境变量（`WEB_SERVICE_HOST` 等）。
 - **Pod 网络**：node IPAM 控制器从 `10.244.0.0/16` 为每个节点分配一个 `/24`；自研 CNI 插件
   （`mini-cni`：网桥、veth、IP 分配）为每个 Pod 接网；host-gw 路由代理打通各节点的 Pod 子网，
   Pod 跨节点互访不经过 NAT；Pod 经所在节点解析域名、访问集群外部。
 - **Service**：API Server 从 `10.96.0.0/12` 分配 ClusterIP、从 `30000-32767` 分配 NodePort；
   Endpoints 控制器维护就绪与未就绪的 Pod（支持命名 targetPort、多端口）；**kube-proxy** 与真实
   kube-proxy 的 iptables 模式一致（`KUBE-SERVICES` → `KUBE-SVC-*` → `KUBE-SEP-*`，随机均衡、
-  ClientIP 会话亲和、NodePort 与 hairpin 流量做地址伪装、无端点时立即拒绝）；NodePort 在每个节点上可访问。
+  ClientIP 会话亲和、NodePort 与 hairpin 流量做地址伪装、无端点时立即拒绝）；NodePort 在每个节点上可访问；
+  支持 headless 与 ExternalName Service；API Server 维护 `kubernetes` Service，Pod 经它访问 API。
+- **集群 DNS**：自研 DNS 服务器（`kube-dns`，地址 `10.96.0.10`，相当于 CoreDNS 的角色）应答
+  `<svc>.<ns>.svc.cluster.local`、按 hostname 解析 headless 端点、SRV 记录、ExternalName 的 CNAME 与
+  Pod 记录，其余名字转发给节点的解析器。
 - **Ingress**：Ingress 控制器在 `127.0.0.1:18080` 按 host（精确或通配）与 path（Exact 或 Prefix）
   把请求转发到 Service 的就绪端点，支持默认后端、404/503 响应，并把地址写入 Ingress 状态。
 - **可观测性**：Events（同类事件聚合计数，1 小时后由 etcd lease 自动过期），
@@ -90,7 +95,8 @@ flowchart TB
 
 - 每个方框是一个扮演“机器”的特权 Docker 容器，三者共享 Docker 网络 `mini-k8s`。
 - control-plane 节点的 kubelet 以 static Pod 运行 etcd、API Server、Controller Manager、调度器和
-  Ingress 控制器；该节点的污点让业务 Pod 只调度到 worker。每个节点（包括 control-plane）都运行 kube-proxy。
+  Ingress 控制器；该节点的污点让业务 Pod 只调度到 worker。每个节点（包括 control-plane）都运行 kube-proxy；
+  集群 DNS（`kube-dns`，`10.96.0.10`）以普通 Pod 运行在 worker 上。
 - 组件之间的箭头是 API 流量：各组件 list/watch API Server 并写回状态，只有 API Server 访问 etcd；
   kubelet 经 containerd（CRI）启动 Pod。
 - Ingress 控制器把 `127.0.0.1:18080` 上的请求直接转发给各 worker 上就绪的 Pod。不同节点上的 Pod 经 host-gw
@@ -124,7 +130,7 @@ Kubernetes 交给外部项目的部分（存储、容器运行时）直接使用
 | demo 应用 | 示例与测试用的 HTTP 服务；`mini fetch` 是给没有 shell 的镜像用的极简 HTTP 客户端 | 已实现 |
 | `mini-cni` + host-gw 路由代理 | Pod 网络：网桥、veth、IP 分配、loopback、跨节点路由、出网地址伪装 | 已实现 |
 | `mini node-init`、pause 镜像 | 节点容器的入口（cgroup 委派、生成 containerd 配置并启动，再运行 kubelet）；Pod 沙箱进程 | 已实现 |
-| 集群 DNS | 服务发现（`*.svc.cluster.local`） | M6b |
+| 集群 DNS | `mini cluster-dns`：Service、headless、SRV、ExternalName 与 Pod 记录，其余名字转发上游（自写 DNS 报文编解码）；以 `kube-dns` 插件运行，相当于 CoreDNS 的角色 | 已实现 |
 
 **直接使用的开源组件**：
 
@@ -152,7 +158,7 @@ cmd/mini/                    多合一二进制：mini kube-apiserver | kube-con
                              以 mini-cni/loopback 名字调用时是 CNI 插件
 cmd/kk/                      命令行客户端（相当于 kubectl + 集群生命周期）
 build/images/<name>/         Dockerfile：mini（组件与 demo）、node、pause、etcd、kube-proxy
-build/manifests/<节点角色>   static Pod 清单（对应 /etc/kubernetes/manifests）
+build/manifests/<节点角色>   static Pod 清单（对应 /etc/kubernetes/manifests）；addons/：集群 DNS
 pkg/apis/<group>/v1          资源类型（metav1、corev1、appsv1、networkingv1）及 validation
 pkg/api/resource, util/intstr 数量（"500m"、"64Mi"）与 int-or-string 值
 pkg/labels, fields, watch    选择器与 watch 事件类型（对应 apimachinery）
@@ -164,10 +170,12 @@ pkg/storage/etcd3            etcd 存储
 pkg/client/...               客户端、informers、workqueue、record（对应 client-go）
 pkg/controller/<name>        deployment、replicaset、endpoint、garbagecollector、namespace、nodeipam 控制器
 pkg/scheduler                调度器
-pkg/kubelet                  节点代理与 static Pod；kuberuntime（CRI 客户端）、prober（探针）、dns（节点本地转发）
+pkg/kubelet                  节点代理与 static Pod；kuberuntime（CRI 客户端）、prober（探针）、envvars（Service 环境变量）、
+                             dns（Pod DNS 配置与节点本地转发）
 pkg/network/{cni,hostgw}     CNI 插件与 host-gw 路由代理
 pkg/proxy/iptables           kube-proxy（iptables 模式）
 pkg/ingress                  Ingress 控制器
+pkg/dns                      集群 DNS 服务器
 pkg/nodeinit                 节点容器入口
 test/e2e, test/integration   端到端测试与集成测试
 ```
@@ -236,7 +244,8 @@ make build
 下载 v3.5.17）、从 `build/images/` 构建五个镜像（组件、节点、pause、etcd、kube-proxy；节点镜像
 首次构建约需一分钟）、启动三个节点容器、把镜像导入每个节点的 containerd（随后 control-plane 节点的
 kubelet 以 static Pod 启动 etcd、API Server、Controller Manager、调度器和 Ingress 控制器，每个节点
-启动 kube-proxy），之后最多等待两分钟，直到 API 健康、所有节点都有新鲜的 Ready 心跳。
+启动 kube-proxy），之后最多等待两分钟，直到 API 健康、所有节点都有新鲜的 Ready 心跳，最后像 kubeadm
+安装 CoreDNS 一样 apply 集群 DNS 插件（[build/manifests/addons](build/manifests/addons)）。
 
 ```text
 API healthy
@@ -287,6 +296,9 @@ kk exec POD_NAME -- /mini cat /sys/fs/cgroup/memory.max          # 64Mi 的限�
 kk get svc web                           # CLUSTER-IP 可以从任意 Pod 和节点访问：
 kk exec POD_NAME -- /mini fetch http://CLUSTER_IP/               # kube-proxy 选择一个就绪 Pod
 docker exec mini-k8s-worker-1-1 iptables -t nat -S KUBE-SERVICES # 背后的 iptables 规则
+kk exec POD_NAME -- /mini lookup web     # 集群 DNS：web.default.svc.cluster.local
+kk exec POD_NAME -- /mini cat /etc/resolv.conf                   # 搜索域与 ndots:5
+kk exec POD_NAME -- /mini fetch http://kubernetes.default.svc:443/healthz   # 在 Pod 内访问 API
 kk scale deployment web --replicas 3
 kk rollout restart deployment/web        # 一次滚动更新：新建 ReplicaSet，逐个替换 Pod
 kk rollout status deployment/web         # 等待完成
@@ -343,10 +355,10 @@ kk image load my-app:v1
 | --- | --- | --- |
 | Namespace | `v1` | 创建、删除（Terminating → 清空内容 → 删除）。启动时自动创建 `default`、`kube-system`。 |
 | Node | `v1` | 由 kubelet 注册并心跳，上报 `capacity`/`allocatable`（cpu、memory、pods）与角色标签；`spec.podCIDR` 由 node IPAM 一次性分配；调度器遵守 `spec.unschedulable` 与 `spec.taints`（NoSchedule、PreferNoSchedule、NoExecute）；control-plane 节点带污点 `node-role.kubernetes.io/control-plane:NoSchedule`。 |
-| Pod | `v1` | `containers`（一个或多个）与 `initContainers`：`name`、`image`、`command`、`args`、`env`、`ports`、`resources`（cpu、memory）、`livenessProbe`/`readinessProbe`/`startupProbe`（init 容器不可用）、`volumeMounts`；`volumes`（`emptyDir` 支持 `medium`/`sizeLimit`，`hostPath` 支持 `type`）；`hostNetwork`；`tolerations`；`imagePullPolicy`（Always、IfNotPresent、Never，默认值同 Kubernetes）；`restartPolicy`（Always、OnFailure、Never）；`terminationGracePeriodSeconds`；`nodeName`。创建后 spec 不可变。static Pod 以 mirror Pod 呈现（只读；删除后 kubelet 会重建）。子资源 `log` 与 `exec`。 |
+| Pod | `v1` | `containers`（一个或多个）与 `initContainers`：`name`、`image`、`command`、`args`、`env`、`ports`、`resources`（cpu、memory）、`livenessProbe`/`readinessProbe`/`startupProbe`（init 容器不可用）、`volumeMounts`；`volumes`（`emptyDir` 支持 `medium`/`sizeLimit`，`hostPath` 支持 `type`）；`hostNetwork`；`hostname`、`subdomain`；`dnsPolicy`（ClusterFirst、ClusterFirstWithHostNet、Default、None）与 `dnsConfig`；`enableServiceLinks`；`tolerations`；`imagePullPolicy`（Always、IfNotPresent、Never，默认值同 Kubernetes）；`restartPolicy`（Always、OnFailure、Never）；`terminationGracePeriodSeconds`；`nodeName`。创建后 spec 不可变。static Pod 以 mirror Pod 呈现（只读；删除后 kubelet 会重建）。子资源 `log` 与 `exec`。 |
 | Deployment | `apps/v1` | `replicas`（默认 1）、`selector`（matchLabels/matchExpressions，创建后不可变）、`template`（`restartPolicy` 必须为 Always）、`strategy`（RollingUpdate 的 `maxSurge`/`maxUnavailable` 默认各 25%，或 Recreate）、`minReadySeconds`、`revisionHistoryLimit`（10）、`paused`、`progressDeadlineSeconds`（600）。每个模板版本对应一个 ReplicaSet；注解 `deployment.kubernetes.io/revision` 与 `kubernetes.io/change-cause`。 |
 | ReplicaSet | `apps/v1` | `replicas`、`selector`（不可变）、`template`、`minReadySeconds`；通常由 Deployment 管理。 |
-| Service | `v1` | `type` 为 ClusterIP（默认）或 NodePort；`selector`（可省略：此时由用户自己写 Endpoints）；`ports`（`name`、`port`、`targetPort` 为数字或容器端口名、`protocol` TCP/UDP、`nodePort` 取自 30000-32767）；`clusterIP`（未指定时从 `10.96.0.0/12` 分配，创建后不可变）；`sessionAffinity` None/ClientIP 及 `sessionAffinityConfig.clientIP.timeoutSeconds`。 |
+| Service | `v1` | `type` 为 ClusterIP（默认）、NodePort 或 ExternalName（`externalName`）；`selector`（可省略：此时由用户自己写 Endpoints）；`ports`（`name`、`port`、`targetPort` 为数字或容器端口名、`protocol` TCP/UDP、`nodePort` 取自 30000-32767）；`clusterIP`（未指定时从 `10.96.0.0/12` 分配，`None` 表示 headless，创建后不可变）；`publishNotReadyAddresses`；`sessionAffinity` None/ClientIP 及 `sessionAffinityConfig.clientIP.timeoutSeconds`。`default/kubernetes`（`10.96.0.1`，`443/TCP`）由 API Server 维护。 |
 | Endpoints | `v1` | 对有选择器的 Service 由 Endpoints 控制器维护：`subsets` 中的 `addresses`（就绪）与 `notReadyAddresses`（带 `nodeName`/`targetRef`），`ports` 以 Service 端口命名。 |
 | Ingress | `networking.k8s.io/v1` | `rules`（`host` 为精确名或 `*.domain`；`http.paths` 的 `path`、`pathType` Exact/Prefix/ImplementationSpecific、`backend.service` 的名称与端口号或端口名）、`defaultBackend`、`ingressClassName`（未设置或 `mini`）；状态中报告 `localhost`。不支持 TLS。 |
 | Event | `v1` | 由组件记录，可查询；1 小时后过期。 |
@@ -361,10 +373,10 @@ kk image load my-app:v1
   不支持交互式会话（stdin/tty），与 Kubernetes 的流式 exec 不同。
 - 滚动更新过程中修改 `replicas` 不做按比例扩缩；ReplicaSet 不收养孤儿 Pod。`kk apply` 是 merge patch：
   把 Deployment 改成 `Recreate` 时需要在清单中写 `rollingUpdate: null`。
-- 还没有集群 DNS（M6b）：Pod 只能通过 ClusterIP 访问 Service，并经节点解析 Docker 网络中的名字
-  （例如 `control-plane`）；不支持 headless 与 ExternalName Service、LoadBalancer 类型、
-  EndpointSlice、`externalTrafficPolicy` 和 IPv6。NodePort 与 kind 一样从 Linux 宿主机经节点地址访问，
-  不在 `127.0.0.1` 上发布。Ingress 控制器只支持明文 HTTP。
+- 不支持 LoadBalancer 类型、EndpointSlice、`externalTrafficPolicy` 和 IPv6（AAAA 查询返回空应答）；
+  集群 DNS 没有缓存和反向（PTR）记录。NodePort 与 kind 一样从 Linux 宿主机经节点地址访问，不在 `127.0.0.1`
+  上发布。API、`kubernetes` Service（443 端口）与 Ingress 控制器都是明文 HTTP；没有 ServiceAccount，DNS 插件
+  从所在节点读取 API token。
 - 节点失联不会被标记为 NotReady，也不会驱逐 Pod（NoExecute 污点同样不驱逐），其 Pod 会留在 Endpoints 中；
   没有资源感知调度和亲和性。
 - 固定一个 control-plane 节点和两个 worker 节点（写在 `compose.yaml` 中）；节点是共享宿主机内核的容器。
@@ -412,6 +424,7 @@ make e2e E2E_FOCUS='sig-apps'     # 按名称运行子集
 | Pod 显示 `CreatePodSandboxError` | 错误信息来自 containerd 和 CNI 插件；按上一行的方法查看节点日志。 |
 | Pod 显示 `CrashLoopBackOff` | `kk logs NAME` 查看应用日志，`kk logs -p NAME` 查看上一次运行的日志；kubelet 以 1s 起、最长 30s 的退避重启。 |
 | `127.0.0.1:18080` 返回 `503` | Service 没有就绪端点：`kk get endpoints NAME`（未就绪的 Pod 不显示在 ENDPOINTS 列中）；检查 selector 与 `targetPort`。`404 default backend` 表示没有与 host 和 path 匹配的 Ingress 规则。 |
+| Pod 内解析不到 Service 名字 | `kk get pods -n kube-system -l k8s-app=kube-dns`（应有两个 Running）、`kk logs -n kube-system POD`，以及 `kk exec POD -- /mini cat /etc/resolv.conf`（除非 `dnsPolicy` 另有设置，nameserver 应为 `10.96.0.10`）。`kk exec POD -- /mini lookup NAME` 显示 Pod 的解析结果。 |
 | ClusterIP 或 NodePort 无响应 | `kk get pods -n kube-system`（每个节点都要有 kube-proxy）、`kk logs -n kube-system kube-proxy-worker-1`，以及 `docker exec mini-k8s-worker-1-1 iptables -t nat -S` 查看规则。`connection refused` 表示 Service 没有就绪端点。 |
 | `Error from server (Invalid)` | 按报错中的字段路径修改清单；未知字段同样会被拒绝。 |
 | 端口或项目名冲突 | 释放端口或停止冲突项目；只修改 `MINI_API` 不会改变 Compose 端口映射。 |
@@ -445,7 +458,7 @@ unset MINI_TOKEN
 | M4 | 控制面自托管：control-plane 节点、static/mirror Pod，etcd 与控制面组件运行在 kube-system，污点与容忍 | ✅ |
 | M5 | ReplicaSet、滚动更新与回滚、`kk rollout` | ✅ |
 | M6a | ClusterIP 与 NodePort Service、Endpoints、iptables kube-proxy、Ingress | ✅ |
-| M6b | 集群 DNS、headless 与 ExternalName Service、`kubernetes` Service | 计划中 |
+| M6b | 集群 DNS、headless 与 ExternalName Service、`kubernetes` Service、Pod 的 DNS 配置与 Service 环境变量 | ✅ |
 | M7 | 调度框架、节点租约与驱逐、污点、cordon/drain | 计划中 |
 | M8 | ConfigMap、Secret、卷、PVC | 计划中 |
 | M9 | DaemonSet、Job、CronJob、StatefulSet | 计划中 |
@@ -453,6 +466,7 @@ unset MINI_TOKEN
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M6b 集群 DNS 计划](docs/superpowers/plans/2026-10-15-m6b-cluster-dns.md)
 - [M6a Service、kube-proxy 与 Ingress 计划](docs/superpowers/plans/2026-10-15-m6a-services-kube-proxy-ingress.md)
 - [M5 ReplicaSet 与滚动更新计划](docs/superpowers/plans/2026-10-15-m5-replicaset-rollout.md)
 - [M4 控制面自托管计划](docs/superpowers/plans/2026-10-15-m4-self-hosted-control-plane.md)
