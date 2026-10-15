@@ -57,7 +57,9 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
   kube-scheduler and the Ingress controller are **static Pods** of the `control-plane`
   node, visible as mirror Pods in `kube-system`; kube-proxy is a DaemonSet add-on; the
   control-plane node is tainted so workloads stay on the workers; a crashed component is
-  restarted by the kubelet.
+  restarted by the kubelet. kube-controller-manager and kube-scheduler elect a leader with a
+  Lease in `kube-system` (as with `--leader-elect`), so standby replicas take over when the
+  leader stops.
 - **Resource metrics**: kubelets serve `/metrics/resource` (CPU and memory from CRI and the
   node's cgroup); the metrics-server add-on scrapes them and serves `metrics.k8s.io/v1beta1`,
   which the API server proxies like kube-aggregator; `kk top nodes|pods`.
@@ -586,10 +588,12 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M9c | StatefulSets with claim templates and retention policies, shared revision history | ✅ |
 | M10a | Resource metrics: kubelet `/metrics/resource`, metrics-server, the metrics.k8s.io API, `kk top` | ✅ |
 | M10b | HorizontalPodAutoscalers, the scale subresource, `kk autoscale` | ✅ |
+| M10c | Leader election of kube-controller-manager and kube-scheduler | ✅ |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M10c leader election plan (Chinese)](docs/superpowers/plans/2026-10-15-m10c-leader-election.md)
 - [M10b autoscaling plan (Chinese)](docs/superpowers/plans/2026-10-15-m10b-hpa.md)
 - [M10a metrics plan (Chinese)](docs/superpowers/plans/2026-10-15-m10a-metrics.md)
 - [M9c StatefulSet plan (Chinese)](docs/superpowers/plans/2026-10-15-m9c-statefulset.md)
