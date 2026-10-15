@@ -214,6 +214,55 @@ func TestDeleteRemovedNodesOnlyDeletesWorkersAboveTheCount(t *testing.T) {
 	}
 }
 
+// Workers above the count are cordoned first, then drained if Ready; a
+// worker without a kubelet is only cordoned, as nothing would confirm the
+// evictions.
+func TestDrainRemovedWorkers(t *testing.T) {
+	var out bytes.Buffer
+	c := cluster{client: framework.StartTestServer(t), out: &out, workers: 4}
+	ctx := context.Background()
+	for _, name := range []string{"worker-1", "worker-2", "worker-3", "worker-4"} {
+		n, err := client.Nodes(c.client).Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name != "worker-3" {
+			n.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
+			if _, err := client.Nodes(c.client).UpdateStatus(ctx, n); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	zero := int64(0)
+	for _, node := range []string{"worker-3", "worker-4"} {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "on-" + node}, Spec: corev1.PodSpec{NodeName: node,
+			TerminationGracePeriodSeconds: &zero, Containers: []corev1.Container{{Name: "c", Image: "img"}}}}
+		if _, err := client.Pods(c.client, "default").Create(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.drainRemovedWorkers(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	for name, cordoned := range map[string]bool{"worker-1": false, "worker-2": false, "worker-3": true, "worker-4": true} {
+		n, err := client.Nodes(c.client).Get(ctx, name)
+		if err != nil || n.Spec.Unschedulable != cordoned {
+			t.Errorf("%s: unschedulable=%v, want %v (%v)", name, n.Spec.Unschedulable, cordoned, err)
+		}
+	}
+	if _, err := client.Pods(c.client, "default").Get(ctx, "on-worker-4"); !client.IsNotFound(err) {
+		t.Errorf("the Pod of the drained worker remains: %v", err)
+	}
+	if _, err := client.Pods(c.client, "default").Get(ctx, "on-worker-3"); err != nil {
+		t.Errorf("the Pod of the unready worker is left to the Pod garbage collector: %v", err)
+	}
+	for _, line := range []string{"Not draining worker-3: it is not Ready\n", "Draining worker-4\n", "node/worker-4 drained\n"} {
+		if !strings.Contains(out.String(), line) {
+			t.Errorf("output lacks %q:\n%s", line, out.String())
+		}
+	}
+}
+
 func TestDrainWithoutAnAPIGoesOn(t *testing.T) {
 	var out bytes.Buffer
 	c := cluster{client: client.New("http://127.0.0.1:1", "secret"), out: &out, workers: 3}

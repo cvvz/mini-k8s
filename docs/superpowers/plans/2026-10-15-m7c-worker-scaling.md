@@ -28,7 +28,7 @@ compose 调用（up、stop、down）都带 `-f compose.yaml -f .mini-k8s/compose
 | 孤儿 Pod | `spec.nodeName` 指向的节点不在 informer 中：先隔离 40s（`quarantineTime`），到期后用 GET 确认节点仍不存在，才处理 |
 | 处理方式 | 未终止的 Pod 先写状态：`phase: Failed`，条件 `DisruptionTarget=True`、reason `DeletionByPodGC`、message `PodGC: node no longer exists`；然后以 `gracePeriodSeconds: 0` 删除 |
 | 节点删除的连带清理 | Lease、镜像 Pod 由属主引用经垃圾回收器删除；Pod CIDR 由 nodeipam 释放；host-gw 路由在各节点按 Node 列表收敛 |
-| 缩容 drain | 同 `kk drain NODE --force --delete-emptydir-data --ignore-daemonsets --timeout 2m`：节点要被移除，无控制器的 Pod 也只能删除 |
+| 缩容 drain | 先把要移除的 worker 全部 cordon，再对 Ready 的逐个执行同 `kk drain NODE --force --delete-emptydir-data --ignore-daemonsets --timeout 2m` 的 drain（节点要被移除，无控制器的 Pod 也只能删除）；不 Ready 的节点没有 kubelet 确认驱逐，留给 PodGC；drain 失败撤销本次 cordon |
 
 ## 决策
 

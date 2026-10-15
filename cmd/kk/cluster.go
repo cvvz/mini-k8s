@@ -494,18 +494,43 @@ func (c cluster) drainRemovedWorkers(ctx context.Context, workers int) error {
 		return err
 	}
 	var names []string
-	for _, n := range nodes.Items {
-		names = append(names, n.Name)
+	ready := map[string]bool{}
+	for i := range nodes.Items {
+		names = append(names, nodes.Items[i].Name)
+		ready[nodes.Items[i].Name] = corev1.IsNodeReady(&nodes.Items[i])
 	}
 	a := newApp(c.client, c.out, nil, args{})
 	removed := removedWorkers(names, workers)
-	// Cordon them all first, so Pods evicted from one do not move to another.
+	// Cordon them all first, so Pods evicted from one do not move to
+	// another; a failed drain undoes that and leaves the workers in place.
+	var cordoned []string
+	uncordon := func() error {
+		var errs []error
+		for _, name := range cordoned {
+			if _, err := a.setUnschedulable(ctx, name, false); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
 	for _, name := range removed {
-		if _, err := a.setUnschedulable(ctx, name, true); err != nil {
-			return err
+		changed, err := a.setUnschedulable(ctx, name, true)
+		if err != nil {
+			return errors.Join(err, uncordon())
+		}
+		if changed {
+			cordoned = append(cordoned, name)
 		}
 	}
 	for _, name := range removed {
+		if !ready[name] {
+			// No kubelet would confirm the evictions: the Pod garbage
+			// collector deletes its Pods once the node is deleted.
+			if _, err := fmt.Fprintf(c.out, "Not draining %s: it is not Ready\n", name); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, err := fmt.Fprintf(c.out, "Draining %s\n", name); err != nil {
 			return err
 		}
@@ -514,7 +539,7 @@ func (c cluster) drainRemovedWorkers(ctx context.Context, workers int) error {
 		p := args{positional: []string{name}, values: map[string][]string{"timeout": {"2m"}},
 			bools: map[string]bool{"force": true, "delete-emptydir-data": true, "ignore-daemonsets": true}}
 		if err := a.drain(ctx, p); err != nil {
-			return fmt.Errorf("drain %s: %w", name, err)
+			return errors.Join(fmt.Errorf("drain %s: %w", name, err), uncordon())
 		}
 	}
 	return nil

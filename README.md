@@ -451,7 +451,7 @@ make e2e E2E_FOCUS='sig-apps'     # run a subset by name
 **Run them only against a disposable project cluster** with the default two workers.
 Disruptive specs restart the control-plane node, a control-plane component and a worker,
 stop a worker for a minute, cordon, drain and taint the workers, flush kube-proxy's rules
-on a node, run `cluster down/up` and scale to three workers and back. Specs use their own
+on a node, run `cluster down/up` and scale to three workers, then one, and back to two. Specs use their own
 namespaces and Ingress hosts, so the quick-start example may stay deployed.
 
 Every new feature ships with e2e specs.

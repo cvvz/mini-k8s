@@ -455,10 +455,12 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
   每个集群命令都据此重新生成 `.mini-k8s/compose.workers.yaml`，所有 compose 调用都带 `-f compose.yaml -f` 该文件：N > 2 时
   worker-3 起用 `extends` 复制 worker-1（只改 hostname、`MINI_NODE` 与 `/var` 卷，挂载与 `depends_on` 沿用）；N = 1 时
   worker-2 设 `deploy.replicas: 0`；N = 2 时为空。已有节点的配置不变，扩缩时 Compose 不会重建它们。
-- **缩容**：API 可用时先按 `kk drain --force --delete-emptydir-data --ignore-daemonsets --timeout 2m` drain 要移除的 worker；
-  `compose up --remove-orphans` 删除其容器，再删除其 `mini-k8s_worker-K-var` 卷；集群就绪后删除编号超过 N 的 `worker-K`
-  Node 对象（像云上的节点控制器删除已删 VM 的 Node），Lease 与镜像 Pod 随属主引用被垃圾回收，nodeipam 释放 Pod CIDR，
-  各节点的 host-gw 路由随 Node 列表收敛。
+- **缩容**：要移除的 worker 都由实际状态推导（API 中编号超过 N 的 `worker-K` 节点、本项目编号超过 N 的 `worker-K-var` 卷），
+  不依赖记录的数量，中途失败后重跑也能收敛。API 可用时先把它们全部 cordon（避免 Pod 从一个被移除节点挪到另一个），再按
+  `kk drain --force --delete-emptydir-data --ignore-daemonsets --timeout 2m` 逐个 drain；不 Ready 的节点没有 kubelet 确认驱逐，
+  只 cordon 不 drain；drain 失败则撤销本次 cordon 并中止。随后 `compose up --remove-orphans` 删除其容器，再删除其卷；集群
+  就绪后删除这些 Node 对象（像云上的节点控制器删除已删 VM 的 Node），Lease 与镜像 Pod 随属主引用被垃圾回收（镜像 Pod
+  删除时没有 kubelet 确认，由 PodGC 强制删除），nodeipam 释放 Pod CIDR，各节点的 host-gw 路由随 Node 列表收敛。
 - **Pod 垃圾回收**：`pkg/controller/podgc` 实现 Kubernetes PodGC 的 gcOrphaned：每 20s 检查，`spec.nodeName` 指向的节点不在
   informer 中满 40s 且 GET 确认不存在时，先把未终止的 Pod 写成 `Failed` 并加 `DisruptionTarget`（`DeletionByPodGC`）条件，
   再以宽限期 0 删除。集群停着时缩容（无法 drain）靠它清理。

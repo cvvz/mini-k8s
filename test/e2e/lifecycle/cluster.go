@@ -68,7 +68,7 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 		Expect(framework.PodContainers(ctx, lost.UID, true)).To(BeEmpty())
 	})
 
-	It("should add a worker with kk cluster up --workers and drain it away again", func(ctx SpecContext) {
+	It("should add workers with kk cluster up --workers and drain them away again", func(ctx SpecContext) {
 		scaledBack := false
 		DeferCleanup(func(ctx SpecContext) {
 			if !scaledBack {
@@ -102,20 +102,29 @@ var _ = framework.SIGDescribe("cluster-lifecycle", "Control plane and cluster re
 			return framework.ExecInPod(ctx, src, "/mini", "fetch", "http://"+pod.Status.PodIP+":8080/newcomer")
 		}).WithTimeout(30 * time.Second).Should(HavePrefix("200\n"))
 
-		By("scaling back to two workers, which drains worker-3 first")
-		out = framework.KK(ctx, "cluster", "up", "--workers", "2")
-		scaledBack = true
+		By("scaling in to one worker, which drains worker-2 and worker-3 first")
+		out = framework.KK(ctx, "cluster", "up", "--workers", "1")
+		Expect(out).To(ContainSubstring("Draining worker-2"))
 		Expect(out).To(ContainSubstring("Draining worker-3"))
 		Expect(out).To(ContainSubstring("evicting pod " + f.Namespace + "/" + pod.Name))
-		Expect(out).To(ContainSubstring("Deleting node worker-3"))
-		_, err = client.Nodes(f.Client).Get(ctx, "worker-3")
-		Expect(client.IsNotFound(err)).To(BeTrue(), "the Node object must be deleted: %v", err)
-		Expect(framework.Docker(ctx, "ps", "-aq", "--filter", "name=^mini-k8s-worker-3-1$")).To(BeEmpty())
-		Expect(framework.Docker(ctx, "volume", "ls", "-q", "--filter", "name=^mini-k8s_worker-3-var$")).To(BeEmpty())
+		for _, name := range []string{"worker-2", "worker-3"} {
+			Expect(out).To(ContainSubstring("Deleting node " + name))
+			_, err = client.Nodes(f.Client).Get(ctx, name)
+			Expect(client.IsNotFound(err)).To(BeTrue(), "the Node object %s must be deleted: %v", name, err)
+			Expect(framework.Docker(ctx, "ps", "-aq", "--filter", "name=^"+framework.ComponentContainer(name)+"$")).To(BeEmpty())
+			Expect(framework.Docker(ctx, "volume", "ls", "-q", "--filter", "name=^mini-k8s_"+name+"-var$")).To(BeEmpty())
+		}
 		moved := f.WaitForRunningPods(ctx, labels, 1)[0]
 		Expect(moved.UID).NotTo(Equal(pod.UID))
-		Expect(moved.Spec.NodeName).To(BeElementOf("worker-1", "worker-2"))
+		Expect(moved.Spec.NodeName).To(Equal("worker-1"))
+
+		By("scaling back to the default two workers: worker-2 returns with a fresh disk")
+		framework.KK(ctx, "cluster", "up", "--workers", "2")
+		scaledBack = true
 		framework.ExpectDefaultNodes(ctx)
+		node, err = client.Nodes(f.Client).Get(ctx, "worker-2")
+		framework.ExpectNoError(err)
+		Expect(corev1.IsNodeReady(node)).To(BeTrue())
 	})
 
 	It("should remove workloads on cluster down and restore them on cluster up", func(ctx SpecContext) {

@@ -403,7 +403,7 @@ make e2e E2E_FOCUS='sig-apps'     # 按名称运行子集
 
 **只在可重建、使用默认两个 worker 的本项目实验集群上运行。** Disruptive 用例会重启 control-plane 节点、
 一个控制面组件和一个 worker，停止一个 worker 约一分钟，对 worker 执行 cordon、drain 与 taint，清空某个节点上
-kube-proxy 的规则，执行 `cluster down/up`，并扩到三个 worker 再缩回。用例使用各自的命名空间和 Ingress host，Quick Start 部署的示例可以保留。
+kube-proxy 的规则，执行 `cluster down/up`，并把 worker 扩到三个、缩到一个、再恢复为两个。用例使用各自的命名空间和 Ingress host，Quick Start 部署的示例可以保留。
 
 每个新功能都必须附带 e2e 用例。
 
