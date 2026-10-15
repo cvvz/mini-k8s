@@ -38,6 +38,9 @@ Resources:
   kk scale deployment|replicaset NAME --replicas N
   kk rollout status|history|undo|pause|resume|restart deployment/NAME
             [--timeout DURATION] [--to-revision N]
+  kk cordon|uncordon NODE
+  kk drain NODE [--force] [--delete-emptydir-data] [--ignore-daemonsets] [--grace-period N] [--timeout D]
+  kk taint nodes NODE key[=value]:Effect ... | key[:Effect]- ...   [--overwrite]
   kk api-resources
   kk version
 

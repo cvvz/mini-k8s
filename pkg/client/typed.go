@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	coordinationv1 "mini-k8s/pkg/apis/coordination/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
 	metav1 "mini-k8s/pkg/apis/meta/v1"
 	networkingv1 "mini-k8s/pkg/apis/networking/v1"
@@ -77,6 +78,11 @@ func ReplicaSets(c *Client, ns string) Resource[appsv1.ReplicaSet, *appsv1.Repli
 // Ingresses returns an Ingress client.
 func Ingresses(c *Client, ns string) Resource[networkingv1.Ingress, *networkingv1.Ingress] {
 	return For[networkingv1.Ingress](c, scheme.Ingresses, ns)
+}
+
+// Leases returns a Lease client.
+func Leases(c *Client, ns string) Resource[coordinationv1.Lease, *coordinationv1.Lease] {
+	return For[coordinationv1.Lease](c, scheme.Leases, ns)
 }
 
 // InNamespace returns a copy of the client bound to ns.

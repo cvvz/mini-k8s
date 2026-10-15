@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	corev1 "mini-k8s/pkg/apis/core/v1"
 	"mini-k8s/pkg/client"
 	"mini-k8s/pkg/client/informers"
 	"mini-k8s/pkg/client/record"
@@ -14,7 +15,9 @@ import (
 	"mini-k8s/pkg/controller/garbagecollector"
 	"mini-k8s/pkg/controller/namespace"
 	"mini-k8s/pkg/controller/nodeipam"
+	"mini-k8s/pkg/controller/nodelifecycle"
 	"mini-k8s/pkg/controller/replicaset"
+	"mini-k8s/pkg/controller/tainteviction"
 )
 
 // runControllerManager runs every controller against shared informers.
@@ -28,6 +31,7 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	nodes := informers.New(client.Nodes(c), client.ListOptions{}, 30*time.Second)
 	services := informers.New(client.Services(c, ""), client.ListOptions{}, 30*time.Second)
 	endpoints := informers.New(client.Endpoints(c, ""), client.ListOptions{}, 30*time.Second)
+	leases := informers.New(client.Leases(c, corev1.NamespaceNodeLease), client.ListOptions{}, 0)
 	allocator, err := nodeipam.NewAllocator(env("MINI_CLUSTER_CIDR", nodeipam.DefaultClusterCIDR), 24)
 	if err != nil {
 		log.Fatal(err)
@@ -37,17 +41,21 @@ func runControllerManager(ctx context.Context, c *client.Client, _ string) {
 	ec := endpoint.NewController(c, services, pods, endpoints)
 	nc := namespace.NewNamespaceController(c, namespaces)
 	ipam := nodeipam.NewController(c, nodes, allocator, rec)
+	lifecycle := nodelifecycle.NewController(c, nodes, leases, pods, rec)
+	eviction := tainteviction.NewController(c, nodes, pods, rec)
 	gc := garbagecollector.NewGarbageCollector(c, garbagecollector.TrackedResources())
 	go rec.Run(ctx)
-	for _, run := range []func(context.Context){pods.Run, deployments.Run, rsets.Run, namespaces.Run, nodes.Run, services.Run, endpoints.Run} {
+	for _, run := range []func(context.Context){pods.Run, deployments.Run, rsets.Run, namespaces.Run, nodes.Run, services.Run, endpoints.Run, leases.Run} {
 		go run(ctx)
 	}
 	informers.WaitForSync(ctx, pods.HasSynced, deployments.HasSynced, rsets.HasSynced, namespaces.HasSynced, nodes.HasSynced,
-		services.HasSynced, endpoints.HasSynced)
+		services.HasSynced, endpoints.HasSynced, leases.HasSynced)
 	go rc.Run(ctx, 4)
 	go ec.Run(ctx, 4)
 	go nc.Run(ctx, 2)
 	go ipam.Run(ctx)
+	go lifecycle.Run(ctx)
+	go eviction.Run(ctx, 2)
 	go gc.Run(ctx)
 	log.Print("kube-controller-manager started")
 	dc.Run(ctx, 4)

@@ -14,7 +14,13 @@ import (
 // Strategy defaults and validates Pods; new Pods start Pending with their QoS
 // class and the spec is immutable (nodeName is set through the binding subresource).
 var Strategy = apiserver.Strategy{
-	Defaults: func(obj metav1.Object) { corev1.SetDefaultsPodSpec(&obj.(*corev1.Pod).Spec) },
+	Defaults: func(obj metav1.Object) {
+		spec := &obj.(*corev1.Pod).Spec
+		corev1.SetDefaultsPodSpec(spec)
+		// The DefaultTolerationSeconds admission plugin; on updates too, so a
+		// re-applied manifest that lists its own tolerations keeps them.
+		corev1.AddDefaultTolerations(spec)
+	},
 	PrepareForCreate: func(obj metav1.Object) {
 		pod := obj.(*corev1.Pod)
 		pod.Status = corev1.PodStatus{Phase: corev1.PodPending, QOSClass: corev1.GetPodQOS(&pod.Spec)}
@@ -24,6 +30,7 @@ var Strategy = apiserver.Strategy{
 		// Pods stored before a field gained a default compare as defaulted.
 		oldSpec := deepcopy.Copy(&old.(*corev1.Pod).Spec)
 		corev1.SetDefaultsPodSpec(oldSpec)
+		corev1.AddDefaultTolerations(oldSpec)
 		if !reflect.DeepEqual(obj.(*corev1.Pod).Spec, *oldSpec) {
 			return []string{"spec: Forbidden: pod spec is immutable after creation"}
 		}

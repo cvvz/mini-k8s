@@ -74,7 +74,7 @@ func New(cfg Config) *Server {
 
 // Bootstrap creates the namespaces every cluster has.
 func (s *Server) Bootstrap(ctx context.Context) error {
-	for _, name := range []string{corev1.NamespaceDefault, corev1.NamespaceSystem} {
+	for _, name := range []string{corev1.NamespaceDefault, corev1.NamespaceSystem, corev1.NamespaceNodeLease} {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
 		if _, err := s.createFlow(ctx, requestInfo{res: scheme.Namespaces}, ns, false); err != nil {
 			var se *statusError
@@ -200,7 +200,8 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, info requestIn
 	q := r.URL.Query()
 	dryRun := q.Get("dryRun") == "All"
 	sub := info.subresource
-	if sub != "" && sub != "status" && !(info.res.Resource == scheme.Pods.Resource && (sub == "binding" || sub == "log" || sub == "exec")) {
+	action := sub == "binding" || sub == "log" || sub == "exec" || sub == "eviction" // Pod subresources that are not the object
+	if sub != "" && sub != "status" && !(info.res.Resource == scheme.Pods.Resource && action) {
 		writeError(w, newStatus(http.StatusNotFound, metav1.ReasonNotFound, "%s has no subresource %q", info.res.Resource, sub))
 		return
 	}
@@ -227,9 +228,11 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, info requestIn
 		s.handleBinding(w, r, info)
 	case r.Method == http.MethodPost && sub == "exec":
 		s.handleExec(w, r, info)
-	case r.Method == http.MethodPut && info.name != "" && sub != "binding" && sub != "log" && sub != "exec":
+	case r.Method == http.MethodPost && sub == "eviction":
+		s.handleEviction(w, r, info, dryRun)
+	case r.Method == http.MethodPut && info.name != "" && !action:
 		s.handleUpdate(w, r, info, dryRun)
-	case r.Method == http.MethodPatch && info.name != "" && sub != "binding" && sub != "log" && sub != "exec":
+	case r.Method == http.MethodPatch && info.name != "" && !action:
 		s.handlePatch(w, r, info, dryRun)
 	case r.Method == http.MethodDelete && info.name != "" && sub == "":
 		s.handleDelete(w, r, info, dryRun)

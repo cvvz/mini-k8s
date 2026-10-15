@@ -415,3 +415,24 @@ func TestKubernetesServiceIsKeptCurrent(t *testing.T) {
 		t.Fatalf("Endpoints not updated: %+v", ep.Subsets)
 	}
 }
+
+// kk apply merge-patches the manifest's tolerations over the stored ones,
+// which include the default tolerations: re-applying must still work.
+func TestReapplyingPodTolerationsKeepsDefaults(t *testing.T) {
+	c, _ := newServer(t)
+	ctx := context.Background()
+	toleration := map[string]any{"key": "dedicated", "operator": "Exists", "effect": "NoSchedule"}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}},
+			Tolerations: []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}}}}
+	if _, err := client.Pods(c, "default").Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	patched, err := client.Pods(c, "default").Patch(ctx, "p", map[string]any{"spec": map[string]any{"tolerations": []any{toleration}}})
+	if err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	if len(patched.Spec.Tolerations) != 3 {
+		t.Fatalf("tolerations: %+v", patched.Spec.Tolerations)
+	}
+}

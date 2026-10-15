@@ -56,3 +56,44 @@ func (s *Server) handleBinding(w http.ResponseWriter, r *http.Request, info requ
 	}
 	writeError(w, errConflict(scheme.Pods, info.name))
 }
+
+// eviction is a policy/v1 Eviction: a request to delete a Pod gracefully,
+// as kubectl drain sends. Without PodDisruptionBudgets it always succeeds.
+type eviction struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	DeleteOptions     *metav1.DeleteOptions `json:"deleteOptions,omitempty"`
+}
+
+// handleEviction deletes the Pod like DELETE with the eviction's options.
+func (s *Server) handleEviction(w http.ResponseWriter, r *http.Request, info requestInfo, dryRun bool) {
+	body, err := readBody(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var e eviction
+	if err := decodeStrict(body, &e); err != nil {
+		writeError(w, errBadRequest("strict decoding error: %v", err))
+		return
+	}
+	if e.Name != "" && e.Name != info.name {
+		writeError(w, errBadRequest("name in URL does not match name in Eviction object"))
+		return
+	}
+	opts := metav1.DeleteOptions{}
+	if e.DeleteOptions != nil {
+		opts = *e.DeleteOptions
+	}
+	for attempt := 1; ; attempt++ {
+		_, err = s.deleteFlow(r.Context(), info, opts, dryRun)
+		if !isStaleWrite(err) || attempt == maxUnconditionalAttempts {
+			break
+		}
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, metav1.Status{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"}, Status: metav1.StatusSuccess, Code: http.StatusCreated})
+}
