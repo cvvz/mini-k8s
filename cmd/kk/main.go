@@ -45,6 +45,7 @@ Resources:
   kk scale deployment|replicaset|statefulset NAME --replicas N
   kk rollout status|history|undo|pause|resume|restart deployment|daemonset|statefulset/NAME
             [--timeout DURATION] [--to-revision N] [--revision N]
+  kk autoscale deployment|replicaset|statefulset NAME --max N [--min N] [--cpu-percent N | --cpu N%|QUANTITY]
   kk top nodes|pods [NAME] [-l SELECTOR] [--containers] [--sort-by cpu|memory]
   kk cordon|uncordon NODE
   kk drain NODE [--force] [--delete-emptydir-data] [--ignore-daemonsets] [--grace-period N] [--timeout D]
@@ -58,7 +59,7 @@ Global flags:
   -A, --all-namespaces   list across all namespaces
 
 TYPE accepts kubectl-style names: pods/pod/po, deployments/deploy, replicasets/rs, daemonsets/ds,
-statefulsets/sts, jobs, cronjobs/cj, services/svc, nodes/no, namespaces/ns, events/ev, configmaps/cm,
+statefulsets/sts, jobs, cronjobs/cj, horizontalpodautoscalers/hpa, services/svc, nodes/no, namespaces/ns, events/ev, configmaps/cm,
 secrets, persistentvolumeclaims/pvc. TYPE/NAME is also accepted (see kk api-resources).
 `
 

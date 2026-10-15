@@ -70,6 +70,8 @@ func (a *app) run(ctx context.Context, command string, p args) error {
 		return a.exec(ctx, p)
 	case "scale":
 		return a.scale(ctx, p)
+	case "autoscale":
+		return a.autoscale(ctx, p)
 	case "top":
 		return a.top(ctx, p)
 	case "rollout":
@@ -555,7 +557,8 @@ func (a *app) scale(ctx context.Context, p args) error {
 		return errors.New("--replicas must be a non-negative integer")
 	}
 	patch := map[string]any{"spec": map[string]any{"replicas": replicas}}
-	if err := a.client.Do(ctx, http.MethodPatch, res.Path(a.namespace, pos[1]), nil, "application/merge-patch+json", patch, nil); err != nil {
+	// Through the scale subresource, as kubectl scale does.
+	if err := a.client.Do(ctx, http.MethodPatch, res.Path(a.namespace, pos[1])+"/scale", nil, "application/merge-patch+json", patch, nil); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(a.out, "%s/%s scaled\n", qualifiedName(res), pos[1])

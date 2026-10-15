@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	autoscalingv2 "mini-k8s/pkg/apis/autoscaling/v2"
 	batchv1 "mini-k8s/pkg/apis/batch/v1"
 	coordinationv1 "mini-k8s/pkg/apis/coordination/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
@@ -106,6 +107,9 @@ var (
 		Namespaced: true, ShortNames: []string{"sts"}, HasStatus: true, New: func() metav1.Object { return &appsv1.StatefulSet{} }}
 	ControllerRevisions = ResourceInfo{Group: "apps", Version: "v1", Resource: "controllerrevisions", Singular: "controllerrevision",
 		Kind: "ControllerRevision", Namespaced: true, New: func() metav1.Object { return &appsv1.ControllerRevision{} }}
+	HorizontalPodAutoscalers = ResourceInfo{Group: "autoscaling", Version: "v2", Resource: "horizontalpodautoscalers",
+		Singular: "horizontalpodautoscaler", Kind: "HorizontalPodAutoscaler", Namespaced: true, ShortNames: []string{"hpa"},
+		HasStatus: true, New: func() metav1.Object { return &autoscalingv2.HorizontalPodAutoscaler{} }}
 	Jobs = ResourceInfo{Group: "batch", Version: "v1", Resource: "jobs", Singular: "job", Kind: "Job", Namespaced: true,
 		HasStatus: true, New: func() metav1.Object { return &batchv1.Job{} }}
 	CronJobs = ResourceInfo{Group: "batch", Version: "v1", Resource: "cronjobs", Singular: "cronjob", Kind: "CronJob",
@@ -118,7 +122,7 @@ var (
 
 // All lists every registered resource in discovery order.
 var All = []ResourceInfo{Namespaces, Nodes, Pods, Services, Endpoints, Events, ConfigMaps, Secrets, PersistentVolumes,
-	PersistentVolumeClaims, Deployments, ReplicaSets, DaemonSets, StatefulSets, ControllerRevisions, Jobs, CronJobs, Ingresses, Leases,
+	PersistentVolumeClaims, Deployments, ReplicaSets, DaemonSets, StatefulSets, ControllerRevisions, HorizontalPodAutoscalers, Jobs, CronJobs, Ingresses, Leases,
 	StorageClasses}
 
 // Lookup resolves a user-supplied name: plural, singular, short name, kind

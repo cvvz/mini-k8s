@@ -61,6 +61,10 @@ Kubernetes distribution, it is not `kubectl`-compatible, and it is not for produ
 - **Resource metrics**: kubelets serve `/metrics/resource` (CPU and memory from CRI and the
   node's cgroup); the metrics-server add-on scrapes them and serves `metrics.k8s.io/v1beta1`,
   which the API server proxies like kube-aggregator; `kk top nodes|pods`.
+- **Autoscaling**: the `scale` subresource of Deployments, ReplicaSets and StatefulSets
+  (`kk scale` uses it); autoscaling/v2 HorizontalPodAutoscalers on CPU or memory (utilization
+  of requests or average value, per Pod or per container) with Kubernetes' replica calculation,
+  stabilization windows and scaling policies; `kk autoscale`.
 - **Nodes like kind**: each node is a privileged container running its own containerd;
   the kubelet manages Pods over **CRI** (a sandbox per Pod, then its container);
   Ready only when the runtime, the Pod network and the sandbox image are ready.
@@ -184,7 +188,7 @@ container runtime) uses those open-source components as-is, configured but not m
 | Component | Responsibility | Status |
 | --- | --- | --- |
 | kube-apiserver | Kubernetes-style REST, watch, admission and validation, deletion semantics, subresources, cluster IP and node port allocation | done |
-| controller-manager | Deployment, ReplicaSet, DaemonSet, StatefulSet, Job, CronJob, TTL-after-finished, Endpoints, garbage collector, namespace, node IPAM, node lifecycle, taint-eviction, Pod garbage collector, PersistentVolume and PVC/PV protection controllers | done, growing |
+| controller-manager | Deployment, ReplicaSet, DaemonSet, StatefulSet, HorizontalPodAutoscaler, Job, CronJob, TTL-after-finished, Endpoints, garbage collector, namespace, node IPAM, node lifecycle, taint-eviction, Pod garbage collector, PersistentVolume and PVC/PV protection controllers | done, growing |
 | scheduler | Scheduling framework with pre-filter, filter and score plugins (taints, node affinity, resource fit, pod (anti-)affinity, spreading, volume binding), backoff queue, binding (asynchronous while volumes are provisioned) | done |
 | kubelet | Node registration and heartbeats, static Pods and mirror Pods, Pod lifecycle over CRI (the client side; `pkg/kubelet/kuberuntime`), probes, status, graceful termination, logs, CNI configuration, node-local DNS forwarder, resource metrics (`/metrics/resource`) | done |
 | client libraries | Generic REST client, informers, work queues, event recorder | done |
@@ -394,6 +398,8 @@ kk exec kv-0 -- /mini lookup kv-1.kv     # stable DNS names under the headless S
 kk scale statefulset kv --replicas 1     # kv-1 goes; its claim data-kv-1 stays for later
 kk top nodes                             # usage from metrics-server, refreshed every 10s
 kk top pods -A --sort-by cpu
+kk autoscale deployment web --min 2 --max 5 --cpu-percent 50   # a HorizontalPodAutoscaler
+kk get hpa                               # TARGETS: cpu: 3%/50%
 
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # another namespace, exposed by a NodePort Service
@@ -484,8 +490,8 @@ still not a cross-resource transaction.
 - No scheduler preemption, priorities or `topologySpreadConstraints` (replicas spread by
   default); no PodDisruptionBudgets (evictions always succeed). Heartbeats are faster than Kubernetes' defaults: Leases are
   renewed every 2 s and a node is Unknown after 15 s without one.
-- No HPA (M10b), RBAC or control-plane HA; the metrics pipeline has only resource metrics (no
-  custom or external metrics APIs). Jobs have no `podFailurePolicy`, `successPolicy` or
+- No RBAC or control-plane HA; the metrics pipeline has only resource metrics, so autoscalers
+  take Resource and ContainerResource metrics only (no Pods, Object or External metrics). Jobs have no `podFailurePolicy`, `successPolicy` or
   per-index backoff, and are tracked without the job-tracking finalizer. StatefulSets have no
   `maxUnavailable` (alpha in Kubernetes).
 
@@ -579,10 +585,12 @@ uses a temporary anonymous Docker configuration without modifying yours.
 | M9b | Jobs and CronJobs, TTL after finished, `kk create job` | ✅ |
 | M9c | StatefulSets with claim templates and retention policies, shared revision history | ✅ |
 | M10a | Resource metrics: kubelet `/metrics/resource`, metrics-server, the metrics.k8s.io API, `kk top` | ✅ |
+| M10b | HorizontalPodAutoscalers, the scale subresource, `kk autoscale` | ✅ |
 
 ## Design documentation
 
 - [v2 design specification (Chinese)](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md): architecture and milestones.
+- [M10b autoscaling plan (Chinese)](docs/superpowers/plans/2026-10-15-m10b-hpa.md)
 - [M10a metrics plan (Chinese)](docs/superpowers/plans/2026-10-15-m10a-metrics.md)
 - [M9c StatefulSet plan (Chinese)](docs/superpowers/plans/2026-10-15-m9c-statefulset.md)
 - [M9b Job and CronJob plan (Chinese)](docs/superpowers/plans/2026-10-15-m9b-job-cronjob.md)

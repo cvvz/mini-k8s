@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	appsv1 "mini-k8s/pkg/apis/apps/v1"
+	autoscalingv2 "mini-k8s/pkg/apis/autoscaling/v2"
 	batchv1 "mini-k8s/pkg/apis/batch/v1"
 	coordinationv1 "mini-k8s/pkg/apis/coordination/v1"
 	corev1 "mini-k8s/pkg/apis/core/v1"
@@ -369,6 +370,21 @@ func columnsFor(res scheme.ResourceInfo) []column {
 				sel, _ := ds(o).Spec.Selector.AsSelector()
 				return sel.String()
 			}},
+		}
+	case scheme.HorizontalPodAutoscalers.Resource:
+		hpa := func(o metav1.Object) *autoscalingv2.HorizontalPodAutoscaler {
+			return o.(*autoscalingv2.HorizontalPodAutoscaler)
+		}
+		return []column{nameColumn(),
+			{header: "REFERENCE", value: func(o metav1.Object, _ time.Time) string {
+				ref := hpa(o).Spec.ScaleTargetRef
+				return ref.Kind + "/" + ref.Name
+			}},
+			{header: "TARGETS", value: func(o metav1.Object, _ time.Time) string { return hpaTargets(hpa(o)) }},
+			{header: "MINPODS", value: func(o metav1.Object, _ time.Time) string { return int32Ptr(hpa(o).Spec.MinReplicas) }},
+			{header: "MAXPODS", value: func(o metav1.Object, _ time.Time) string { return fmt.Sprint(hpa(o).Spec.MaxReplicas) }},
+			{header: "REPLICAS", value: func(o metav1.Object, _ time.Time) string { return fmt.Sprint(hpa(o).Status.CurrentReplicas) }},
+			ageColumn(),
 		}
 	case scheme.Jobs.Resource:
 		job := func(o metav1.Object) *batchv1.Job { return o.(*batchv1.Job) }
@@ -771,6 +787,8 @@ func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj m
 		if p := o.Spec.PersistentVolumeClaimRetentionPolicy; p != nil {
 			fmt.Fprintf(tw, "PVC Retention Policy:\twhenDeleted: %s, whenScaled: %s\n", p.WhenDeleted, p.WhenScaled)
 		}
+	case *autoscalingv2.HorizontalPodAutoscaler:
+		describeHPA(tw, o)
 	case *batchv1.Job:
 		fmt.Fprintf(tw, "Selector:\t%s\n", formatSelector(o.Spec.Selector))
 		fmt.Fprintf(tw, "Parallelism:\t%s\n", int32Ptr(o.Spec.Parallelism))
