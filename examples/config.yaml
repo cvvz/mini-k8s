@@ -1,0 +1,61 @@
+# Configuration for a Pod: a ConfigMap and a Secret as environment variables
+# and as files, and the Pod's own labels through the downward API.
+#   kk apply -f examples/config.yaml
+#   kk exec config-demo -- /mini env
+#   kk exec config-demo -- /mini ls /etc/config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-config
+data:
+  greeting: hello
+  app.properties: |
+    color=blue
+    size=large
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: demo-secret
+stringData:
+  password: s3cr3t
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: config-demo
+  labels:
+    app: config-demo
+    tier: backend
+spec:
+  containers:
+    - name: app
+      image: mini-k8s:local
+      imagePullPolicy: Never
+      command: ["/mini", "sleep", "1h"]
+      env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef: {fieldPath: metadata.name}
+        - name: GREETING
+          valueFrom:
+            configMapKeyRef: {name: demo-config, key: greeting}
+        - name: MESSAGE
+          value: "$(GREETING) from $(POD_NAME)"
+      envFrom:
+        - prefix: SECRET_
+          secretRef: {name: demo-secret}
+      volumeMounts:
+        - {name: config, mountPath: /etc/config}
+        - {name: secret, mountPath: /etc/secret}
+        - {name: podinfo, mountPath: /etc/podinfo}
+  volumes:
+    - name: config
+      configMap: {name: demo-config}
+    - name: secret
+      secret: {secretName: demo-secret, defaultMode: 0400}
+    - name: podinfo
+      downwardAPI:
+        items:
+          - path: labels
+            fieldRef: {fieldPath: metadata.labels}

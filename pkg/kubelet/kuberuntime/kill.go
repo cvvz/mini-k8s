@@ -71,6 +71,7 @@ func (m *Manager) forget(uid string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.sandboxRuns, uid)
+	delete(m.mountFailures, uid)
 	for id, owner := range m.probeKilled {
 		if owner == uid {
 			delete(m.probeKilled, id)

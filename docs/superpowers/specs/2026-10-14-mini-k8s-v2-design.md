@@ -293,7 +293,8 @@ RESTARTS、AGE、IP、NODE 等）。全局参数 `-n/--namespace`、`-A`、`-l`�
 | M7a ✅ | 节点租约与生命周期、污点驱逐、Eviction API、cordon/drain/taint（落地记录见 §12.6） |
 | M7b ✅ | 调度框架（资源、nodeSelector/亲和性、Pod 亲和/反亲和、打散）（落地记录见 §12.7） |
 | M7c ✅ | worker 扩缩（`kk cluster up --workers N`）、Pod 垃圾回收（落地记录见 §12.8） |
-| M8 | ConfigMap、Secret、卷、PVC/PV |
+| M8a ✅ | ConfigMap、Secret、env `valueFrom`/`envFrom`、downward API、configMap/secret/downwardAPI/projected 卷（落地记录见 §12.9） |
+| M8b | PV/PVC、StorageClass 与动态供给（local-path 式：PV 带节点亲和，`WaitForFirstConsumer`） |
 | M9 | DaemonSet、Job、CronJob、StatefulSet |
 | M10+ | 指标/top/HPA、Leader Election、RBAC 简化版、持续重构与缺陷修复 |
 
@@ -466,6 +467,19 @@ apps、apimachinery、生命周期）全部通过。要点与 §9 设计的差�
   再以宽限期 0 删除。集群停着时缩容（无法 drain）靠它清理。
 - **e2e**：节点相关的辅助函数改为遍历正在运行的节点容器；套件开始时检查节点恰为默认的三个。
 
+### 12.9 M8a 落地记录
+
+按[实施计划](../plans/2026-10-15-m8a-configmap-secret.md)落地，相关 e2e（storage、node、network）全部通过。要点：
+
+- **API**：ConfigMap、Secret 两个资源；Secret 的 `stringData` 在 Strategy 的 Defaults 中合并进 `data` 后丢弃，`type` 默认
+  `Opaque`；校验与不可变规则的文案以 AKS 实测为准。Pod 校验扩展 env（1.34 起放宽的变量名规则）、envFrom、四种新卷与
+  downward API 字段集合；fieldRef 的 apiVersion 与这些卷的 `defaultMode`（0644）按 Kubernetes 填默认值。
+- **kubelet**：ConfigMap、Secret 用集群范围的 informer 缓存；启动容器前解析 env（envFrom → env，`$(VAR)` 展开，再补 Service
+  变量），失败报 `CreateContainerConfigError`；每次同步 Pod 时重算卷内容并经原子写入器落盘（`pkg/volume`），内容未变不写；
+  secret、downwardAPI、projected 卷在 tmpfs 上，这四种卷一律只读挂载。卷准备失败时 Pod 停在 `ContainerCreating`，`FailedMount`
+  事件按 1s 起翻倍、上限 2 分钟的节奏重复（hostPath 类型检查失败同样如此，原先报 `CreateContainerConfigError`）。
+- **工具**：`kk create configmap|secret generic|secret tls`；`mini env`、`mini ls` 便于在 Pod 内查看。
+
 ## 13. 非目标
 
 kubectl 兼容、CRD/聚合 API、多机器部署、网络策略、CSI、
@@ -576,7 +590,9 @@ M2 按上述设计落地（[实施计划](../plans/2026-10-15-m2-kind-nodes.md)�
 | `pkg/proxy/iptables` | kube-proxy 的 iptables 模式 | `pkg/proxy/iptables` |
 | `pkg/ingress` | Ingress 控制器（取代 M6 之前的单 Service 网关） | 无直接对应（ingress-nginx 等外部项目） |
 | `pkg/dns` | 集群 DNS 服务器（报文编解码、kubernetes 记录、上游转发） | 无直接对应（CoreDNS 及其 kubernetes 插件） |
-| `pkg/util/{ptr,deepcopy,validation}` | 通用小工具 | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation` |
+| `pkg/fieldpath` | downward API：Pod 字段路径与容器资源取值 | `pkg/fieldpath`、`pkg/api/v1/resource` |
+| `pkg/volume` | configMap/secret/downwardAPI/projected 卷的内容与原子写入器 | `pkg/volume/util`（AtomicWriter）与各卷插件 |
+| `pkg/util/{ptr,deepcopy,validation,expansion}` | 通用小工具（`expansion` 展开 `$(VAR)`） | `k8s.io/utils/ptr`、`apimachinery/pkg/util/validation`、`third_party/forked/golang/expansion` |
 | `test/e2e` | Ginkgo 端到端测试 | `test/e2e` |
 | `test/integration` | 真实 etcd + 进程内 API Server 的集成测试与框架 | `test/integration` |
 

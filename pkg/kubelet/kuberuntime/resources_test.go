@@ -31,7 +31,7 @@ func TestLinuxResourcesMapRequestsAndLimitsToCgroups(t *testing.T) {
 	}
 	pod := testPod()
 	pod.Spec.Containers[0].Resources.Limits = corev1.ResourceList{"memory": q("32Mi")}
-	if cfg := containerConfig(pod, pod.Spec.Containers[0], 0, nil, containerExtras{}); cfg.Linux.Resources.MemoryLimitInBytes != 32<<20 {
+	if cfg := containerConfig(pod, pod.Spec.Containers[0], 0, mountedVolumes{}, containerExtras{}); cfg.Linux.Resources.MemoryLimitInBytes != 32<<20 {
 		t.Fatalf("container config: %+v", cfg.Linux.Resources)
 	}
 }

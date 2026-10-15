@@ -44,6 +44,11 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   Kubernetes kubelet 的规则计算；liveness、readiness、startup 探针（httpGet、tcpSocket、exec）；
   CPU 与内存的 requests/limits 经 cgroup 生效（超限 `OOMKilled`）及 QoS 等级；`emptyDir`（磁盘或内存）与
   `hostPath` 卷；`hostNetwork`；`kk exec` 在容器内执行命令。
+- **配置**：ConfigMap 与 Secret（`stringData`、带类型的 Secret、不可变）；容器可以从它们（`valueFrom`、`envFrom`）、
+  Pod 字段以及自身的 requests/limits（downward API）取得环境变量，值、command 与 args 中的 `$(VAR)` 会被展开；
+  configMap、secret、downwardAPI、projected 卷原子写入（rename 切换 `..data`）、只读挂载（secret 在内存中），并随来源
+  变化而更新。引用的 ConfigMap 或 Secret 不存在时 Pod 一直等待（`CreateContainerConfigError`，或 `ContainerCreating`
+  并伴随 `FailedMount` 事件），创建后自动启动。
 - **kubelet**：节点注册、Lease 续约与状态上报；从清单目录运行 static Pod 并维护 mirror Pod；每个 Pod 一个
   worker；带退避的重启（CrashLoopBackOff）；`imagePullPolicy` 与镜像拉取失败上报
   （ErrImagePull/ImagePullBackOff）；节点重启后重建沙箱；
@@ -66,8 +71,8 @@ containerd 做容器运行时，并用本地 Docker Engine 承载集群的“机
   `kk describe` 会展示对象关联的事件。
 - **kk**：`get`（`-o wide|json|yaml|name`、`-l`、`--field-selector`、`-A`、`-w`）、`describe`、
   `apply`/`create`（先整体 dry-run 再写入）、`delete`（`--grace-period`、`--force`、
-  `--cascade`）、`logs -f/-p/-c`、`exec`、`scale`、`rollout status|history|undo|pause|resume|restart`、`cordon`/`uncordon`/`drain`/`taint`、`label`、`api-resources`、`version`、集群生命周期命令，
-  以及 `image load`（把本地镜像导入各节点）。
+  `--cascade`）、`logs -f/-p/-c`、`exec`、`scale`、`rollout status|history|undo|pause|resume|restart`、`cordon`/`uncordon`/`drain`/`taint`、`label`、`api-resources`、`version`、
+  `create configmap|secret generic|secret tls`、集群生命周期命令，以及 `image load`（把本地镜像导入各节点）。
 
 ```mermaid
 flowchart TB
@@ -305,6 +310,14 @@ kk taint nodes worker-2 dedicated-                  # 再去掉它
 kk label nodes worker-2 disk=ssd         # 带 nodeSelector disk: ssd 的 Pod 会调度到 worker-2
 kk scale deployment web --replicas 4     # 副本被打散：每个 worker 两个
 
+kk apply -f examples/config.yaml         # ConfigMap 与 Secret 作为环境变量和文件
+kk exec config-demo -- /mini env         # GREETING=hello、MESSAGE=hello from config-demo、SECRET_password=…
+kk exec config-demo -- /mini ls /etc/config      # greeting -> ..data/greeting：文件原子切换
+kk label pod config-demo tier=web --overwrite    # 几秒内 /etc/podinfo/labels 随之更新，
+kk exec config-demo -- /mini cat /etc/podinfo/labels    # 修改 ConfigMap 后其文件同样会更新
+kk create secret generic db --from-literal=password=s3cr3t   # 也可用 --from-file=[KEY=]PATH
+kk describe secret db                    # 只显示大小，不显示值
+
 kk create namespace team
 kk apply -n team -f examples/hello.yaml  # 在另一个命名空间部署，用 NodePort Service 暴露
 kk get svc -n team hello                 # PORT(S) 显示 80:NODE_PORT/TCP
@@ -353,7 +366,9 @@ kk image load my-app:v1
 | Namespace | `v1` | 创建、删除（Terminating → 清空内容 → 删除）。启动时自动创建 `default`、`kube-system`。 |
 | Node | `v1` | 由 kubelet 注册，上报 `capacity`/`allocatable`（cpu、memory、pods）与角色标签；`spec.podCIDR` 由 node IPAM 一次性分配；调度器与污点驱逐控制器遵守 `spec.unschedulable` 与 `spec.taints`（NoSchedule、PreferNoSchedule、带 `timeAdded` 的 NoExecute）；control-plane 节点带污点 `node-role.kubernetes.io/control-plane:NoSchedule`；失联节点变为 `Unknown` 并带 `node.kubernetes.io/unreachable` 污点。 |
 | Lease | `coordination.k8s.io/v1` | `holderIdentity`、`leaseDurationSeconds`、`renewTime`；每个 kubelet 续约 `kube-node-lease/<节点名>`。 |
-| Pod | `v1` | `containers`（一个或多个）与 `initContainers`：`name`、`image`、`command`、`args`、`env`、`ports`、`resources`（cpu、memory）、`livenessProbe`/`readinessProbe`/`startupProbe`（init 容器不可用）、`volumeMounts`；`volumes`（`emptyDir` 支持 `medium`/`sizeLimit`，`hostPath` 支持 `type`）；`hostNetwork`；`hostname`、`subdomain`；`dnsPolicy`（ClusterFirst、ClusterFirstWithHostNet、Default、None）与 `dnsConfig`；`enableServiceLinks`；`tolerations`；`nodeSelector`；`affinity`（`nodeAffinity`、`podAffinity`、`podAntiAffinity`，required 与 preferred，`topologyKey`）；调度时计入 `resources.requests`；`imagePullPolicy`（Always、IfNotPresent、Never，默认值同 Kubernetes）；`restartPolicy`（Always、OnFailure、Never）；`terminationGracePeriodSeconds`；`nodeName`。创建后 spec 不可变。static Pod 以 mirror Pod 呈现（只读；删除后 kubelet 会重建）。子资源 `log` 与 `exec`。 |
+| Pod | `v1` | `containers`（一个或多个）与 `initContainers`：`name`、`image`、`command`、`args`、`env`（带 `$(VAR)` 引用的 `value`，或 `valueFrom` 的 `configMapKeyRef`、`secretKeyRef`、`fieldRef`、`resourceFieldRef`）、`envFrom`（`configMapRef`、`secretRef`、`prefix`）、`ports`、`resources`（cpu、memory）、`livenessProbe`/`readinessProbe`/`startupProbe`（init 容器不可用）、`volumeMounts`；`volumes`（`emptyDir` 支持 `medium`/`sizeLimit`，`hostPath` 支持 `type`，`configMap`、`secret`、`downwardAPI`、`projected` 支持 `items`、`defaultMode`、`optional`）；`hostNetwork`；`hostname`、`subdomain`；`dnsPolicy`（ClusterFirst、ClusterFirstWithHostNet、Default、None）与 `dnsConfig`；`enableServiceLinks`；`tolerations`；`nodeSelector`；`affinity`（`nodeAffinity`、`podAffinity`、`podAntiAffinity`，required 与 preferred，`topologyKey`）；调度时计入 `resources.requests`；`imagePullPolicy`（Always、IfNotPresent、Never，默认值同 Kubernetes）；`restartPolicy`（Always、OnFailure、Never）；`terminationGracePeriodSeconds`；`nodeName`。创建后 spec 不可变。static Pod 以 mirror Pod 呈现（只读；删除后 kubelet 会重建）。子资源 `log` 与 `exec`。 |
+| ConfigMap | `v1` | `data`、`binaryData`（键须匹配 `[-._a-zA-Z0-9]+`，总计不超过 1 MiB）、`immutable`。 |
+| Secret | `v1` | `data`（base64）、只写的 `stringData`（合并进 `data`）、`type`（默认 `Opaque`，不可变；`kubernetes.io/tls`、`basic-auth`、`ssh-auth`、`dockerconfigjson` 必须带相应的键）、`immutable`；可按 `type` 字段选择。 |
 | Deployment | `apps/v1` | `replicas`（默认 1）、`selector`（matchLabels/matchExpressions，创建后不可变）、`template`（`restartPolicy` 必须为 Always）、`strategy`（RollingUpdate 的 `maxSurge`/`maxUnavailable` 默认各 25%，或 Recreate）、`minReadySeconds`、`revisionHistoryLimit`（10）、`paused`、`progressDeadlineSeconds`（600）。每个模板版本对应一个 ReplicaSet；注解 `deployment.kubernetes.io/revision` 与 `kubernetes.io/change-cause`。 |
 | ReplicaSet | `apps/v1` | `replicas`、`selector`（不可变）、`template`、`minReadySeconds`；通常由 Deployment 管理。 |
 | Service | `v1` | `type` 为 ClusterIP（默认）、NodePort 或 ExternalName（`externalName`）；`selector`（可省略：此时由用户自己写 Endpoints）；`ports`（`name`、`port`、`targetPort` 为数字或容器端口名、`protocol` TCP/UDP、`nodePort` 取自 30000-32767）；`clusterIP`（未指定时从 `10.96.0.0/12` 分配，`None` 表示 headless，创建后不可变）；`publishNotReadyAddresses`；`sessionAffinity` None/ClientIP 及 `sessionAffinityConfig.clientIP.timeoutSeconds`。`default/kubernetes`（`10.96.0.1`，`443/TCP`）由 API Server 维护。 |
@@ -367,7 +382,7 @@ kk image load my-app:v1
 
 ## 当前限制（后续里程碑会解决）
 
-- 还没有 ConfigMap、Secret 和持久卷（M8）；不支持 `subPath` 与 `hostPort`。`kk exec` 把命令执行完再返回输出，
+- 还没有持久卷（M8b）；不支持 `subPath`、`hostPort`、ServiceAccount 与投射的 ServiceAccount token。`kk exec` 把命令执行完再返回输出，
   不支持交互式会话（stdin/tty），与 Kubernetes 的流式 exec 不同。
 - 滚动更新过程中修改 `replicas` 不做按比例扩缩；ReplicaSet 不收养孤儿 Pod。`kk apply` 是 merge patch：
   把 Deployment 改成 `Recreate` 时需要在清单中写 `rollingUpdate: null`。
@@ -460,12 +475,14 @@ unset MINI_TOKEN
 | M7a | 节点租约与生命周期、基于污点的驱逐、Eviction API、cordon/drain/taint | ✅ |
 | M7b | 调度框架：资源适配、nodeSelector 与亲和性、Pod 亲和/反亲和、打散 | ✅ |
 | M7c | 更多 worker（`kk cluster up --workers N`）、Pod 垃圾回收 | ✅ |
-| M8 | ConfigMap、Secret、卷、PVC | 计划中 |
+| M8a | ConfigMap、Secret、`valueFrom`/`envFrom`、downward API、投射卷 | ✅ |
+| M8b | PersistentVolume 与 PVC、动态供给 | 计划中 |
 | M9 | DaemonSet、Job、CronJob、StatefulSet | 计划中 |
 
 ## 设计文档
 
 - [v2 设计规格](docs/superpowers/specs/2026-10-14-mini-k8s-v2-design.md)：整体架构与里程碑。
+- [M8a ConfigMap 与 Secret 计划](docs/superpowers/plans/2026-10-15-m8a-configmap-secret.md)
 - [M7c worker 扩缩计划](docs/superpowers/plans/2026-10-15-m7c-worker-scaling.md)
 - [M7b 调度框架计划](docs/superpowers/plans/2026-10-15-m7b-scheduling-framework.md)
 - [M7a 节点生命周期计划](docs/superpowers/plans/2026-10-15-m7a-node-lifecycle.md)

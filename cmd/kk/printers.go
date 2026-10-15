@@ -328,6 +328,20 @@ func columnsFor(res scheme.ResourceInfo) []column {
 			{header: "ENDPOINTS", value: func(o metav1.Object, _ time.Time) string { return formatEndpoints(o.(*corev1.Endpoints)) }},
 			ageColumn(),
 		}
+	case scheme.ConfigMaps.Resource:
+		return []column{nameColumn(),
+			{header: "DATA", value: func(o metav1.Object, _ time.Time) string {
+				cm := o.(*corev1.ConfigMap)
+				return fmt.Sprint(len(cm.Data) + len(cm.BinaryData))
+			}},
+			ageColumn(),
+		}
+	case scheme.Secrets.Resource:
+		return []column{nameColumn(),
+			{header: "TYPE", value: func(o metav1.Object, _ time.Time) string { return o.(*corev1.Secret).Type }},
+			{header: "DATA", value: func(o metav1.Object, _ time.Time) string { return fmt.Sprint(len(o.(*corev1.Secret).Data)) }},
+			ageColumn(),
+		}
 	case scheme.Leases.Resource:
 		return []column{nameColumn(),
 			{header: "HOLDER", value: func(o metav1.Object, _ time.Time) string {
@@ -486,6 +500,42 @@ func indentYAML(v any, prefix string) string {
 	return b.String()
 }
 
+// describeData shows a ConfigMap's data like kubectl describe, and only the
+// sizes of a Secret's values.
+func describeData(w io.Writer, obj metav1.Object) error {
+	var b strings.Builder
+	switch o := obj.(type) {
+	case *corev1.ConfigMap:
+		b.WriteString("\nData\n====\n")
+		for _, k := range sortedKeys(o.Data) {
+			fmt.Fprintf(&b, "%s:\n----\n%s\n\n", k, o.Data[k])
+		}
+		b.WriteString("\nBinaryData\n====\n")
+		for _, k := range sortedKeys(o.BinaryData) {
+			fmt.Fprintf(&b, "%s: %d bytes\n", k, len(o.BinaryData[k]))
+		}
+		b.WriteString("\n")
+	case *corev1.Secret:
+		fmt.Fprintf(&b, "\nType:  %s\n\nData\n====\n", o.Type)
+		for _, k := range sortedKeys(o.Data) {
+			fmt.Fprintf(&b, "%s:  %d bytes\n", k, len(o.Data[k]))
+		}
+	default:
+		return nil
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj metav1.Object) error {
 	m := obj.GetObjectMeta()
 	now := a.now()
@@ -523,6 +573,9 @@ func (a *app) describeObject(ctx context.Context, res scheme.ResourceInfo, obj m
 		fmt.Fprintf(tw, "InternalIP:\t%s\n", orNone(o.InternalIP()))
 	}
 	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if err := describeData(a.out, obj); err != nil {
 		return err
 	}
 	data, _ := json.Marshal(obj)

@@ -92,14 +92,17 @@ var _ = framework.SIGDescribe("node", "Volumes and host network", func() {
 			mount(framework.DemoContainer(), map[string]any{"name": "host", "mountPath": "/host"})),
 			map[string]any{"name": "host", "hostPath": map[string]any{"path": missing, "type": "Directory"}})
 		f.Apply(ctx, obj)
-		pod := f.WaitForPod(ctx, "nodir", "reports the volume error", func(p *corev1.Pod) bool {
+		// Like the kubelet: the Pod waits in ContainerCreating and FailedMount
+		// events explain why.
+		f.WaitForEvent(ctx, "nodir", "FailedMount")
+		Expect(f.Events(ctx, "nodir")).To(ContainElement(HaveField("Message",
+			`MountVolume.SetUp failed for volume "host" : hostPath type check failed: `+missing+` is not a directory`)))
+		pod := f.WaitForPod(ctx, "nodir", "waits for its volume", func(p *corev1.Pod) bool {
 			cs := p.Status.ContainerStatuses
-			return len(cs) == 1 && cs[0].State.Waiting != nil && cs[0].State.Waiting.Reason == "CreateContainerConfigError"
+			return len(cs) == 1 && cs[0].State.Waiting != nil && cs[0].State.Waiting.Reason == "ContainerCreating"
 		})
-		Expect(pod.Status.ContainerStatuses[0].State.Waiting.Message).To(Equal(
-			`MountVolume.SetUp failed for volume "host": hostPath type check failed: ` + missing + ` is not a directory`))
-		Expect(f.KK(ctx, "get", "pod", "nodir")).To(MatchRegexp(`nodir\s+0/1\s+CreateContainerConfigError`))
-		f.WaitForEvent(ctx, "nodir", "Failed")
+		Expect(pod.Status.Phase).To(Equal(corev1.PodPending))
+		Expect(f.KK(ctx, "get", "pod", "nodir")).To(MatchRegexp(`nodir\s+0/1\s+ContainerCreating`))
 	})
 
 	It("should run hostNetwork Pods in the node's network namespace", func(ctx SpecContext) {

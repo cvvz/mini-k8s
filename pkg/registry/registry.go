@@ -7,11 +7,13 @@ import (
 	"mini-k8s/pkg/registry/apps/deployment"
 	"mini-k8s/pkg/registry/apps/replicaset"
 	"mini-k8s/pkg/registry/coordination/lease"
+	"mini-k8s/pkg/registry/core/configmap"
 	"mini-k8s/pkg/registry/core/endpoints"
 	"mini-k8s/pkg/registry/core/event"
 	"mini-k8s/pkg/registry/core/namespace"
 	"mini-k8s/pkg/registry/core/node"
 	"mini-k8s/pkg/registry/core/pod"
+	"mini-k8s/pkg/registry/core/secret"
 	"mini-k8s/pkg/registry/core/service"
 	"mini-k8s/pkg/registry/networking/ingress"
 	"mini-k8s/pkg/scheme"
@@ -44,6 +46,8 @@ func New(store *etcd3.Store, prefix string) *Registry {
 			scheme.Services.Resource:    service.NewStrategy(allocators),
 			scheme.Endpoints.Resource:   endpoints.Strategy,
 			scheme.Events.Resource:      event.Strategy,
+			scheme.ConfigMaps.Resource:  configmap.Strategy,
+			scheme.Secrets.Resource:     secret.Strategy,
 			scheme.Deployments.Resource: deployment.Strategy,
 			scheme.ReplicaSets.Resource: replicaset.Strategy,
 			scheme.Ingresses.Resource:   ingress.Strategy,

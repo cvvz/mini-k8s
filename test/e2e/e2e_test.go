@@ -1,5 +1,5 @@
 // Package e2e is the mini-k8s end-to-end suite. Specs live in per-area
-// packages (apps, node, network, apimachinery, lifecycle) and register
+// packages (apps, node, network, storage, apimachinery, lifecycle) and register
 // themselves through blank imports, like Kubernetes' test/e2e.
 //
 // The suite mutates the running project cluster and therefore only runs with
@@ -22,6 +22,7 @@ import (
 	_ "mini-k8s/test/e2e/network"
 	_ "mini-k8s/test/e2e/node"
 	_ "mini-k8s/test/e2e/scheduling"
+	_ "mini-k8s/test/e2e/storage"
 )
 
 func TestE2E(t *testing.T) {

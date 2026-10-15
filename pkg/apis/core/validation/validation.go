@@ -153,11 +153,7 @@ func validateContainers(path string, containers []corev1.Container, seen map[str
 		default:
 			errs = append(errs, fmt.Sprintf(`%s.imagePullPolicy: Unsupported value: %q: supported values: "Always", "IfNotPresent", "Never"`, p, c.ImagePullPolicy))
 		}
-		for _, e := range c.Env {
-			if !validation.IsEnvVarName(e.Name) {
-				errs = append(errs, fmt.Sprintf("%s.env: Invalid value: %q is not a valid variable name", p, e.Name))
-			}
-		}
+		errs = append(errs, validateEnv(p, c)...)
 		for _, port := range c.Ports {
 			if port.ContainerPort < 1 || port.ContainerPort > 65535 {
 				errs = append(errs, p+".ports: Invalid value: containerPort must be 1-65535")
@@ -208,31 +204,24 @@ func validateVolumes(path string, volumes []corev1.Volume) (map[string]bool, []s
 			errs = append(errs, fmt.Sprintf("%s.name: Duplicate value: %q", p, v.Name))
 		}
 		names[v.Name] = true
-		sources := 0
-		if e := v.EmptyDir; e != nil {
-			sources++
-			if e.Medium != "" && e.Medium != corev1.StorageMediumMemory {
-				errs = append(errs, fmt.Sprintf(`%s.emptyDir.medium: Unsupported value: %q: supported values: "", "Memory"`, p, e.Medium))
-			}
-		}
-		if h := v.HostPath; h != nil {
-			sources++
-			if !strings.HasPrefix(h.Path, "/") {
-				errs = append(errs, fmt.Sprintf("%s.hostPath.path: Invalid value: %q: must be an absolute path", p, h.Path))
-			}
-			if h.Type != nil {
-				switch *h.Type {
-				case "", corev1.HostPathDirectoryOrCreate, corev1.HostPathDirectory, corev1.HostPathFileOrCreate, corev1.HostPathFile:
-				default:
-					errs = append(errs, fmt.Sprintf(`%s.hostPath.type: Unsupported value: %q: supported values: "", "DirectoryOrCreate", "Directory", "FileOrCreate", "File"`, p, *h.Type))
-				}
-			}
-		}
-		if sources != 1 {
-			errs = append(errs, p+": Required value: must specify exactly one of emptyDir, hostPath")
-		}
+		errs = append(errs, validateVolumeSource(p, v.VolumeSource)...)
 	}
 	return names, errs
+}
+
+func validateHostPath(p string, h *corev1.HostPathVolumeSource) []string {
+	var errs []string
+	if !strings.HasPrefix(h.Path, "/") {
+		errs = append(errs, fmt.Sprintf("%s.path: Invalid value: %q: must be an absolute path", p, h.Path))
+	}
+	if h.Type != nil {
+		switch *h.Type {
+		case "", corev1.HostPathDirectoryOrCreate, corev1.HostPathDirectory, corev1.HostPathFileOrCreate, corev1.HostPathFile:
+		default:
+			errs = append(errs, fmt.Sprintf(`%s.type: Unsupported value: %q: supported values: "", "DirectoryOrCreate", "Directory", "FileOrCreate", "File"`, p, *h.Type))
+		}
+	}
+	return errs
 }
 
 // cleanPath normalises a mount path for duplicate detection.

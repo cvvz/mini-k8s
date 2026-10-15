@@ -65,6 +65,16 @@ func Events(c *Client, ns string) Resource[corev1.Event, *corev1.Event] {
 	return For[corev1.Event](c, scheme.Events, ns)
 }
 
+// ConfigMaps returns a ConfigMap client.
+func ConfigMaps(c *Client, ns string) Resource[corev1.ConfigMap, *corev1.ConfigMap] {
+	return For[corev1.ConfigMap](c, scheme.ConfigMaps, ns)
+}
+
+// Secrets returns a Secret client.
+func Secrets(c *Client, ns string) Resource[corev1.Secret, *corev1.Secret] {
+	return For[corev1.Secret](c, scheme.Secrets, ns)
+}
+
 // Deployments returns a Deployment client.
 func Deployments(c *Client, ns string) Resource[appsv1.Deployment, *appsv1.Deployment] {
 	return For[appsv1.Deployment](c, scheme.Deployments, ns)
